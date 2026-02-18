@@ -18,8 +18,17 @@ If `BOOTSTRAP.md` exists, that's your birth certificate. Follow it, figure out w
 |------|------|------|
 | Identity, tone, how to respond | `SOUL.md` | Spec/personality decisions, voice |
 | User preferences, constraints | `USER.md` | Interpreting requests, constraints |
-| Recent context | `memory/YYYY-MM-DD.md` | Only the range you need (today, yesterday, or specific date) |
-| Long-term direction | `MEMORY.md` | Main session only, and only when you need it |
+| Recent context | `memory/YYYY-MM-DD.md` | Only if file exists; only the range you need |
+| Long-term direction | `MEMORY.md` | Main session only, when needed; only if it exists |
+| Project spec / what to do | `docs/INDEX.md` then `docs/CURRENT_TASK.md` | When `docs/` exists; **start with INDEX only** |
+| Other project docs | `docs/*` by heading | When `docs/` exists; only needed sections; max 400 lines per read |
+
+### Docs (when `docs/` exists) — INDEX-first, TPM/429 priority
+
+- **First** read only `docs/INDEX.md` (and if needed for "what now", `docs/CURRENT_TASK.md`). Do not read the rest of the spec "just in case."
+- Other docs: only the **sections/headings** you need — don't load whole files.
+- **Max 400 lines** per reference (single read). Need more → narrow the scope.
+- **Forbidden:** reading full SPEC or full doc set "just in case."
 
 ### Token discipline
 
@@ -28,16 +37,16 @@ If `BOOTSTRAP.md` exists, that's your birth certificate. Follow it, figure out w
 - **Use conclusions** — after reading, bring only the relevant conclusion into the conversation, not the whole file.
 - **Read selectively** — decide what's needed for this task, then read that.
 
-## Memory
+## Memory (only when it exists)
 
-You wake up fresh each session. These files are your continuity:
+Use memory files **only if the folder or file already exists**. Do **not** create `memory/` or any missing memory files; do **not** explore or probe for them.
 
-- **Daily notes:** `memory/YYYY-MM-DD.md` (create `memory/` if needed) — raw logs of what happened
-- **Long-term:** `MEMORY.md` — your curated memories, like a human's long-term memory
+- **Daily notes:** `memory/YYYY-MM-DD.md` — raw logs, **only when that file exists**
+- **Long-term:** `MEMORY.md` — curated memories, **only when it exists**
 
-Capture what matters. Decisions, context, things to remember. Skip the secrets unless asked to keep them.
+When they exist: capture what matters (decisions, context). Skip secrets unless asked to keep them.
 
-### 🧠 MEMORY.md - Your Long-Term Memory
+### 🧠 MEMORY.md (if present)
 
 - **Main session only** (direct chats with your human), **and only when needed** — no startup load
 - **DO NOT load in shared contexts** (Discord, group chats, sessions with other people)
@@ -51,7 +60,7 @@ Capture what matters. Decisions, context, things to remember. Skip the secrets u
 
 - **Memory is limited** — if you want to remember something, WRITE IT TO A FILE
 - "Mental notes" don't survive session restarts. Files do.
-- When someone says "remember this" → update `memory/YYYY-MM-DD.md` or relevant file
+- When someone says "remember this" → update an **existing** file (e.g. `memory/YYYY-MM-DD.md` if it exists, or another relevant file)
 - When you learn a lesson → update AGENTS.md, TOOLS.md, or the relevant skill
 - When you make a mistake → document it so future-you doesn't repeat it
 - **Text > Brain** 📝
@@ -171,7 +180,7 @@ You are free to edit `HEARTBEAT.md` with a short checklist or reminders. Keep it
 - **Mentions** - Twitter/social notifications?
 - **Weather** - Relevant if your human might go out?
 
-**Track your checks** in `memory/heartbeat-state.json`:
+**Track your checks** in `memory/heartbeat-state.json` (only if `memory/` exists):
 
 ```json
 {
@@ -199,15 +208,15 @@ You are free to edit `HEARTBEAT.md` with a short checklist or reminders. Keep it
 
 **Proactive work you can do without asking:**
 
-- Read and organize memory files
+- Read and organize memory files **only if `memory/` and the files exist**
 - Check on projects (git status, etc.)
 - Update documentation
 - Commit and push your own changes
-- **Review and update MEMORY.md** (see below)
+- **Review and update MEMORY.md** (see below) **only when MEMORY.md exists**
 
 ### 🔄 Memory Maintenance (During Heartbeats)
 
-Periodically (every few days), use a heartbeat to:
+**Only when `memory/` and MEMORY.md exist.** Periodically (every few days), use a heartbeat to:
 
 1. Read through recent `memory/YYYY-MM-DD.md` files
 2. Identify significant events, lessons, or insights worth keeping long-term
