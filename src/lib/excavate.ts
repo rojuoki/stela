@@ -9,7 +9,7 @@
  *   Phase B — Collect: bounded pagination from earliest region forward.
  *             Paginate within each window; sort ascending; take first 100.
  *   Phase C — Deep backfill: activated only when zeroStreak ≥ DEEP_TRIGGER_ZERO_STREAK.
- *             Re-runs the same collect code path over [deepStart, earliestRegionStart)
+ *             Re-runs the same collect code path over [accountCreated, earliestRegionStart)
  *             to recover tweets that the explore phase may have skipped.
  *             Budget: min(remaining, MAX_API_CALLS_DEEP).
  *
@@ -318,17 +318,19 @@ async function excavateFullArchive(
 
   // ── Phase C: Deep backfill (missing early period) ──
   //
-  // Runs the same collect code path over [deepStart, earliestRegionStart) to
+  // Runs the same collect code path over [accountCreated, earliestRegionStart) to
   // recover tweets the explore phase may have skipped due to API index gaps.
   // Budget: min(remaining calls, MAX_API_CALLS_DEEP) — never exceeds global cap.
 
   let deepAddedCount = 0;
 
   if (deepTriggered && earliestHitYear > 0) {
-    const deepStart = maxDate(
-      new Date(Date.UTC(earliestHitYear, 0, 1)),
-      accountCreated,
-    );
+    // Deep range starts at account_created_at — never at year boundary —
+    // so accounts created mid-year (e.g. YouTube: 2007-11-13) are fully covered.
+    // Optionally clamped to X full-archive floor (2006-03-21) but NOT moved later
+    // than accountCreated, so the range is always [accountCreated, earliestRegionStart).
+    const X_ARCHIVE_FLOOR = new Date("2006-03-21T00:00:00Z");
+    const deepStart = maxDate(X_ARCHIVE_FLOOR, accountCreated);
     const deepEnd = earliestRegionStart; // exclusive upper bound
     const remainingBudget = MAX_API_CALLS - stats.totalCalls;
     const deepCallBudget = Math.min(remainingBudget, MAX_API_CALLS_DEEP);
@@ -338,7 +340,7 @@ async function excavateFullArchive(
       const sizeBefore = collected.size;
 
       console.log(
-        `[deep] backfill [${deepStart.toISOString().slice(0, 10)}, ${deepEnd.toISOString().slice(0, 10)}) budget=${deepCallBudget}`,
+        `[deep] backfill range=[${deepStart.toISOString().slice(0, 10)}, ${deepEnd.toISOString().slice(0, 10)}) account_created=${accountCreated.toISOString().slice(0, 10)} budget=${deepCallBudget}`,
       );
 
       const deepStop = await collectWindowPass(
