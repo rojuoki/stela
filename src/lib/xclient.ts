@@ -12,13 +12,9 @@ const BEARER = () => {
   return t;
 };
 
-/** Max retries for network errors and 5xx responses. */
+/** Max retries for network errors and 5xx responses (excludes 429 — handled by queue). */
 const MAX_RETRIES = 2;
-/** Max waits for 429 rate-limit responses (independent of MAX_RETRIES). */
-const MAX_RATE_LIMIT_RETRIES = 3;
 const BACKOFF_BASE_MS = 1000;
-/** Extra buffer added on top of x-rate-limit-reset to avoid races. */
-const RATE_LIMIT_RESET_BUFFER_MS = 2000;
 
 /** Total X API fetch calls since server start — debug only. */
 let xCallCount = 0;
@@ -95,8 +91,7 @@ async function xfetch(
     if (v !== undefined && v !== "") url.searchParams.set(k, v);
   }
 
-  let generalAttempt = 0;   // counts network-error / 5xx retries
-  let rateLimitAttempts = 0; // counts 429 waits (independent)
+  let generalAttempt = 0; // counts network-error / 5xx retries only
   let lastError: Error | null = null;
 
   // Resolve token once per xfetch call. stats.token (from TokenPool) takes
@@ -105,7 +100,7 @@ async function xfetch(
 
   while (generalAttempt <= MAX_RETRIES) {
     stats.totalCalls++;
-    const label = `[X API] ${endpoint} attempt=${generalAttempt} rl=${rateLimitAttempts}`;
+    const label = `[X API] ${endpoint} attempt=${generalAttempt}`;
     console.log(`${label} → ${url.toString()}`);
 
     let res: Response;
@@ -144,42 +139,25 @@ async function xfetch(
     console.error(`${label} HTTP ${res.status}: ${body.slice(0, 300)}`);
     stats.errors.push({ status: res.status, body: body.slice(0, 500), endpoint });
 
-    // 429 — wait until reset (+ buffer) then continue the same phase.
-    // Rate-limit retries are tracked separately; a 429 never fails the job by itself.
+    // 429 — do NOT sleep/retry here.
+    // Notify the token pool and the job runner, then throw so the job runner
+    // can suspend the job and re-schedule via a timer (no server sleep loops).
     if (res.status === 429) {
-      rateLimitAttempts++;
-      if (rateLimitAttempts > MAX_RATE_LIMIT_RETRIES) {
-        throw new XApiStop("RATE_LIMIT", 429, "Rate limited after max retries");
-      }
       const resetHeader = res.headers.get("x-rate-limit-reset");
-      // Derive reset epoch in seconds (fallback: 60 s from now).
       const resetEpochSec = resetHeader
         ? parseInt(resetHeader, 10)
         : Math.floor((Date.now() + 60_000) / 1000);
 
-      // Notify token pool (marks token in cooldown) and job runner (updates DB status).
+      // Mark token in cooldown; notify job runner to persist resume_at in DB.
       if (stats.token) tokenPool.onRateLimit(activeToken, resetEpochSec);
       stats.onRateLimit?.(resetEpochSec);
 
-      let waitMs: number;
-      if (resetHeader) {
-        const resetAt = resetEpochSec * 1000;
-        waitMs = Math.max(0, resetAt - Date.now()) + RATE_LIMIT_RESET_BUFFER_MS;
-        waitMs = Math.min(waitMs, 15 * 60 * 1000); // cap at 15 min
-        console.warn(
-          `${label} 429 — waiting ${Math.ceil(waitMs / 1000)}s (x-rate-limit-reset + buffer), ` +
-          `retry ${rateLimitAttempts}/${MAX_RATE_LIMIT_RETRIES}`,
-        );
-      } else {
-        waitMs = 5000 + Math.random() * 5000; // 5–10 s
-        console.warn(
-          `${label} 429 — no reset header, waiting ${Math.ceil(waitMs / 1000)}s, ` +
-          `retry ${rateLimitAttempts}/${MAX_RATE_LIMIT_RETRIES}`,
-        );
-      }
-      await sleep(waitMs);
-      // Do NOT increment generalAttempt — rate-limit waits are not error retries.
-      continue;
+      const resumeAt = new Date(resetEpochSec * 1000).toISOString();
+      console.warn(
+        `${label} 429 — worker stopping. Token cooldown until ${resumeAt}. ` +
+          `Job will be re-queued by scheduler after reset.`,
+      );
+      throw new XApiStop("RATE_LIMIT", 429, `Token reset at epoch ${resetEpochSec}`);
     }
 
     // 401/403 → stop immediately

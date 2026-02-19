@@ -142,6 +142,11 @@ class TokenPool {
     return active.length > 0 ? Math.min(...active) : 0;
   }
 
+  /** 0-based index of a token in the pool (for concise log labels). */
+  getTokenIndex(token: string): number {
+    return this._entries.findIndex((e) => e.token === token);
+  }
+
   /** Read token state (for debugging / status endpoints). */
   getState(token: string): TokenState | undefined {
     return this._entries.find((e) => e.token === token)?.state;
