@@ -18,6 +18,9 @@ const BACKOFF_BASE_MS = 1000;
 /** Extra buffer added on top of x-rate-limit-reset to avoid races. */
 const RATE_LIMIT_RESET_BUFFER_MS = 2000;
 
+/** Total X API fetch calls since server start — debug only. */
+let xCallCount = 0;
+
 export interface XUser {
   id: string;
   username: string;
@@ -97,6 +100,14 @@ async function xfetch(
       res = await fetch(url.toString(), {
         headers: { Authorization: `Bearer ${BEARER()}` },
       });
+      const remaining = res.headers.get("x-rate-limit-remaining");
+      const reset = res.headers.get("x-rate-limit-reset");
+      const now = Math.floor(Date.now() / 1000);
+      xCallCount++;
+      console.log(`[rate] remaining=${remaining} reset=${reset} now=${now} x_calls=${xCallCount}`);
+      if (res.status === 429) {
+        console.log(`[rate][429] remaining=${remaining} reset=${reset} now=${now} x_calls=${xCallCount}`);
+      }
     } catch (e: unknown) {
       lastError = e instanceof Error ? e : new Error(String(e));
       console.error(`${label} network error: ${lastError.message}`);
