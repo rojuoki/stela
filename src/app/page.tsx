@@ -185,7 +185,7 @@ export default function Home() {
 
       if (job.status === "queued" || job.status === "running") {
         setJobInfo(`Status: ${job.status}… (API calls: ${job.apiCalls})`);
-        pollRef.current = setTimeout(() => pollJob(jobId), 1000);
+        pollRef.current = setTimeout(() => pollJob(jobId), 2500);
         return;
       }
 

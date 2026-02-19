@@ -76,9 +76,14 @@ async function runJob(jobId: string, username: string, limit: number): Promise<v
     return;
   }
 
+  // Write api_calls to DB after each probe so the polling client sees live progress.
+  const writeProgress = (apiCalls: number) => {
+    db.prepare("UPDATE jobs SET api_calls = ? WHERE id = ?").run(apiCalls, jobId);
+  };
+
   let result: ExcavationResult;
   try {
-    result = await excavateEarliest(username, limit);
+    result = await excavateEarliest(username, limit, writeProgress);
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : String(e);
     failJob(jobId, "EXCAVATION_ERROR", msg, undefined, holdId);

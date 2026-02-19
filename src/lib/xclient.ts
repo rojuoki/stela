@@ -10,8 +10,13 @@ const BEARER = () => {
   return t;
 };
 
+/** Max retries for network errors and 5xx responses. */
 const MAX_RETRIES = 2;
+/** Max waits for 429 rate-limit responses (independent of MAX_RETRIES). */
+const MAX_RATE_LIMIT_RETRIES = 3;
 const BACKOFF_BASE_MS = 1000;
+/** Extra buffer added on top of x-rate-limit-reset to avoid races. */
+const RATE_LIMIT_RESET_BUFFER_MS = 2000;
 
 export interface XUser {
   id: string;
@@ -63,6 +68,11 @@ export class XApiStop extends Error {
   }
 }
 
+/**
+ * All calls are strictly sequential — no Promise.all anywhere in this module.
+ * Rate-limit retries (429) use a separate counter so they never consume the
+ * general retry budget; the job is never failed solely because of a 429.
+ */
 async function xfetch(
   endpoint: string,
   params: Record<string, string>,
@@ -73,11 +83,13 @@ async function xfetch(
     if (v !== undefined && v !== "") url.searchParams.set(k, v);
   }
 
+  let generalAttempt = 0;   // counts network-error / 5xx retries
+  let rateLimitAttempts = 0; // counts 429 waits (independent)
   let lastError: Error | null = null;
 
-  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+  while (generalAttempt <= MAX_RETRIES) {
     stats.totalCalls++;
-    const label = `[X API] ${endpoint} attempt=${attempt}`;
+    const label = `[X API] ${endpoint} attempt=${generalAttempt} rl=${rateLimitAttempts}`;
     console.log(`${label} → ${url.toString()}`);
 
     let res: Response;
@@ -88,8 +100,9 @@ async function xfetch(
     } catch (e: unknown) {
       lastError = e instanceof Error ? e : new Error(String(e));
       console.error(`${label} network error: ${lastError.message}`);
-      if (attempt < MAX_RETRIES) {
-        await sleep(BACKOFF_BASE_MS * 2 ** attempt);
+      generalAttempt++;
+      if (generalAttempt <= MAX_RETRIES) {
+        await sleep(BACKOFF_BASE_MS * 2 ** (generalAttempt - 1));
         continue;
       }
       throw new XApiStop("API_ERROR", 0, lastError.message);
@@ -103,38 +116,44 @@ async function xfetch(
     console.error(`${label} HTTP ${res.status}: ${body.slice(0, 300)}`);
     stats.errors.push({ status: res.status, body: body.slice(0, 500), endpoint });
 
-    // 429 — read x-rate-limit-reset and wait, then retry once (attempt 0 only).
+    // 429 — wait until reset (+ buffer) then continue the same phase.
+    // Rate-limit retries are tracked separately; a 429 never fails the job by itself.
     if (res.status === 429) {
-      if (attempt === 0) {
-        const resetHeader = res.headers.get("x-rate-limit-reset");
-        let waitMs: number;
-        if (resetHeader) {
-          const resetAt = parseInt(resetHeader, 10) * 1000;
-          // Cap at 15 minutes to avoid hanging indefinitely.
-          waitMs = Math.min(Math.max(0, resetAt - Date.now()), 15 * 60 * 1000);
-          console.warn(
-            `${label} 429 — x-rate-limit-reset in ${Math.ceil(waitMs / 1000)}s, waiting before retry`,
-          );
-        } else {
-          waitMs = 5000 + Math.random() * 5000; // 5–10 s
-          console.warn(
-            `${label} 429 — no reset header, waiting ${Math.ceil(waitMs / 1000)}s before retry`,
-          );
-        }
-        await sleep(waitMs);
-        continue;
+      rateLimitAttempts++;
+      if (rateLimitAttempts > MAX_RATE_LIMIT_RETRIES) {
+        throw new XApiStop("RATE_LIMIT", 429, "Rate limited after max retries");
       }
-      throw new XApiStop("RATE_LIMIT", 429, "Rate limited after retry");
+      const resetHeader = res.headers.get("x-rate-limit-reset");
+      let waitMs: number;
+      if (resetHeader) {
+        const resetAt = parseInt(resetHeader, 10) * 1000;
+        waitMs = Math.max(0, resetAt - Date.now()) + RATE_LIMIT_RESET_BUFFER_MS;
+        waitMs = Math.min(waitMs, 15 * 60 * 1000); // cap at 15 min
+        console.warn(
+          `${label} 429 — waiting ${Math.ceil(waitMs / 1000)}s (x-rate-limit-reset + buffer), ` +
+          `retry ${rateLimitAttempts}/${MAX_RATE_LIMIT_RETRIES}`,
+        );
+      } else {
+        waitMs = 5000 + Math.random() * 5000; // 5–10 s
+        console.warn(
+          `${label} 429 — no reset header, waiting ${Math.ceil(waitMs / 1000)}s, ` +
+          `retry ${rateLimitAttempts}/${MAX_RATE_LIMIT_RETRIES}`,
+        );
+      }
+      await sleep(waitMs);
+      // Do NOT increment generalAttempt — rate-limit waits are not error retries.
+      continue;
     }
 
-    // 401/403 → stop
+    // 401/403 → stop immediately
     if (res.status === 401 || res.status === 403) {
       throw new XApiStop("API_ERROR", res.status, body.slice(0, 200));
     }
 
     // 5xx → retry with backoff
-    if (res.status >= 500 && attempt < MAX_RETRIES) {
-      await sleep(BACKOFF_BASE_MS * 2 ** attempt);
+    generalAttempt++;
+    if (res.status >= 500 && generalAttempt <= MAX_RETRIES) {
+      await sleep(BACKOFF_BASE_MS * 2 ** (generalAttempt - 1));
       continue;
     }
 

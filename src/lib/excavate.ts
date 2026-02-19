@@ -76,6 +76,8 @@ export interface ExcavationResult {
 export async function excavateEarliest(
   username: string,
   limit: number = 100,
+  /** Called after each API probe so the job record can show live api_calls during excavation. */
+  onProgress?: (apiCalls: number) => void,
 ): Promise<ExcavationResult> {
   const stats = createStats();
   const effectiveLimit = Math.min(limit, 100);
@@ -105,13 +107,13 @@ export async function excavateEarliest(
   // Attempt full-archive; fall back if the token lacks that access (403).
   const query = `from:${user.username} -is:retweet`;
   try {
-    return await excavateFullArchive(user, query, effectiveLimit, stats);
+    return await excavateFullArchive(user, query, effectiveLimit, stats, onProgress);
   } catch (e) {
     if (e instanceof XApiStop && e.statusCode === 403) {
       console.log(
         `[excavate] Full-archive unavailable (403) for @${username} — switching to timeline fallback`,
       );
-      return await excavateTimeline(user, effectiveLimit, stats);
+      return await excavateTimeline(user, effectiveLimit, stats, onProgress);
     }
     throw e;
   }
@@ -124,6 +126,7 @@ async function excavateFullArchive(
   query: string,
   limit: number,
   stats: ApiCallStats,
+  onProgress?: (apiCalls: number) => void,
 ): Promise<ExcavationResult> {
   const accountCreated = new Date(user.created_at);
   const now = new Date();
@@ -163,6 +166,7 @@ async function excavateFullArchive(
       `[explore] year=${year} window=[${yearStart.toISOString().slice(0, 10)}, ${yEndStr.slice(0, 10)}] found=${yPage.tweets.length}`,
     );
 
+    onProgress?.(stats.totalCalls);
     await sleep(EXPLORE_INTER_REQUEST_DELAY_MS);
 
     if (yPage.tweets.length === 0) continue;
@@ -200,6 +204,7 @@ async function excavateFullArchive(
         `[explore] month=${year}-${String(m + 1).padStart(2, "0")} window=[${mStart.toISOString().slice(0, 10)}, ${minDate(mEnd, now).toISOString().slice(0, 10)}] found=${mPage.tweets.length}`,
       );
 
+      onProgress?.(stats.totalCalls);
       await sleep(EXPLORE_INTER_REQUEST_DELAY_MS);
 
       if (mPage.tweets.length > 0) {
@@ -319,6 +324,7 @@ async function excavateFullArchive(
       `[collect] window yielded ${windowTweets.length} tweets (${pagesInWindow} pages, ${exhausted ? "exhausted" : "page-limit hit"})`,
     );
 
+    onProgress?.(stats.totalCalls);
     for (const t of windowTweets) collected.set(t.id, t);
 
     if (collected.size >= limit) {
@@ -374,6 +380,7 @@ async function excavateTimeline(
   user: XUser,
   limit: number,
   stats: ApiCallStats,
+  onProgress?: (apiCalls: number) => void,
 ): Promise<ExcavationResult> {
   console.log(
     `[excavate] @${user.username} timeline fallback — note: limited to ~3200 most recent tweets; 'earliest' is not guaranteed`,
@@ -404,6 +411,8 @@ async function excavateTimeline(
       }
       throw e;
     }
+
+    onProgress?.(stats.totalCalls);
 
     if (page.tweets.length === 0) {
       if (spanDays >= FALLBACK_MAX_SPAN_DAYS) {
