@@ -39,7 +39,7 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    let body: { username?: string; limit?: number };
+    let body: { username?: string; limit?: number; force?: boolean };
     try {
       body = await req.json();
     } catch {
@@ -47,7 +47,7 @@ export async function POST(req: NextRequest) {
     }
 
     // Input validation and normalization
-    const username = normalizeUsername(body.username);
+    const username = normalizeUsername(body.username ?? "");
     if (!username) {
       return NextResponse.json({ 
         error: "Invalid username format. Must be 1-15 characters, letters/numbers/underscore only." 
@@ -55,6 +55,9 @@ export async function POST(req: NextRequest) {
     }
 
     const limit = validateLimit(body.limit);
+    // force=true bypasses cache and idempotency, always creates a new excavation job.
+    // Credit rule: force=true always holds 1 credit (same as a fresh first-time unlock).
+    const force = body.force === true;
     const userId = "anonymous"; // For MVP, single anonymous user
 
     // Clean up expired holds and ensure user has starting credits
@@ -65,61 +68,65 @@ export async function POST(req: NextRequest) {
       giveCredits(userId, 3, "Initial allocation");
     }
 
-    // ── Cache check: if we already have tweets for this account ──
-    const account = getAccountByUsername(username);
-    if (account) {
-      const cachedCount = getCachedTweetCount(account.account_id);
-      if (cachedCount > 0) {
-        const alreadyUnlocked = hasUserUnlockedAccount(userId, account.account_id);
-        
-        if (alreadyUnlocked) {
-          // Free re-unlock for same user
-          recordUnlock(userId, account.account_id, "cache-hit-free");
-          console.log(`[unlock] Free cache hit for @${username}: ${cachedCount} tweets, user already unlocked`);
+    // ── Cache check: skipped entirely when force=true ──
+    if (!force) {
+      const account = getAccountByUsername(username);
+      if (account) {
+        const cachedCount = getCachedTweetCount(account.account_id);
+        if (cachedCount > 0) {
+          const alreadyUnlocked = hasUserUnlockedAccount(userId, account.account_id);
           
-          return NextResponse.json({
-            jobId: null,
-            status: "cache-hit",
-            accountId: account.account_id,
-            cachedCount,
-            freeReUnlock: true,
-            creditConsumed: false,
-          });
-        } else {
-          // First time unlock from cache - still consumes credit
-          const currentBalance = getCreditBalance(userId);
-          if (currentBalance.balance < 1) {
+          if (alreadyUnlocked) {
+            // Free re-unlock for same user
+            recordUnlock(userId, account.account_id, "cache-hit-free");
+            console.log(`[unlock] Free cache hit for @${username}: ${cachedCount} tweets, user already unlocked`);
+            
             return NextResponse.json({
-              error: "Insufficient credits",
-              balance: currentBalance.balance,
-              required: 1,
-            }, { status: 402 }); // Payment Required
-          }
-          
-          // Create a dummy hold and immediately capture for cache hit
-          const holdId = holdCredits(userId, "cache-hit", 1);
-          if (!holdId) {
+              jobId: null,
+              status: "cache-hit",
+              accountId: account.account_id,
+              cachedCount,
+              freeReUnlock: true,
+              creditConsumed: false,
+            });
+          } else {
+            // First time unlock from cache - still consumes credit
+            const currentBalance = getCreditBalance(userId);
+            if (currentBalance.balance < 1) {
+              return NextResponse.json({
+                error: "Insufficient credits",
+                balance: currentBalance.balance,
+                required: 1,
+              }, { status: 402 });
+            }
+            
+            // Create a dummy hold and immediately capture for cache hit
+            const holdId = holdCredits(userId, "cache-hit", 1);
+            if (!holdId) {
+              return NextResponse.json({
+                error: "Failed to hold credits",
+                balance: currentBalance.balance,
+              }, { status: 500 });
+            }
+            
+            captureHeld(holdId, `Cache hit unlock for @${username}`);
+            recordUnlock(userId, account.account_id, "cache-hit-paid");
+            
+            console.log(`[unlock] Paid cache hit for @${username}: ${cachedCount} tweets, 1 credit consumed`);
+            
             return NextResponse.json({
-              error: "Failed to hold credits",
-              balance: currentBalance.balance,
-            }, { status: 500 });
+              jobId: null,
+              status: "cache-hit",
+              accountId: account.account_id,
+              cachedCount,
+              freeReUnlock: false,
+              creditConsumed: true,
+            });
           }
-          
-          captureHeld(holdId, `Cache hit unlock for @${username}`);
-          recordUnlock(userId, account.account_id, "cache-hit-paid");
-          
-          console.log(`[unlock] Paid cache hit for @${username}: ${cachedCount} tweets, 1 credit consumed`);
-          
-          return NextResponse.json({
-            jobId: null,
-            status: "cache-hit",
-            accountId: account.account_id,
-            cachedCount,
-            freeReUnlock: false,
-            creditConsumed: true,
-          });
         }
       }
+    } else {
+      console.log(`[unlock] force=true for @${username} — skipping cache, creating new excavation job`);
     }
 
     // ── Check credit balance for new excavation ──
@@ -132,18 +139,20 @@ export async function POST(req: NextRequest) {
       }, { status: 402 });
     }
 
-    // ── Idempotency: collapse into existing active job ──
-    const activeJobId = findActiveJobForUsername(username);
-    if (activeJobId) {
-      console.log(`[unlock] Attaching to existing job ${activeJobId} for @${username}`);
-      return NextResponse.json({
-        jobId: activeJobId,
-        status: "attached",
-        creditConsumed: false, // Credit was already held by original request
-      }, { status: 202 });
+    // ── Idempotency: collapse into existing active job (skipped when force=true) ──
+    if (!force) {
+      const activeJobId = findActiveJobForUsername(username);
+      if (activeJobId) {
+        console.log(`[unlock] Attaching to existing job ${activeJobId} for @${username}`);
+        return NextResponse.json({
+          jobId: activeJobId,
+          status: "attached",
+          creditConsumed: false, // Credit was already held by original request
+        }, { status: 202 });
+      }
     }
 
-    // ── Hold credit for new excavation ──
+    // ── Hold credit and create new excavation job ──
     const jobId = createAndRunJob(username, limit);
     const holdId = holdCredits(userId, jobId, 1);
     

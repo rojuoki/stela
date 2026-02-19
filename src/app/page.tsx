@@ -212,7 +212,7 @@ export default function Home() {
     }
   }, []);
 
-  const handleUnlock = async () => {
+  const handleUnlock = async (force = false) => {
     const raw = username.trim().replace(/^@/, "");
     if (!raw) return;
 
@@ -221,7 +221,7 @@ export default function Home() {
     setError(null);
     setTweets([]);
     setCacheHit(false);
-    setJobInfo("Starting…");
+    setJobInfo(force ? "Re-running excavation…" : "Starting…");
     
     // Clear account state during unlock
     setAccountStatus("idle");
@@ -232,7 +232,7 @@ export default function Home() {
       const res = await fetch("/api/unlock", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ username: raw }),
+        body: JSON.stringify({ username: raw, force }),
       });
 
       if (!res.ok) {
@@ -244,8 +244,8 @@ export default function Home() {
 
       const unlock: UnlockResponse = await res.json();
 
-      // ── Cache hit: artificial delay then show from DB ──
-      if (unlock.status === "cache-hit" && unlock.accountId) {
+      // ── Cache hit: only occurs when force=false ──
+      if (!force && unlock.status === "cache-hit" && unlock.accountId) {
         setJobInfo("Unlocking…");
         await sleep(ARTIFICIAL_DELAY_MS);
         const loaded = await loadTweets(unlock.accountId);
@@ -253,7 +253,7 @@ export default function Home() {
         setJobInfo(`${loaded.length} posts · cached`);
         setStatus("done");
         setCacheHit(true);
-        fetchCredits(); // Refresh credit balance
+        fetchCredits();
         return;
       }
 
@@ -308,11 +308,19 @@ export default function Home() {
           {accountStatus === "loading" ? "Checking…" : "Lookup"}
         </button>
         <button
-          onClick={handleUnlock}
+          onClick={() => handleUnlock(false)}
           disabled={!accountData || accountData.protected || status === "running"}
           className="bg-white text-black font-semibold text-sm px-4 py-2 rounded-lg hover:bg-zinc-200 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
         >
           Unlock earliest 100
+        </button>
+        <button
+          onClick={() => handleUnlock(true)}
+          disabled={!username.trim() || status === "running"}
+          title="Bypass cache and re-run excavation"
+          className="bg-zinc-700 text-zinc-200 font-semibold text-sm px-3 py-2 rounded-lg hover:bg-zinc-600 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+        >
+          Re-run
         </button>
       </div>
 
