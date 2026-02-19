@@ -103,9 +103,28 @@ async function xfetch(
     console.error(`${label} HTTP ${res.status}: ${body.slice(0, 300)}`);
     stats.errors.push({ status: res.status, body: body.slice(0, 500), endpoint });
 
-    // 429 → stop immediately, no retry
+    // 429 — read x-rate-limit-reset and wait, then retry once (attempt 0 only).
     if (res.status === 429) {
-      throw new XApiStop("RATE_LIMIT", 429, "Rate limited");
+      if (attempt === 0) {
+        const resetHeader = res.headers.get("x-rate-limit-reset");
+        let waitMs: number;
+        if (resetHeader) {
+          const resetAt = parseInt(resetHeader, 10) * 1000;
+          // Cap at 15 minutes to avoid hanging indefinitely.
+          waitMs = Math.min(Math.max(0, resetAt - Date.now()), 15 * 60 * 1000);
+          console.warn(
+            `${label} 429 — x-rate-limit-reset in ${Math.ceil(waitMs / 1000)}s, waiting before retry`,
+          );
+        } else {
+          waitMs = 5000 + Math.random() * 5000; // 5–10 s
+          console.warn(
+            `${label} 429 — no reset header, waiting ${Math.ceil(waitMs / 1000)}s before retry`,
+          );
+        }
+        await sleep(waitMs);
+        continue;
+      }
+      throw new XApiStop("RATE_LIMIT", 429, "Rate limited after retry");
     }
 
     // 401/403 → stop

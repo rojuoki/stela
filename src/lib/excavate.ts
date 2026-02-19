@@ -34,6 +34,9 @@ import { getDb } from "./db";
 /** Absolute call ceiling per excavation (explore + collect combined). */
 const MAX_API_CALLS = 50;
 
+/** Delay between consecutive explore probes to avoid hammering the rate limit. */
+const EXPLORE_INTER_REQUEST_DELAY_MS = 1300;
+
 /** Full-archive collect: initial window width when scanning forward. */
 const COLLECT_INITIAL_SPAN_DAYS = 30;
 const COLLECT_MAX_SPAN_DAYS = 365 * 2;
@@ -147,7 +150,7 @@ async function excavateFullArchive(
 
     let yPage: TimelinePage;
     try {
-      yPage = await searchAllTweets(query, yearStart.toISOString(), yEndStr, stats, 10);
+      yPage = await searchAllTweets(query, yearStart.toISOString(), yEndStr, stats, 5);
     } catch (e) {
       if (e instanceof XApiStop && e.statusCode === 403) throw e;
       if (e instanceof XApiStop) {
@@ -159,6 +162,8 @@ async function excavateFullArchive(
     console.log(
       `[explore] year=${year} window=[${yearStart.toISOString().slice(0, 10)}, ${yEndStr.slice(0, 10)}] found=${yPage.tweets.length}`,
     );
+
+    await sleep(EXPLORE_INTER_REQUEST_DELAY_MS);
 
     if (yPage.tweets.length === 0) continue;
 
@@ -194,6 +199,8 @@ async function excavateFullArchive(
       console.log(
         `[explore] month=${year}-${String(m + 1).padStart(2, "0")} window=[${mStart.toISOString().slice(0, 10)}, ${minDate(mEnd, now).toISOString().slice(0, 10)}] found=${mPage.tweets.length}`,
       );
+
+      await sleep(EXPLORE_INTER_REQUEST_DELAY_MS);
 
       if (mPage.tweets.length > 0) {
         earliestRegionStart = mStart;
@@ -529,6 +536,10 @@ function storeTweets(userId: string, tweets: XTweet[]): number {
 }
 
 // ─── Util ───────────────────────────────────────────────
+
+function sleep(ms: number) {
+  return new Promise<void>((r) => setTimeout(r, ms));
+}
 
 function addDays(d: Date, days: number): Date {
   const r = new Date(d);
