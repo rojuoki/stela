@@ -26,9 +26,21 @@ export async function GET(
     return NextResponse.json({ error: "Job not found" }, { status: 404 });
   }
 
+  // Compute effective status:
+  // A job whose status is 'running' but has a future resume_at is waiting on a
+  // rate limit reset. We surface this as 'waiting_rate_limit' so the client can
+  // show a meaningful message without changing the DB CHECK constraint.
+  const effectiveStatus =
+    job.status === "running" &&
+    job.resume_at != null &&
+    new Date(job.resume_at) > new Date()
+      ? "waiting_rate_limit"
+      : job.status;
+
   const response: Record<string, unknown> = {
     jobId: job.id,
-    status: job.status,
+    status: effectiveStatus,
+    resumeAt: job.resume_at ?? null,
     username: job.account_username,
     requestedLimit: job.requested_limit,
     apiCalls: job.api_calls,

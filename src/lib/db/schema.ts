@@ -32,7 +32,10 @@ CREATE TABLE IF NOT EXISTS jobs (
   fetched_count INTEGER NOT NULL DEFAULT 0,
   created_at    TEXT NOT NULL,
   started_at    TEXT,
-  finished_at   TEXT
+  finished_at   TEXT,
+  -- Set when a 429 occurs mid-job; cleared on completion.
+  -- API layer returns status=waiting_rate_limit when this is set and in the future.
+  resume_at     TEXT
 );
 
 -- Stored tweets (earliest 100 per account)

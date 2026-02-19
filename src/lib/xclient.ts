@@ -3,6 +3,8 @@
  * Uses Bearer token from env. Never exposed to browser.
  */
 
+import { tokenPool } from "./tokenPool";
+
 const API_BASE = process.env.X_API_BASE || "https://api.x.com/2";
 const BEARER = () => {
   const t = process.env.X_BEARER_TOKEN;
@@ -55,11 +57,18 @@ export interface XTweet {
 export interface ApiCallStats {
   totalCalls: number;
   errors: Array<{ status: number; body: string; endpoint: string }>;
+  /** Bearer token assigned to this excavation session (overrides X_BEARER_TOKEN env). */
+  token?: string;
+  /** Called when a 429 is received, before the in-process wait. Arg = reset epoch (seconds). */
+  onRateLimit?: (resetEpochSec: number) => void;
 }
 
-/** Shared call counter — create per-excavation */
-export function createStats(): ApiCallStats {
-  return { totalCalls: 0, errors: [] };
+/** Create a stats object, optionally pre-bound to a token and rate-limit callback. */
+export function createStats(
+  token?: string,
+  onRateLimit?: (resetEpochSec: number) => void,
+): ApiCallStats {
+  return { totalCalls: 0, errors: [], token, onRateLimit };
 }
 
 type StopSignal = "RATE_LIMIT" | "API_ERROR" | "PROTECTED_OR_SUSPENDED_OR_NOT_FOUND";
@@ -90,6 +99,10 @@ async function xfetch(
   let rateLimitAttempts = 0; // counts 429 waits (independent)
   let lastError: Error | null = null;
 
+  // Resolve token once per xfetch call. stats.token (from TokenPool) takes
+  // precedence; BEARER() is the env-var fallback for single-token deployments.
+  const activeToken = stats.token ?? BEARER();
+
   while (generalAttempt <= MAX_RETRIES) {
     stats.totalCalls++;
     const label = `[X API] ${endpoint} attempt=${generalAttempt} rl=${rateLimitAttempts}`;
@@ -98,8 +111,12 @@ async function xfetch(
     let res: Response;
     try {
       res = await fetch(url.toString(), {
-        headers: { Authorization: `Bearer ${BEARER()}` },
+        headers: { Authorization: `Bearer ${activeToken}` },
       });
+      // Update token pool state with every response (remaining / reset counters).
+      if (stats.token) {
+        tokenPool.updateFromHeaders(activeToken, res.headers);
+      }
       const remaining = res.headers.get("x-rate-limit-remaining");
       const reset = res.headers.get("x-rate-limit-reset");
       const now = Math.floor(Date.now() / 1000);
@@ -135,9 +152,18 @@ async function xfetch(
         throw new XApiStop("RATE_LIMIT", 429, "Rate limited after max retries");
       }
       const resetHeader = res.headers.get("x-rate-limit-reset");
+      // Derive reset epoch in seconds (fallback: 60 s from now).
+      const resetEpochSec = resetHeader
+        ? parseInt(resetHeader, 10)
+        : Math.floor((Date.now() + 60_000) / 1000);
+
+      // Notify token pool (marks token in cooldown) and job runner (updates DB status).
+      if (stats.token) tokenPool.onRateLimit(activeToken, resetEpochSec);
+      stats.onRateLimit?.(resetEpochSec);
+
       let waitMs: number;
       if (resetHeader) {
-        const resetAt = parseInt(resetHeader, 10) * 1000;
+        const resetAt = resetEpochSec * 1000;
         waitMs = Math.max(0, resetAt - Date.now()) + RATE_LIMIT_RESET_BUFFER_MS;
         waitMs = Math.min(waitMs, 15 * 60 * 1000); // cap at 15 min
         console.warn(

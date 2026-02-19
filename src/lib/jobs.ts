@@ -1,30 +1,30 @@
 /**
- * STELA Job Runner — Phase 3 (with global serialization queue)
+ * STELA Job Runner — Phase 3 (global serialization queue + TokenPool)
  *
  * Architecture:
- *   - Only ONE excavation job may run at a time (globalQueue enforces this).
- *   - New jobs start as QUEUED in DB; the queue transitions them to RUNNING when
- *     the slot is free.
- *   - On server restart, any jobs left in RUNNING are marked FAILED (SERVER_RESTART)
- *     and all QUEUED jobs are re-loaded into the in-memory queue.
+ *   - M = min(tokenCount, M_MAX=3) jobs may run in parallel.
+ *   - Each job acquires one bearer token from TokenPool at start and holds it
+ *     until completion; the token is released regardless of outcome.
+ *   - On 429: the token enters cooldown AND the job's resume_at is saved to DB
+ *     so the polling client can show WAITING_RATE_LIMIT state. The in-process
+ *     xfetch wait continues normally — the job does NOT stop executing.
+ *   - On server restart: RUNNING / WAITING_RATE_LIMIT (status=running) jobs are
+ *     marked FAILED (SERVER_RESTART), QUEUED jobs are reloaded and resumed.
  *
- * MANUAL TEST PLAN (global queue serialization):
- *   1. Start two unlocks for DIFFERENT usernames in quick succession.
- *   2. Server logs should show:
- *        [queue] Job <A> → RUNNING for @foo
- *        [queue] Job <B> → QUEUED (position 1) for @bar
- *   3. GET /api/jobs/<B>: status="queued", queuePosition=1, runningJobId=<A>
- *   4. No "[X API]" log lines for Job B while Job A is running.
- *   5. When Job A finishes → queue starts Job B automatically:
- *        [queue] Job <A> complete. Starting next: <B>
- *        [queue] Job <B> → RUNNING
- *   6. GET /api/jobs/<B>: status="running", queuePosition=null
+ * MANUAL TEST PLAN (global queue + parallel):
+ *   1. Set X_BEARER_TOKENS="t1,t2" (two tokens → M=2).
+ *   2. Start three unlocks for different usernames in quick succession.
+ *   3. Logs show: Job A → RUNNING, Job B → RUNNING, Job C → QUEUED (position 1)
+ *   4. GET /api/jobs/<C>: status="queued", queuePosition=1
+ *   5. When A or B finishes → C starts automatically.
+ *   6. 429 test: GET /api/jobs/<running>: status="waiting_rate_limit", resumeAt set.
  */
 
 import { randomUUID } from "crypto";
 import { getDb } from "./db";
 import { excavateEarliest, type ExcavationResult } from "./excavate";
 import { captureHeld, releaseHeld } from "./repository";
+import { tokenPool } from "./tokenPool";
 
 export interface JobRecord {
   id: string;
@@ -41,23 +41,20 @@ export interface JobRecord {
   started_at: string | null;
   finished_at: string | null;
   hold_id: string | null;
+  /** Set when a 429 is received mid-job; cleared on completion. ISO-8601. */
+  resume_at: string | null;
 }
 
 // ─── Global Serialization Queue ───────────────────────────────────────────────
 //
-// Ensures only ONE excavation job runs at a time.
-// Others wait in FIFO order (insertion order into _pendingIds).
-// `runJobAsync` is referenced here but defined below as a hoisted function
-// declaration — this is intentional and works correctly in JS/TS.
+// Allows up to M jobs to run concurrently (M = tokenPool.M).
+// Excess requests wait in FIFO order in _pendingIds.
 
 class GlobalJobQueue {
-  private _runningJobId: string | null = null;
-  private _pendingIds: string[] = []; // FIFO waiting list
-
-  constructor() {
-    // Lazy-initialize on first use to avoid DB-not-ready issues at module load.
-    // _init() is called explicitly from register() / complete() the first time.
-  }
+  /** Jobs currently executing excavation (≤ M). */
+  private _runningJobIds = new Set<string>();
+  /** FIFO list of job IDs waiting to be started. */
+  private _pendingIds: string[] = [];
 
   private _initialized = false;
 
@@ -68,21 +65,24 @@ class GlobalJobQueue {
       this._init();
     } catch (e) {
       console.warn("[queue] Init failed (will retry):", e instanceof Error ? e.message : e);
-      this._initialized = false; // allow retry on next call
+      this._initialized = false;
     }
   }
 
   // ── Public accessors ──────────────────────────────────────────────────────
 
-  /** The job ID currently running X API calls, or null if idle. */
+  /** First running job ID, or null (for API backward-compat). */
   get runningJobId(): string | null {
-    return this._runningJobId;
+    const it = this._runningJobIds.values().next();
+    return it.done ? null : it.value;
   }
 
-  /**
-   * 1-based position in the waiting list. Returns null if the job is not
-   * currently queued (either running, done, or unknown).
-   */
+  /** All currently running job IDs. */
+  get runningJobIds(): string[] {
+    return [...this._runningJobIds];
+  }
+
+  /** 1-based queue position of a waiting job; null if not in the waiting list. */
   positionOf(jobId: string): number | null {
     const idx = this._pendingIds.indexOf(jobId);
     return idx === -1 ? null : idx + 1;
@@ -91,14 +91,12 @@ class GlobalJobQueue {
   // ── Lifecycle ─────────────────────────────────────────────────────────────
 
   /**
-   * Register a newly-created job with the queue.
-   * If the queue is idle, the job starts running immediately (DB updated to
-   * RUNNING, excavation kicked off).
-   * Otherwise the job stays QUEUED and waits in _pendingIds.
+   * Register a newly-created job.
+   * Starts it immediately if a slot and token are available; otherwise queues it.
    */
   register(jobId: string): void {
     this._ensureInit();
-    if (this._runningJobId === null) {
+    if (this._runningJobIds.size < tokenPool.M && tokenPool.hasAvailableToken()) {
       this._launch(jobId);
     } else {
       this._pendingIds.push(jobId);
@@ -108,13 +106,10 @@ class GlobalJobQueue {
 
   /**
    * Called when a job finishes (success OR failure).
-   * Clears the running slot and starts the next pending job if any.
+   * Releases the running slot and starts the next pending job if possible.
    */
   complete(jobId: string): void {
-    if (this._runningJobId === jobId) {
-      this._runningJobId = null;
-    }
-    // Defensive: remove from pending too (shouldn't be there, but be safe)
+    this._runningJobIds.delete(jobId);
     this._pendingIds = this._pendingIds.filter((id) => id !== jobId);
     this._startNext();
   }
@@ -122,22 +117,20 @@ class GlobalJobQueue {
   // ── Private helpers ───────────────────────────────────────────────────────
 
   private _launch(jobId: string): void {
-    this._runningJobId = jobId;
-
-    // Transition job from QUEUED → RUNNING in DB.
-    // For jobs that were already QUEUED and are now being promoted, this also
-    // sets started_at so the UI can show when excavation actually started.
+    this._runningJobIds.add(jobId);
     try {
       const now = new Date().toISOString();
       getDb()
         .prepare("UPDATE jobs SET status = 'running', started_at = ? WHERE id = ?")
         .run(now, jobId);
-      console.log(`[queue] Job ${jobId} → RUNNING`);
+      console.log(
+        `[queue] Job ${jobId} → RUNNING (${this._runningJobIds.size}/${tokenPool.M})`,
+      );
     } catch (e) {
       console.error(`[queue] Failed to mark job ${jobId} RUNNING in DB:`, e);
     }
 
-    // runJobAsync is a hoisted function declaration defined below.
+    // runJobAsync is a hoisted function declaration — available here at runtime.
     runJobAsync(jobId).catch((e) => {
       console.error(`[queue] Unhandled error in job ${jobId}:`, e);
       this.complete(jobId);
@@ -145,22 +138,35 @@ class GlobalJobQueue {
   }
 
   private _startNext(): void {
-    if (this._runningJobId !== null || this._pendingIds.length === 0) return;
-    const nextId = this._pendingIds.shift()!;
-    console.log(`[queue] Job ${this._runningJobId ?? "(none)"} complete. Starting next: ${nextId}`);
-    this._launch(nextId);
+    while (
+      this._runningJobIds.size < tokenPool.M &&
+      this._pendingIds.length > 0 &&
+      tokenPool.hasAvailableToken()
+    ) {
+      const nextId = this._pendingIds.shift()!;
+      console.log(`[queue] Starting next pending job: ${nextId}`);
+      this._launch(nextId);
+    }
+
+    // If pending jobs exist but all tokens are in cooldown, schedule a retry
+    // for when the earliest cooldown expires.
+    if (this._pendingIds.length > 0 && !tokenPool.hasAvailableToken()) {
+      const cooldownEnd = tokenPool.earliestCooldownEnd();
+      if (cooldownEnd > 0) {
+        const delayMs = Math.max(100, cooldownEnd - Date.now()) + 500;
+        console.log(
+          `[queue] All tokens in cooldown. Retrying pending jobs in ${Math.ceil(delayMs / 1000)}s`,
+        );
+        setTimeout(() => this._startNext(), delayMs);
+      }
+    }
   }
 
-  /**
-   * Called once on first use. Recovers from server restarts:
-   *   - Jobs left RUNNING → FAILED (SERVER_RESTART)
-   *   - Jobs still QUEUED → loaded back into _pendingIds, first one auto-started
-   */
   private _init(): void {
     const db = getDb();
     const now = new Date().toISOString();
 
-    // Mark any interrupted RUNNING jobs as failed.
+    // Mark any jobs left RUNNING (including those waiting on rate limits) as FAILED.
     const interrupted = db
       .prepare("SELECT id, hold_id FROM jobs WHERE status = 'running'")
       .all() as { id: string; hold_id: string | null }[];
@@ -176,13 +182,14 @@ class GlobalJobQueue {
         SET status = 'failed',
             error_code = 'SERVER_RESTART',
             error_message = 'Job interrupted by server restart',
+            resume_at = NULL,
             finished_at = ?
         WHERE id = ?
       `).run(now, job.id);
       console.log(`[queue] Job ${job.id} → FAILED (SERVER_RESTART)`);
     }
 
-    // Re-load all QUEUED jobs in creation order so the FIFO contract is preserved.
+    // Re-load QUEUED jobs in creation order (FIFO).
     const queued = db
       .prepare("SELECT id FROM jobs WHERE status = 'queued' ORDER BY created_at ASC")
       .all() as { id: string }[];
@@ -192,28 +199,21 @@ class GlobalJobQueue {
     if (interrupted.length > 0 || this._pendingIds.length > 0) {
       console.log(
         `[queue] Init: ${interrupted.length} interrupted → FAILED, ` +
-          `${this._pendingIds.length} queued job(s) loaded`,
+          `${this._pendingIds.length} queued job(s) loaded, M=${tokenPool.M}`,
       );
     }
 
-    // Kick off the first queued job if any (server restarted mid-queue).
     this._startNext();
   }
 }
 
-/** Singleton queue — shared across all requests in the same Node.js process. */
 export const globalQueue = new GlobalJobQueue();
 
 // ─── Public API ───────────────────────────────────────────────────────────────
 
 /**
  * Create a new excavation job and register it with the global queue.
- *
- * The job is always inserted as QUEUED first; the queue immediately promotes it
- * to RUNNING (and starts excavation) if no other job is active, or leaves it
- * QUEUED otherwise.
- *
- * Returns the new job ID.
+ * Always inserted as QUEUED; the queue promotes it to RUNNING when a slot opens.
  */
 export function createAndRunJob(
   username: string,
@@ -224,21 +224,17 @@ export function createAndRunJob(
   const jobId = randomUUID();
   const now = new Date().toISOString();
 
-  // Insert as QUEUED. The queue will transition to RUNNING via _launch().
   db.prepare(`
     INSERT INTO jobs (id, account_username, requested_limit, hold_id, status, created_at)
     VALUES (?, ?, ?, ?, 'queued', ?)
   `).run(jobId, username.toLowerCase(), Math.min(limit, 100), holdId ?? null, now);
 
-  // Register with the global queue (may start immediately or wait).
   globalQueue.register(jobId);
 
   return jobId;
 }
 
-/**
- * Get a job record by ID. Read-only — never triggers any X API calls.
- */
+/** Get a job record by ID. Read-only — never triggers any X API calls. */
 export function getJob(jobId: string): JobRecord | undefined {
   const db = getDb();
   return db.prepare("SELECT * FROM jobs WHERE id = ?").get(jobId) as
@@ -247,61 +243,67 @@ export function getJob(jobId: string): JobRecord | undefined {
 }
 
 // ─── Internal job runner (function declaration — hoisted) ─────────────────────
-//
-// IMPORTANT: This must be a `function` declaration (not const/arrow) so it is
-// hoisted to the top of the module scope and available when GlobalJobQueue
-// methods call it during initialization.
 
 async function runJobAsync(jobId: string): Promise<void> {
   const db = getDb();
 
-  // Read job parameters from DB (don't trust caller args — DB is source of truth).
+  // Acquire a token from the pool (guaranteed available — queue checked before launch).
+  const token = tokenPool.acquireToken(jobId);
+  if (!token) {
+    // Safety net: should not happen under normal operation.
+    console.error(`[jobs] No token available for job ${jobId} — failing immediately`);
+    failJobInDb(jobId, "NO_TOKEN", "No bearer token available in pool");
+    globalQueue.complete(jobId);
+    return;
+  }
+
   const jobRow = db
-    .prepare(
-      "SELECT account_username, requested_limit, hold_id FROM jobs WHERE id = ?",
-    )
+    .prepare("SELECT account_username, requested_limit, hold_id FROM jobs WHERE id = ?")
     .get(jobId) as
     | { account_username: string; requested_limit: number; hold_id: string | null }
     | undefined;
 
   if (!jobRow) {
     console.warn(`[jobs] Job ${jobId} not found in DB — skipping`);
+    tokenPool.releaseToken(token);
     globalQueue.complete(jobId);
     return;
   }
 
   const { account_username: username, requested_limit: limit, hold_id: holdId } = jobRow;
 
-  // Write live api_calls to DB after each probe so the polling client can
-  // display progress in real time.
+  // Live API call progress → DB.
   const writeProgress = (apiCalls: number): void => {
     db.prepare("UPDATE jobs SET api_calls = ? WHERE id = ?").run(apiCalls, jobId);
   };
 
+  // 429 callback: mark job as WAITING_RATE_LIMIT in DB (resume_at = reset time).
+  // The in-process xfetch wait continues; this is purely for observability.
+  const onRateLimit = (resetEpochSec: number): void => {
+    const resumeAt = new Date(resetEpochSec * 1000).toISOString();
+    db.prepare("UPDATE jobs SET resume_at = ? WHERE id = ?").run(resumeAt, jobId);
+    console.log(`[jobs] Job ${jobId} WAITING_RATE_LIMIT until ${resumeAt}`);
+  };
+
   let result: ExcavationResult;
   try {
-    result = await excavateEarliest(username, limit, writeProgress);
+    result = await excavateEarliest(username, limit, writeProgress, token, onRateLimit);
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : String(e);
     failJobInDb(jobId, "EXCAVATION_ERROR", msg, undefined, holdId);
+    tokenPool.releaseToken(token);
     globalQueue.complete(jobId);
     return;
   }
 
-  // Check if excavation itself signalled a hard failure with no results.
   const hardFailReasons = [
     "PROTECTED_OR_SUSPENDED_OR_NOT_FOUND",
     "RATE_LIMIT",
     "API_ERROR",
   ];
   if (hardFailReasons.includes(result.stopReason) && result.fetchedCount === 0) {
-    failJobInDb(
-      jobId,
-      result.stopReason,
-      `Stop reason: ${result.stopReason}`,
-      result,
-      holdId,
-    );
+    failJobInDb(jobId, result.stopReason, `Stop reason: ${result.stopReason}`, result, holdId);
+    tokenPool.releaseToken(token);
     globalQueue.complete(jobId);
     return;
   }
@@ -326,6 +328,7 @@ async function runJobAsync(jobId: string): Promise<void> {
         api_calls = ?,
         fetched_count = ?,
         result_json = ?,
+        resume_at = NULL,
         finished_at = ?
     WHERE id = ?
   `).run(
@@ -337,7 +340,6 @@ async function runJobAsync(jobId: string): Promise<void> {
     jobId,
   );
 
-  // Record unlock history.
   if (result.userId && result.fetchedCount > 0) {
     db.prepare(`
       INSERT OR IGNORE INTO unlocks (user_id, account_id, job_id, unlocked_at)
@@ -349,6 +351,7 @@ async function runJobAsync(jobId: string): Promise<void> {
     `[jobs] Job ${jobId} SUCCEEDED: ${result.fetchedCount} tweets, ${result.apiCalls} API calls`,
   );
 
+  tokenPool.releaseToken(token);
   globalQueue.complete(jobId);
 }
 
@@ -376,6 +379,7 @@ function failJobInDb(
         api_calls = ?,
         fetched_count = ?,
         result_json = ?,
+        resume_at = NULL,
         finished_at = ?
     WHERE id = ?
   `).run(

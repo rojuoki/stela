@@ -100,8 +100,12 @@ export async function excavateEarliest(
   limit: number = 100,
   /** Called after each API probe so the job record can show live api_calls during excavation. */
   onProgress?: (apiCalls: number) => void,
+  /** Bearer token assigned by TokenPool for this excavation session. */
+  token?: string,
+  /** Called when a 429 is received (before the in-process wait). Arg = reset epoch (seconds). */
+  onRateLimit?: (resetEpochSec: number) => void,
 ): Promise<ExcavationResult> {
-  const stats = createStats();
+  const stats = createStats(token, onRateLimit);
   const effectiveLimit = Math.min(limit, 100);
 
   let user: XUser;
