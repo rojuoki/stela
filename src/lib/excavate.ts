@@ -171,6 +171,12 @@ async function excavateFullArchive(
   let deepTriggered = false;
   let earliestHitYear = -1;
 
+  // Deep backfill is expensive: restrict to old accounts (created <= 2018) where
+  // the full-archive index is most likely to have gaps in early months.
+  const createdYear = accountCreated.getUTCFullYear();
+  const allowDeep = createdYear <= 2018;
+  console.log(`[deep] account_created=${createdYear} allowDeep=${allowDeep}`);
+
   yearLoop: for (
     let year = startYear;
     year <= endYear && stats.totalCalls < MAX_API_CALLS;
@@ -257,10 +263,16 @@ async function excavateFullArchive(
         // Found tweets in this month.
         // Check for missing-early-months pattern before setting the region.
         if (zeroStreak >= DEEP_TRIGGER_ZERO_STREAK) {
-          deepTriggered = true;
-          console.log(
-            `[deep] trigger: year=${year} zeroStreak=${zeroStreak} firstHitMonth=${m + 1} reason=MISSING_EARLY_MONTHS`,
-          );
+          if (allowDeep) {
+            deepTriggered = true;
+            console.log(
+              `[deep] trigger: year=${year} zeroStreak=${zeroStreak} firstHitMonth=${m + 1} reason=MISSING_EARLY_MONTHS`,
+            );
+          } else {
+            console.log(
+              `[deep] skipped: new account (created=${createdYear} zeroStreak=${zeroStreak})`,
+            );
+          }
         }
         earliestRegionStart = mStart;
         break yearLoop;
