@@ -1,6 +1,16 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getJob } from "@/lib/jobs";
+import { getJob, globalQueue } from "@/lib/jobs";
 
+/**
+ * GET /api/jobs/:id
+ *
+ * Read-only: returns persisted job state from DB plus live queue metadata
+ * computed from the in-process global queue. Never triggers X API calls.
+ *
+ * Extra fields when status === "queued":
+ *   queuePosition  — 1-based position in the waiting list (1 = next to run)
+ *   runningJobId   — ID of the job currently occupying the execution slot
+ */
 export async function GET(
   _req: NextRequest,
   { params }: { params: Promise<{ id: string }> },
@@ -27,6 +37,15 @@ export async function GET(
     startedAt: job.started_at,
     finishedAt: job.finished_at,
   };
+
+  // Queue metadata — only meaningful while the job is waiting.
+  if (job.status === "queued") {
+    response.queuePosition = globalQueue.positionOf(job.id); // 1-based, or null
+    response.runningJobId = globalQueue.runningJobId;
+  } else {
+    response.queuePosition = null;
+    response.runningJobId = null;
+  }
 
   if (job.status === "failed") {
     response.error = {

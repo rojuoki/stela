@@ -41,6 +41,10 @@ interface JobResponse {
   username: string;
   fetchedCount: number;
   apiCalls: number;
+  /** 1-based position in the global execution queue; null when not queued. */
+  queuePosition?: number | null;
+  /** Job ID currently running excavation; present when this job is queued. */
+  runningJobId?: string | null;
   error?: { code: string; message: string };
   result?: { userId: string; fetchedCount: number; stopReason: string };
 }
@@ -183,8 +187,15 @@ export default function Home() {
       }
       const job: JobResponse = await res.json();
 
-      if (job.status === "queued" || job.status === "running") {
-        setJobInfo(`Status: ${job.status}… (API calls: ${job.apiCalls})`);
+      if (job.status === "queued") {
+        const pos = job.queuePosition ?? "?";
+        setJobInfo(`Queued (position ${pos}) — waiting for current job to finish…`);
+        pollRef.current = setTimeout(() => pollJob(jobId), 2500);
+        return;
+      }
+
+      if (job.status === "running") {
+        setJobInfo(`Excavating… (API calls: ${job.apiCalls})`);
         pollRef.current = setTimeout(() => pollJob(jobId), 2500);
         return;
       }
