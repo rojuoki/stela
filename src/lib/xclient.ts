@@ -196,8 +196,13 @@ export interface TimelinePage {
 
 /**
  * Full-Archive Search: GET /2/tweets/search/all
- * Returns newest-first within the window.
  * Requires Academic/Pro access; throws XApiStop(statusCode=403) if unavailable.
+ *
+ * sortOrder:
+ *   "recency"  — newest-first (required for reliable paginated collect).
+ *   undefined  — omit the parameter; lets the API use its archive index without
+ *                a recency bias, which is more reliable for old tweet detection
+ *                during explore probes.
  */
 export async function searchAllTweets(
   query: string,
@@ -206,6 +211,7 @@ export async function searchAllTweets(
   stats: ApiCallStats,
   maxResults: number = 10,
   nextToken?: string,
+  sortOrder?: "recency" | "relevancy",
 ): Promise<TimelinePage> {
   const params: Record<string, string> = {
     query,
@@ -213,8 +219,8 @@ export async function searchAllTweets(
     end_time: endTime,
     max_results: String(Math.min(Math.max(maxResults, 10), 500)),
     "tweet.fields": "created_at,public_metrics,attachments,author_id",
-    sort_order: "recency",
   };
+  if (sortOrder) params.sort_order = sortOrder;
   if (nextToken) params.next_token = nextToken;
 
   const json = (await xfetch("/tweets/search/all", params, stats)) as {

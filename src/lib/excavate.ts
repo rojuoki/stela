@@ -151,6 +151,8 @@ async function excavateFullArchive(
     const yearEnd = new Date(Date.UTC(year + 1, 0, 1));
     const yEndStr = minDate(yearEnd, now).toISOString();
 
+    // Explore probes: omit sort_order so the API uses its full-archive index
+    // without a recency bias, improving recall of very old tweets.
     let yPage: TimelinePage;
     try {
       yPage = await searchAllTweets(query, yearStart.toISOString(), yEndStr, stats, 5);
@@ -162,14 +164,16 @@ async function excavateFullArchive(
       throw e;
     }
 
+    // Detect based on the OLDEST tweet in the response, not the newest.
+    const yOldest = oldestInPage(yPage.tweets);
     console.log(
-      `[explore] year=${year} window=[${yearStart.toISOString().slice(0, 10)}, ${yEndStr.slice(0, 10)}] found=${yPage.tweets.length}`,
+      `[explore] year=${year} window=[${yearStart.toISOString().slice(0, 10)}, ${yEndStr.slice(0, 10)}] found=${yPage.tweets.length} oldest=${yOldest?.created_at.slice(0, 10) ?? "none"}`,
     );
 
     onProgress?.(stats.totalCalls);
     await sleep(EXPLORE_INTER_REQUEST_DELAY_MS);
 
-    if (yPage.tweets.length === 0) continue;
+    if (!yOldest) continue;
 
     // Year has tweets — narrow to earliest month within it.
     const monthFrom = year === startYear ? accountCreated.getUTCMonth() : 0;
@@ -185,6 +189,7 @@ async function excavateFullArchive(
 
       let mPage: TimelinePage;
       try {
+        // No sort_order — same rationale as year probe.
         mPage = await searchAllTweets(
           query,
           mStart.toISOString(),
@@ -200,14 +205,16 @@ async function excavateFullArchive(
         throw e;
       }
 
+      // Detect based on the OLDEST tweet in the response.
+      const mOldest = oldestInPage(mPage.tweets);
       console.log(
-        `[explore] month=${year}-${String(m + 1).padStart(2, "0")} window=[${mStart.toISOString().slice(0, 10)}, ${minDate(mEnd, now).toISOString().slice(0, 10)}] found=${mPage.tweets.length}`,
+        `[explore] month=${year}-${String(m + 1).padStart(2, "0")} window=[${mStart.toISOString().slice(0, 10)}, ${minDate(mEnd, now).toISOString().slice(0, 10)}] found=${mPage.tweets.length} oldest=${mOldest?.created_at.slice(0, 10) ?? "none"}`,
       );
 
       onProgress?.(stats.totalCalls);
       await sleep(EXPLORE_INTER_REQUEST_DELAY_MS);
 
-      if (mPage.tweets.length > 0) {
+      if (mOldest) {
         earliestRegionStart = mStart;
         break yearLoop;
       }
@@ -268,12 +275,15 @@ async function excavateFullArchive(
 
     let page: TimelinePage;
     try {
+      // Collect phase: use recency sort for consistent newest-first pagination.
       page = await searchAllTweets(
         query,
         collectStart.toISOString(),
         collectEnd.toISOString(),
         stats,
         100,
+        undefined,
+        "recency",
       );
     } catch (e) {
       if (e instanceof XApiStop && e.statusCode === 403) throw e;
@@ -304,6 +314,7 @@ async function excavateFullArchive(
           stats,
           100,
           nextToken,
+          "recency",
         );
       } catch (e) {
         if (e instanceof XApiStop && e.statusCode === 403) throw e;
@@ -548,6 +559,18 @@ function storeTweets(userId: string, tweets: XTweet[]): number {
 
 function sleep(ms: number) {
   return new Promise<void>((r) => setTimeout(r, ms));
+}
+
+/**
+ * Returns the chronologically oldest tweet in an array, or undefined if empty.
+ * Used by explore probes so detection is based on the earliest timestamp in the
+ * response rather than the newest (which sort_order=recency would surface first).
+ */
+function oldestInPage(tweets: XTweet[]): XTweet | undefined {
+  if (!tweets.length) return undefined;
+  return tweets.reduce((oldest, t) =>
+    new Date(t.created_at) < new Date(oldest.created_at) ? t : oldest,
+  );
 }
 
 function addDays(d: Date, days: number): Date {
