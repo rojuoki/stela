@@ -1,31 +1,50 @@
 /**
  * STELA Excavation — Earliest-100 algorithm.
  *
- * Strategy: time-window jump toward oldest side.
- * 1. Resolve user → get created_at
- * 2. Start window at [created_at, created_at + span]
- * 3. If zero tweets, double span (coarse search)
- * 4. Once tweets found, paginate within window, then advance window
- * 5. Accumulate until limit (100) or exhausted
+ * Primary: Full-Archive Search (/2/tweets/search/all)
+ *   Phase A — Explore: coarse→fine time windows (years → months) to locate the
+ *             earliest region. Uses small max_results (5–10) per probe.
+ *   Phase B — Collect: bounded pagination from earliest region forward.
+ *             Paginate within each window; sort ascending; take first 100.
  *
- * NEVER paginates newest→oldest across full timeline.
+ * Fallback: Timeline (/2/users/:id/tweets) when full-archive returns 403.
+ *           Marks acquisitionMode = "fallback". Does NOT claim "earliest guaranteed."
+ *
+ * Rules (all phases):
+ *   - NEVER paginate newest→oldest exhaustively.
+ *   - NEVER crawl full timeline.
+ *   - All calls bounded by MAX_API_CALLS.
  */
 
 import {
   getUserByUsername,
   getUserTweetsInWindow,
+  searchAllTweets,
   createStats,
   XApiStop,
   type XUser,
   type XTweet,
+  type TimelinePage,
   type ApiCallStats,
 } from "./xclient";
 import { getDb } from "./db";
 
-// Hard bounds
-const MAX_API_CALLS = 50; // absolute ceiling per excavation
-const INITIAL_SPAN_DAYS = 30;
-const MAX_SPAN_DAYS = 365 * 2; // 2 years max single window
+// ─── Constants ─────────────────────────────────────────
+
+/** Absolute call ceiling per excavation (explore + collect combined). */
+const MAX_API_CALLS = 50;
+
+/** Full-archive collect: initial window width when scanning forward. */
+const COLLECT_INITIAL_SPAN_DAYS = 30;
+const COLLECT_MAX_SPAN_DAYS = 365 * 2;
+/** Max pages to paginate within a single collect window (100/page = 500 tweets max). */
+const MAX_COLLECT_PAGES_PER_WINDOW = 5;
+
+/** Fallback (timeline) constants — same behaviour as previous implementation. */
+const FALLBACK_INITIAL_SPAN_DAYS = 30;
+const FALLBACK_MAX_SPAN_DAYS = 365 * 2;
+
+// ─── Types ─────────────────────────────────────────────
 
 export type StopReason =
   | "OK_LIMIT_REACHED"
@@ -45,7 +64,11 @@ export interface ExcavationResult {
   apiCalls: number;
   storedNewCount: number;
   errors: ApiCallStats["errors"];
+  /** "full_archive" = /2/tweets/search/all; "fallback" = /2/users/:id/tweets */
+  acquisitionMode: "full_archive" | "fallback";
 }
+
+// ─── Entry point ───────────────────────────────────────
 
 export async function excavateEarliest(
   username: string,
@@ -59,32 +82,307 @@ export async function excavateEarliest(
     user = await getUserByUsername(username, stats);
   } catch (e) {
     if (e instanceof XApiStop) {
-      return errorResult(username, effectiveLimit, stats, e.reason);
+      return errorResult(username, effectiveLimit, stats, e.reason as StopReason, "full_archive");
     }
     throw e;
   }
 
-  // Check protected
   if (user.protected) {
-    return errorResult(username, effectiveLimit, stats, "PROTECTED_OR_SUSPENDED_OR_NOT_FOUND");
+    return errorResult(
+      username,
+      effectiveLimit,
+      stats,
+      "PROTECTED_OR_SUSPENDED_OR_NOT_FOUND",
+      "full_archive",
+    );
   }
 
-  // Upsert account
   upsertAccount(user);
 
-  // ── Time-window jump algorithm ──
+  // Attempt full-archive; fall back if the token lacks that access (403).
+  const query = `from:${user.username} -is:retweet`;
+  try {
+    return await excavateFullArchive(user, query, effectiveLimit, stats);
+  } catch (e) {
+    if (e instanceof XApiStop && e.statusCode === 403) {
+      console.log(
+        `[excavate] Full-archive unavailable (403) for @${username} — switching to timeline fallback`,
+      );
+      return await excavateTimeline(user, effectiveLimit, stats);
+    }
+    throw e;
+  }
+}
+
+// ─── Full-Archive (primary) ─────────────────────────────
+
+async function excavateFullArchive(
+  user: XUser,
+  query: string,
+  limit: number,
+  stats: ApiCallStats,
+): Promise<ExcavationResult> {
   const accountCreated = new Date(user.created_at);
   const now = new Date();
-  const collected = new Map<string, XTweet>(); // dedupe by id
-  let spanDays = INITIAL_SPAN_DAYS;
+  const startYear = accountCreated.getUTCFullYear();
+  const endYear = now.getUTCFullYear();
+
+  console.log(
+    `[explore] @${user.username} account_created=${user.created_at} query="${query}"`,
+  );
+
+  // ── Phase A: Explore — coarse (years) → fine (months) ──
+
+  let earliestRegionStart: Date | null = null;
+
+  yearLoop: for (
+    let year = startYear;
+    year <= endYear && stats.totalCalls < MAX_API_CALLS;
+    year++
+  ) {
+    const yearStart =
+      year === startYear ? accountCreated : new Date(Date.UTC(year, 0, 1));
+    const yearEnd = new Date(Date.UTC(year + 1, 0, 1));
+    const yEndStr = minDate(yearEnd, now).toISOString();
+
+    let yPage: TimelinePage;
+    try {
+      yPage = await searchAllTweets(query, yearStart.toISOString(), yEndStr, stats, 10);
+    } catch (e) {
+      if (e instanceof XApiStop && e.statusCode === 403) throw e;
+      if (e instanceof XApiStop) {
+        return errorResult(user.username, limit, stats, e.reason as StopReason, "full_archive");
+      }
+      throw e;
+    }
+
+    console.log(
+      `[explore] year=${year} window=[${yearStart.toISOString().slice(0, 10)}, ${yEndStr.slice(0, 10)}] found=${yPage.tweets.length}`,
+    );
+
+    if (yPage.tweets.length === 0) continue;
+
+    // Year has tweets — narrow to earliest month within it.
+    const monthFrom = year === startYear ? accountCreated.getUTCMonth() : 0;
+
+    for (
+      let m = monthFrom;
+      m < 12 && stats.totalCalls < MAX_API_CALLS;
+      m++
+    ) {
+      const mStart = new Date(Date.UTC(year, m, 1));
+      const mEnd = new Date(Date.UTC(year, m + 1, 1));
+      if (mStart >= now) break;
+
+      let mPage: TimelinePage;
+      try {
+        mPage = await searchAllTweets(
+          query,
+          mStart.toISOString(),
+          minDate(mEnd, now).toISOString(),
+          stats,
+          5,
+        );
+      } catch (e) {
+        if (e instanceof XApiStop && e.statusCode === 403) throw e;
+        if (e instanceof XApiStop) {
+          return errorResult(user.username, limit, stats, e.reason as StopReason, "full_archive");
+        }
+        throw e;
+      }
+
+      console.log(
+        `[explore] month=${year}-${String(m + 1).padStart(2, "0")} window=[${mStart.toISOString().slice(0, 10)}, ${minDate(mEnd, now).toISOString().slice(0, 10)}] found=${mPage.tweets.length}`,
+      );
+
+      if (mPage.tweets.length > 0) {
+        earliestRegionStart = mStart;
+        break yearLoop;
+      }
+    }
+
+    // Month scan exhausted but year had tweets (unlikely API inconsistency).
+    // Use year start as a safe collect origin so we don't miss anything.
+    if (!earliestRegionStart) {
+      earliestRegionStart = yearStart;
+      console.log(
+        `[explore] month scan yielded nothing despite year hit — using year start ${yearStart.toISOString().slice(0, 10)} as region`,
+      );
+      break;
+    }
+  }
+
+  if (!earliestRegionStart) {
+    const reason: StopReason =
+      stats.totalCalls >= MAX_API_CALLS
+        ? "MAX_API_CALLS_REACHED"
+        : "ACCOUNT_HAS_LESS_THAN_LIMIT";
+    console.log(`[explore] @${user.username} no tweets found — stopReason=${reason}`);
+    return {
+      username: user.username,
+      userId: user.id,
+      createdAt: user.created_at,
+      requestedLimit: limit,
+      fetchedCount: 0,
+      stopReason: reason,
+      apiCalls: stats.totalCalls,
+      storedNewCount: 0,
+      errors: stats.errors,
+      acquisitionMode: "full_archive",
+    };
+  }
+
+  console.log(
+    `[explore] @${user.username} earliest region: ${earliestRegionStart.toISOString().slice(0, 10)} (${stats.totalCalls} calls so far)`,
+  );
+
+  // ── Phase B: Collect from earliest region forward ──
+
+  const collected = new Map<string, XTweet>();
+  let collectStart = earliestRegionStart;
+  let collectSpanDays = COLLECT_INITIAL_SPAN_DAYS;
+  let stopReason: StopReason = "ACCOUNT_HAS_LESS_THAN_LIMIT";
+
+  while (
+    collected.size < limit &&
+    stats.totalCalls < MAX_API_CALLS &&
+    collectStart < now
+  ) {
+    const collectEnd = minDate(addDays(collectStart, collectSpanDays), now);
+
+    console.log(
+      `[collect] @${user.username} window=[${collectStart.toISOString().slice(0, 10)}, ${collectEnd.toISOString().slice(0, 10)}] have=${collected.size}`,
+    );
+
+    let page: TimelinePage;
+    try {
+      page = await searchAllTweets(
+        query,
+        collectStart.toISOString(),
+        collectEnd.toISOString(),
+        stats,
+        100,
+      );
+    } catch (e) {
+      if (e instanceof XApiStop && e.statusCode === 403) throw e;
+      if (e instanceof XApiStop) {
+        stopReason = e.reason as StopReason;
+        break;
+      }
+      throw e;
+    }
+
+    // Paginate within window (bounded: MAX_COLLECT_PAGES_PER_WINDOW pages).
+    // search/all returns newest-first; we gather all, then sort ascending later.
+    const windowTweets: XTweet[] = [...page.tweets];
+    let nextToken = page.nextToken;
+    let pagesInWindow = 1;
+
+    while (
+      nextToken &&
+      stats.totalCalls < MAX_API_CALLS &&
+      pagesInWindow < MAX_COLLECT_PAGES_PER_WINDOW
+    ) {
+      let nextPage: TimelinePage;
+      try {
+        nextPage = await searchAllTweets(
+          query,
+          collectStart.toISOString(),
+          collectEnd.toISOString(),
+          stats,
+          100,
+          nextToken,
+        );
+      } catch (e) {
+        if (e instanceof XApiStop && e.statusCode === 403) throw e;
+        if (e instanceof XApiStop) {
+          stopReason = e.reason as StopReason;
+          nextToken = undefined;
+          break;
+        }
+        throw e;
+      }
+      windowTweets.push(...nextPage.tweets);
+      nextToken = nextPage.nextToken;
+      pagesInWindow++;
+    }
+
+    const exhausted = !nextToken;
+    console.log(
+      `[collect] window yielded ${windowTweets.length} tweets (${pagesInWindow} pages, ${exhausted ? "exhausted" : "page-limit hit"})`,
+    );
+
+    for (const t of windowTweets) collected.set(t.id, t);
+
+    if (collected.size >= limit) {
+      stopReason = "OK_LIMIT_REACHED";
+      break;
+    }
+
+    if (stats.totalCalls >= MAX_API_CALLS) {
+      stopReason = "MAX_API_CALLS_REACHED";
+      break;
+    }
+
+    // Advance window; double span for sparse periods.
+    collectStart = collectEnd;
+    collectSpanDays = Math.min(collectSpanDays * 2, COLLECT_MAX_SPAN_DAYS);
+  }
+
+  if (
+    stats.totalCalls >= MAX_API_CALLS &&
+    stopReason === "ACCOUNT_HAS_LESS_THAN_LIMIT"
+  ) {
+    stopReason = "MAX_API_CALLS_REACHED";
+  }
+
+  // Sort ascending, take earliest `limit` tweets.
+  const sorted = [...collected.values()]
+    .sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime())
+    .slice(0, limit);
+
+  const storedNewCount = storeTweets(user.id, sorted);
+
+  console.log(
+    `[excavate] @${user.username} done: fetched=${sorted.length} stored_new=${storedNewCount} api_calls=${stats.totalCalls} mode=full_archive stop=${stopReason}`,
+  );
+
+  return {
+    username: user.username,
+    userId: user.id,
+    createdAt: user.created_at,
+    requestedLimit: limit,
+    fetchedCount: sorted.length,
+    stopReason,
+    apiCalls: stats.totalCalls,
+    storedNewCount,
+    errors: stats.errors,
+    acquisitionMode: "full_archive",
+  };
+}
+
+// ─── Fallback (timeline) ────────────────────────────────
+
+async function excavateTimeline(
+  user: XUser,
+  limit: number,
+  stats: ApiCallStats,
+): Promise<ExcavationResult> {
+  console.log(
+    `[excavate] @${user.username} timeline fallback — note: limited to ~3200 most recent tweets; 'earliest' is not guaranteed`,
+  );
+
+  const accountCreated = new Date(user.created_at);
+  const now = new Date();
+  const collected = new Map<string, XTweet>();
+  let spanDays = FALLBACK_INITIAL_SPAN_DAYS;
   let windowStart = accountCreated;
   let stopReason: StopReason = "ACCOUNT_HAS_LESS_THAN_LIMIT";
 
-  // Phase A: coarse search — find the first window that has tweets
   while (windowStart < now && stats.totalCalls < MAX_API_CALLS) {
     const windowEnd = minDate(addDays(windowStart, spanDays), now);
 
-    let page;
+    let page: TimelinePage;
     try {
       page = await getUserTweetsInWindow(
         user.id,
@@ -101,23 +399,19 @@ export async function excavateEarliest(
     }
 
     if (page.tweets.length === 0) {
-      // No tweets in this window → expand
-      if (spanDays >= MAX_SPAN_DAYS) {
-        // Jump window forward instead of expanding further
+      if (spanDays >= FALLBACK_MAX_SPAN_DAYS) {
         windowStart = windowEnd;
-        spanDays = INITIAL_SPAN_DAYS;
+        spanDays = FALLBACK_INITIAL_SPAN_DAYS;
       } else {
-        spanDays = Math.min(spanDays * 2, MAX_SPAN_DAYS);
+        spanDays = Math.min(spanDays * 2, FALLBACK_MAX_SPAN_DAYS);
       }
       continue;
     }
 
-    // Found tweets! Add them.
     for (const t of page.tweets) collected.set(t.id, t);
 
-    // Paginate within this window
     let nextToken = page.nextToken;
-    while (nextToken && collected.size < effectiveLimit && stats.totalCalls < MAX_API_CALLS) {
+    while (nextToken && collected.size < limit && stats.totalCalls < MAX_API_CALLS) {
       try {
         page = await getUserTweetsInWindow(
           user.id,
@@ -138,7 +432,7 @@ export async function excavateEarliest(
       nextToken = page.nextToken;
     }
 
-    if (collected.size >= effectiveLimit) {
+    if (collected.size >= limit) {
       stopReason = "OK_LIMIT_REACHED";
       break;
     }
@@ -148,37 +442,42 @@ export async function excavateEarliest(
       break;
     }
 
-    // Advance window forward (shrink span back for fine-grained collection)
     windowStart = windowEnd;
-    spanDays = INITIAL_SPAN_DAYS;
+    spanDays = FALLBACK_INITIAL_SPAN_DAYS;
   }
 
-  if (stats.totalCalls >= MAX_API_CALLS && stopReason === "ACCOUNT_HAS_LESS_THAN_LIMIT") {
+  if (
+    stats.totalCalls >= MAX_API_CALLS &&
+    stopReason === "ACCOUNT_HAS_LESS_THAN_LIMIT"
+  ) {
     stopReason = "MAX_API_CALLS_REACHED";
   }
 
-  // Sort collected by created_at ascending, take earliest `limit`
   const sorted = [...collected.values()]
     .sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime())
-    .slice(0, effectiveLimit);
+    .slice(0, limit);
 
-  // Store
   const storedNewCount = storeTweets(user.id, sorted);
+
+  console.log(
+    `[excavate] @${user.username} done (fallback): fetched=${sorted.length} stored_new=${storedNewCount} api_calls=${stats.totalCalls} stop=${stopReason}`,
+  );
 
   return {
     username: user.username,
     userId: user.id,
     createdAt: user.created_at,
-    requestedLimit: effectiveLimit,
+    requestedLimit: limit,
     fetchedCount: sorted.length,
     stopReason,
     apiCalls: stats.totalCalls,
     storedNewCount,
     errors: stats.errors,
+    acquisitionMode: "fallback",
   };
 }
 
-// ─── DB helpers ────────────────────────────────────────
+// ─── DB helpers ─────────────────────────────────────────
 
 function upsertAccount(user: XUser) {
   const db = getDb();
@@ -229,7 +528,7 @@ function storeTweets(userId: string, tweets: XTweet[]): number {
   return newCount;
 }
 
-// ─── Util ──────────────────────────────────────────────
+// ─── Util ───────────────────────────────────────────────
 
 function addDays(d: Date, days: number): Date {
   const r = new Date(d);
@@ -246,6 +545,7 @@ function errorResult(
   limit: number,
   stats: ApiCallStats,
   reason: StopReason,
+  acquisitionMode: "full_archive" | "fallback",
 ): ExcavationResult {
   return {
     username,
@@ -257,5 +557,6 @@ function errorResult(
     apiCalls: stats.totalCalls,
     storedNewCount: 0,
     errors: stats.errors,
+    acquisitionMode,
   };
 }

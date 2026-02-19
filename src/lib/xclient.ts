@@ -157,6 +157,40 @@ export interface TimelinePage {
 }
 
 /**
+ * Full-Archive Search: GET /2/tweets/search/all
+ * Returns newest-first within the window.
+ * Requires Academic/Pro access; throws XApiStop(statusCode=403) if unavailable.
+ */
+export async function searchAllTweets(
+  query: string,
+  startTime: string,
+  endTime: string,
+  stats: ApiCallStats,
+  maxResults: number = 10,
+  nextToken?: string,
+): Promise<TimelinePage> {
+  const params: Record<string, string> = {
+    query,
+    start_time: startTime,
+    end_time: endTime,
+    max_results: String(Math.min(Math.max(maxResults, 10), 500)),
+    "tweet.fields": "created_at,public_metrics,attachments,author_id",
+    sort_order: "recency",
+  };
+  if (nextToken) params.next_token = nextToken;
+
+  const json = (await xfetch("/tweets/search/all", params, stats)) as {
+    data?: XTweet[];
+    meta?: { next_token?: string; result_count?: number };
+  };
+
+  return {
+    tweets: json.data || [],
+    nextToken: json.meta?.next_token,
+  };
+}
+
+/**
  * Fetch a page of tweets for a user within a time window.
  * Returns newest-first within the window (API default).
  */
