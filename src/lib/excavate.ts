@@ -4,8 +4,14 @@
  * Primary: Full-Archive Search (/2/tweets/search/all)
  *   Phase A — Explore: coarse→fine time windows (years → months) to locate the
  *             earliest region. Uses small max_results (5–10) per probe.
+ *             While scanning months, counts consecutive zero-month results
+ *             (zeroStreak) to detect a missing-early-period pattern.
  *   Phase B — Collect: bounded pagination from earliest region forward.
  *             Paginate within each window; sort ascending; take first 100.
+ *   Phase C — Deep backfill: activated only when zeroStreak ≥ DEEP_TRIGGER_ZERO_STREAK.
+ *             Re-runs the same collect code path over [deepStart, earliestRegionStart)
+ *             to recover tweets that the explore phase may have skipped.
+ *             Budget: min(remaining, MAX_API_CALLS_DEEP).
  *
  * Fallback: Timeline (/2/users/:id/tweets) when full-archive returns 403.
  *           Marks acquisitionMode = "fallback". Does NOT claim "earliest guaranteed."
@@ -13,7 +19,7 @@
  * Rules (all phases):
  *   - NEVER paginate newest→oldest exhaustively.
  *   - NEVER crawl full timeline.
- *   - All calls bounded by MAX_API_CALLS.
+ *   - All calls bounded by MAX_API_CALLS (or callCeiling for deep).
  */
 
 import {
@@ -33,6 +39,18 @@ import { getDb } from "./db";
 
 /** Absolute call ceiling per excavation (explore + collect combined). */
 const MAX_API_CALLS = 50;
+
+/**
+ * Additional budget reserved for deep backfill.
+ * The actual deep budget is min(remaining-after-standard, MAX_API_CALLS_DEEP).
+ */
+const MAX_API_CALLS_DEEP = 30;
+
+/**
+ * Minimum number of consecutive empty-month results (from the start of
+ * the month scan) before a month hit triggers the deep backfill pass.
+ */
+const DEEP_TRIGGER_ZERO_STREAK = 4;
 
 /** Delay between consecutive explore probes to avoid hammering the rate limit. */
 const EXPLORE_INTER_REQUEST_DELAY_MS = 1300;
@@ -69,6 +87,10 @@ export interface ExcavationResult {
   errors: ApiCallStats["errors"];
   /** "full_archive" = /2/tweets/search/all; "fallback" = /2/users/:id/tweets */
   acquisitionMode: "full_archive" | "fallback";
+  /** True when deep backfill was triggered (zeroStreak ≥ threshold + later month hit). */
+  deepTriggered?: boolean;
+  /** Number of additional unique tweets added by the deep backfill pass. */
+  deepAddedCount?: number;
 }
 
 // ─── Entry point ───────────────────────────────────────
@@ -141,6 +163,10 @@ async function excavateFullArchive(
 
   let earliestRegionStart: Date | null = null;
 
+  // Deep-trigger state — set during month scan, used after collect.
+  let deepTriggered = false;
+  let earliestHitYear = -1;
+
   yearLoop: for (
     let year = startYear;
     year <= endYear && stats.totalCalls < MAX_API_CALLS;
@@ -176,7 +202,13 @@ async function excavateFullArchive(
     if (!yOldest) continue;
 
     // Year has tweets — narrow to earliest month within it.
+    earliestHitYear = year;
     const monthFrom = year === startYear ? accountCreated.getUTCMonth() : 0;
+
+    // zeroStreak: consecutive empty months from the start of this month scan.
+    // A streak ≥ DEEP_TRIGGER_ZERO_STREAK followed by a hit means we may have
+    // missed an early period (e.g. YouTube: Jan–Jul empty, Aug has tweets).
+    let zeroStreak = 0;
 
     for (
       let m = monthFrom;
@@ -214,7 +246,18 @@ async function excavateFullArchive(
       onProgress?.(stats.totalCalls);
       await sleep(EXPLORE_INTER_REQUEST_DELAY_MS);
 
-      if (mOldest) {
+      if (!mOldest) {
+        // Empty month — extend the streak; existing explore logic unchanged.
+        zeroStreak++;
+      } else {
+        // Found tweets in this month.
+        // Check for missing-early-months pattern before setting the region.
+        if (zeroStreak >= DEEP_TRIGGER_ZERO_STREAK) {
+          deepTriggered = true;
+          console.log(
+            `[deep] trigger: year=${year} zeroStreak=${zeroStreak} firstHitMonth=${m + 1} reason=MISSING_EARLY_MONTHS`,
+          );
+        }
         earliestRegionStart = mStart;
         break yearLoop;
       }
@@ -248,6 +291,7 @@ async function excavateFullArchive(
       storedNewCount: 0,
       errors: stats.errors,
       acquisitionMode: "full_archive",
+      deepTriggered: false,
     };
   }
 
@@ -258,19 +302,136 @@ async function excavateFullArchive(
   // ── Phase B: Collect from earliest region forward ──
 
   const collected = new Map<string, XTweet>();
-  let collectStart = earliestRegionStart;
+
+  const standardStop = await collectWindowPass(
+    query,
+    earliestRegionStart,
+    now,
+    stats,
+    collected,
+    MAX_API_CALLS,  // budget ceiling (global)
+    limit,          // stop once we have enough for normal result
+    user.username,
+    onProgress,
+  );
+  let stopReason: StopReason = standardStop;
+
+  // ── Phase C: Deep backfill (missing early period) ──
+  //
+  // Runs the same collect code path over [deepStart, earliestRegionStart) to
+  // recover tweets the explore phase may have skipped due to API index gaps.
+  // Budget: min(remaining calls, MAX_API_CALLS_DEEP) — never exceeds global cap.
+
+  let deepAddedCount = 0;
+
+  if (deepTriggered && earliestHitYear > 0) {
+    const deepStart = maxDate(
+      new Date(Date.UTC(earliestHitYear, 0, 1)),
+      accountCreated,
+    );
+    const deepEnd = earliestRegionStart; // exclusive upper bound
+    const remainingBudget = MAX_API_CALLS - stats.totalCalls;
+    const deepCallBudget = Math.min(remainingBudget, MAX_API_CALLS_DEEP);
+
+    if (deepCallBudget > 0 && deepEnd > deepStart) {
+      const deepCallCeiling = stats.totalCalls + deepCallBudget;
+      const sizeBefore = collected.size;
+
+      console.log(
+        `[deep] backfill [${deepStart.toISOString().slice(0, 10)}, ${deepEnd.toISOString().slice(0, 10)}) budget=${deepCallBudget}`,
+      );
+
+      const deepStop = await collectWindowPass(
+        query,
+        deepStart,
+        deepEnd,
+        stats,
+        collected,
+        deepCallCeiling,
+        Number.MAX_SAFE_INTEGER, // no count limit — merge + sort happens after
+        user.username,
+        onProgress,
+      );
+
+      deepAddedCount = collected.size - sizeBefore;
+      console.log(
+        `[deep] backfill done: added=${deepAddedCount} stop=${deepStop} totalCalls=${stats.totalCalls}`,
+      );
+
+      if (deepStop === "MAX_API_CALLS_REACHED" && stopReason !== "OK_LIMIT_REACHED") {
+        stopReason = "MAX_API_CALLS_REACHED";
+      }
+    } else {
+      console.log(
+        `[deep] backfill skipped: budget=${deepCallBudget} range_valid=${deepEnd > deepStart}`,
+      );
+    }
+  }
+
+  if (stats.totalCalls >= MAX_API_CALLS && stopReason === "ACCOUNT_HAS_LESS_THAN_LIMIT") {
+    stopReason = "MAX_API_CALLS_REACHED";
+  }
+
+  // Merge all phases: sort ascending, take earliest `limit`.
+  const sorted = [...collected.values()]
+    .sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime())
+    .slice(0, limit);
+
+  const storedNewCount = storeTweets(user.id, sorted);
+
+  console.log(
+    `[excavate] @${user.username} done: fetched=${sorted.length} stored_new=${storedNewCount} api_calls=${stats.totalCalls} mode=full_archive stop=${stopReason}${deepTriggered ? ` deep_added=${deepAddedCount}` : ""}`,
+  );
+
+  return {
+    username: user.username,
+    userId: user.id,
+    createdAt: user.created_at,
+    requestedLimit: limit,
+    fetchedCount: sorted.length,
+    stopReason,
+    apiCalls: stats.totalCalls,
+    storedNewCount,
+    errors: stats.errors,
+    acquisitionMode: "full_archive",
+    deepTriggered,
+    deepAddedCount: deepTriggered ? deepAddedCount : undefined,
+  };
+}
+
+// ─── Shared collect pass ────────────────────────────────
+
+/**
+ * Runs one bounded collect pass over [start, end).
+ * Paginates windows forward with recency sort, accumulates into `collected`.
+ * Stops when: stats.totalCalls ≥ callCeiling, collected.size ≥ collectLimit,
+ *             or collectStart ≥ end.
+ * Used by both Phase B (standard) and Phase C (deep backfill).
+ */
+async function collectWindowPass(
+  query: string,
+  start: Date,
+  end: Date,
+  stats: ApiCallStats,
+  collected: Map<string, XTweet>,
+  callCeiling: number,
+  collectLimit: number,
+  username: string,
+  onProgress?: (apiCalls: number) => void,
+): Promise<StopReason> {
+  let collectStart = start;
   let collectSpanDays = COLLECT_INITIAL_SPAN_DAYS;
   let stopReason: StopReason = "ACCOUNT_HAS_LESS_THAN_LIMIT";
 
   while (
-    collected.size < limit &&
-    stats.totalCalls < MAX_API_CALLS &&
-    collectStart < now
+    collected.size < collectLimit &&
+    stats.totalCalls < callCeiling &&
+    collectStart < end
   ) {
-    const collectEnd = minDate(addDays(collectStart, collectSpanDays), now);
+    const collectEnd = minDate(addDays(collectStart, collectSpanDays), end);
 
     console.log(
-      `[collect] @${user.username} window=[${collectStart.toISOString().slice(0, 10)}, ${collectEnd.toISOString().slice(0, 10)}] have=${collected.size}`,
+      `[collect] @${username} window=[${collectStart.toISOString().slice(0, 10)}, ${collectEnd.toISOString().slice(0, 10)}] have=${collected.size}`,
     );
 
     let page: TimelinePage;
@@ -302,7 +463,7 @@ async function excavateFullArchive(
 
     while (
       nextToken &&
-      stats.totalCalls < MAX_API_CALLS &&
+      stats.totalCalls < callCeiling &&
       pagesInWindow < MAX_COLLECT_PAGES_PER_WINDOW
     ) {
       let nextPage: TimelinePage;
@@ -338,12 +499,12 @@ async function excavateFullArchive(
     onProgress?.(stats.totalCalls);
     for (const t of windowTweets) collected.set(t.id, t);
 
-    if (collected.size >= limit) {
+    if (collected.size >= collectLimit) {
       stopReason = "OK_LIMIT_REACHED";
       break;
     }
 
-    if (stats.totalCalls >= MAX_API_CALLS) {
+    if (stats.totalCalls >= callCeiling) {
       stopReason = "MAX_API_CALLS_REACHED";
       break;
     }
@@ -353,36 +514,11 @@ async function excavateFullArchive(
     collectSpanDays = Math.min(collectSpanDays * 2, COLLECT_MAX_SPAN_DAYS);
   }
 
-  if (
-    stats.totalCalls >= MAX_API_CALLS &&
-    stopReason === "ACCOUNT_HAS_LESS_THAN_LIMIT"
-  ) {
+  if (stats.totalCalls >= callCeiling && stopReason === "ACCOUNT_HAS_LESS_THAN_LIMIT") {
     stopReason = "MAX_API_CALLS_REACHED";
   }
 
-  // Sort ascending, take earliest `limit` tweets.
-  const sorted = [...collected.values()]
-    .sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime())
-    .slice(0, limit);
-
-  const storedNewCount = storeTweets(user.id, sorted);
-
-  console.log(
-    `[excavate] @${user.username} done: fetched=${sorted.length} stored_new=${storedNewCount} api_calls=${stats.totalCalls} mode=full_archive stop=${stopReason}`,
-  );
-
-  return {
-    username: user.username,
-    userId: user.id,
-    createdAt: user.created_at,
-    requestedLimit: limit,
-    fetchedCount: sorted.length,
-    stopReason,
-    apiCalls: stats.totalCalls,
-    storedNewCount,
-    errors: stats.errors,
-    acquisitionMode: "full_archive",
-  };
+  return stopReason;
 }
 
 // ─── Fallback (timeline) ────────────────────────────────
@@ -581,6 +717,10 @@ function addDays(d: Date, days: number): Date {
 
 function minDate(a: Date, b: Date): Date {
   return a < b ? a : b;
+}
+
+function maxDate(a: Date, b: Date): Date {
+  return a > b ? a : b;
 }
 
 function errorResult(
