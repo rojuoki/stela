@@ -37,10 +37,17 @@ type AccountStatus = "idle" | "loading" | "found" | "error";
 
 interface JobResponse {
   jobId: string;
-  status: "queued" | "running" | "succeeded" | "failed";
+  status:
+    | "queued"
+    | "running"
+    | "waiting_rate_limit"
+    | "succeeded"
+    | "failed"
+    | "canceled";
   username: string;
   fetchedCount: number;
   apiCalls: number;
+  resumeAt?: string | null;
   /** 1-based position in the global execution queue; null when not queued. */
   queuePosition?: number | null;
   /** Job ID currently running excavation; present when this job is queued. */
@@ -51,6 +58,9 @@ interface JobResponse {
 
 /** Artificial delay (0.5–1.0s) for UX consistency */
 const ARTIFICIAL_DELAY_MS = 750;
+
+/** Fixed polling interval — does NOT change based on job status. */
+const POLL_INTERVAL_MS = 2500;
 
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
@@ -180,31 +190,26 @@ export default function Home() {
   const pollJob = useCallback(async (jobId: string) => {
     try {
       const res = await fetch(`/api/jobs/${jobId}`);
-      if (!res.ok) {
-        setStatus("failed");
-        setError("Failed to poll job status");
+
+      // 404 → job no longer exists; clear state and return to idle.
+      if (res.status === 404) {
+        setStatus("idle");
+        setJobInfo("");
+        setError(null);
         return;
       }
+
+      // Other non-OK responses are transient (server restart, network blip).
+      // Keep polling — do not treat as terminal failure.
+      if (!res.ok) {
+        setJobInfo(`Polling error (HTTP ${res.status}) — retrying…`);
+        pollRef.current = setTimeout(() => pollJob(jobId), POLL_INTERVAL_MS);
+        return;
+      }
+
       const job: JobResponse = await res.json();
 
-      if (job.status === "queued") {
-        const pos = job.queuePosition ?? "?";
-        setJobInfo(`Queued (position ${pos}) — waiting for current job to finish…`);
-        pollRef.current = setTimeout(() => pollJob(jobId), 2500);
-        return;
-      }
-
-      if (job.status === "running") {
-        setJobInfo(`Excavating… (API calls: ${job.apiCalls})`);
-        pollRef.current = setTimeout(() => pollJob(jobId), 2500);
-        return;
-      }
-
-      if (job.status === "failed") {
-        setStatus("failed");
-        setError(job.error?.message || "Excavation failed");
-        return;
-      }
+      // ── Terminal states → stop polling ──────────────────────────────────
 
       if (job.status === "succeeded") {
         const accountId = job.result?.userId;
@@ -215,11 +220,47 @@ export default function Home() {
         setJobInfo(`${job.fetchedCount} posts · ${job.apiCalls} API calls`);
         setStatus("done");
         setCacheHit(false);
-        fetchCredits(); // Refresh credit balance
+        fetchCredits();
+        return;
       }
+
+      if (job.status === "failed") {
+        setStatus("failed");
+        setError(job.error?.message || "Excavation failed");
+        return;
+      }
+
+      if (job.status === "canceled") {
+        setStatus("failed");
+        setError("Job was canceled");
+        return;
+      }
+
+      // ── Non-terminal states → update UI, continue polling ───────────────
+      // Polling interval is constant regardless of which status we are in.
+
+      if (job.status === "waiting_rate_limit") {
+        const resumeStr = job.resumeAt
+          ? ` (resumes ${new Date(job.resumeAt).toLocaleTimeString()})`
+          : "";
+        setJobInfo(`Rate limited — waiting for cooldown${resumeStr}… (API calls: ${job.apiCalls})`);
+      } else if (job.status === "queued") {
+        const pos = job.queuePosition;
+        setJobInfo(
+          pos != null
+            ? `Queued (position ${pos}) — waiting for slot…`
+            : `Queued — waiting for slot…`,
+        );
+      } else {
+        // running, or any unknown future status
+        setJobInfo(`Excavating… (API calls: ${job.apiCalls})`);
+      }
+
+      pollRef.current = setTimeout(() => pollJob(jobId), POLL_INTERVAL_MS);
     } catch {
-      setStatus("failed");
-      setError("Network error while polling");
+      // Network error — keep polling rather than failing the job.
+      setJobInfo("Network error — retrying…");
+      pollRef.current = setTimeout(() => pollJob(jobId), POLL_INTERVAL_MS);
     }
   }, []);
 
