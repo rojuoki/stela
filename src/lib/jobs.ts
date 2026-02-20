@@ -221,30 +221,35 @@ class GlobalJobQueue {
 
   private _init(): void {
     const db = getDb();
-    const now = new Date().toISOString();
     const nowMs = Date.now();
 
-    // Mark any RUNNING jobs as failed — they were interrupted by the restart.
+    // Re-queue any RUNNING jobs rather than marking them FAILED.
+    //
+    // WHY: In Next.js dev mode, Fast Refresh / Turbopack reloads server modules
+    // on every code change. Without the globalThis singleton guard (below), each
+    // reload would call _init() and find jobs still marked RUNNING in the DB,
+    // incorrectly marking them FAILED(SERVER_RESTART) even though excavation was
+    // happily running in the same Node process.
+    //
+    // In production (true crash), re-queuing is also strictly better than failing:
+    // the checkpoint persists in resume_state, so the job continues from where it
+    // left off instead of starting over or appearing as a failure to the user.
+    //
+    // Credit holds are intentionally kept: we intend to retry, not to abort.
     const interrupted = db
-      .prepare("SELECT id, hold_id FROM jobs WHERE status = 'running'")
-      .all() as { id: string; hold_id: string | null }[];
+      .prepare("SELECT id FROM jobs WHERE status = 'running'")
+      .all() as { id: string }[];
 
     for (const job of interrupted) {
-      if (job.hold_id) {
-        try {
-          releaseHeld(job.hold_id, "Server restart");
-        } catch {}
-      }
       db.prepare(`
         UPDATE jobs
-        SET status = 'failed',
-            error_code = 'SERVER_RESTART',
-            error_message = 'Job interrupted by server restart',
-            resume_at = NULL,
-            finished_at = ?
+        SET status = 'queued',
+            error_code = NULL,
+            error_message = NULL,
+            resume_at = NULL
         WHERE id = ?
-      `).run(now, job.id);
-      console.log(`[queue] Job ${job.id} → FAILED (SERVER_RESTART)`);
+      `).run(job.id);
+      console.log(`[queue] Job ${job.id} → RE-QUEUED (was running at init; will resume from checkpoint)`);
     }
 
     // Reload QUEUED jobs. Split them into "ready" vs "waiting" based on resume_at.
@@ -257,7 +262,7 @@ class GlobalJobQueue {
     for (const job of queued) {
       const resumeAtMs = job.resume_at ? new Date(job.resume_at).getTime() : 0;
       if (resumeAtMs > nowMs) {
-        // Still in cooldown — add to waiting and schedule timer.
+        // Still in rate-limit cooldown — schedule timer to re-queue.
         this._waitingIds.set(job.id, resumeAtMs);
         const delayMs = Math.max(100, resumeAtMs - nowMs) + RESUME_BUFFER_MS;
         setTimeout(() => this._tryResume(job.id), delayMs);
@@ -271,8 +276,8 @@ class GlobalJobQueue {
 
     if (interrupted.length > 0 || queued.length > 0) {
       console.log(
-        `[queue] Init: ${interrupted.length} interrupted → FAILED, ` +
-          `${this._pendingIds.length} pending, ${this._waitingIds.size} waiting, M=${tokenPool.M}`,
+        `[queue] Init: ${interrupted.length} interrupted → RE-QUEUED, ` +
+          `${this._pendingIds.length} pending, ${this._waitingIds.size} waiting (rate-limit), M=${tokenPool.M}`,
       );
     }
 
@@ -280,7 +285,23 @@ class GlobalJobQueue {
   }
 }
 
-export const globalQueue = new GlobalJobQueue();
+// ─── Singleton — survives Next.js hot-module-reload ──────────────────────────
+//
+// Next.js dev mode (Fast Refresh / Turbopack) re-evaluates server modules on
+// every code change, creating a fresh module scope each time. A plain
+// `new GlobalJobQueue()` would call _init() on every reload and incorrectly
+// treat still-running jobs as server-restart casualties.
+//
+// Storing the instance on `globalThis` (which is NOT reset by HMR within the
+// same Node process) ensures _init() runs exactly once per process lifetime,
+// regardless of how many module reloads occur.
+//
+// In production this has no effect: modules are evaluated once at startup.
+const _g = globalThis as typeof globalThis & { __stelaQueue?: GlobalJobQueue };
+if (!_g.__stelaQueue) {
+  _g.__stelaQueue = new GlobalJobQueue();
+}
+export const globalQueue: GlobalJobQueue = _g.__stelaQueue;
 
 // ─── Public API ───────────────────────────────────────────────────────────────
 
@@ -355,13 +376,26 @@ async function runJobAsync(jobId: string): Promise<void> {
   const tokenIdx = tokenPool.getTokenIndex(token);
 
   const jobRow = db
-    .prepare("SELECT account_username, requested_limit, hold_id, resume_state FROM jobs WHERE id = ?")
+    .prepare("SELECT account_username, requested_limit, hold_id, resume_state, status FROM jobs WHERE id = ?")
     .get(jobId) as
-    | { account_username: string; requested_limit: number; hold_id: string | null; resume_state: string | null }
+    | { account_username: string; requested_limit: number; hold_id: string | null; resume_state: string | null; status: string }
     | undefined;
 
   if (!jobRow) {
     console.warn(`[jobs] Job ${jobId} not found — skipping`);
+    tokenPool.releaseToken(token);
+    globalQueue.complete(jobId);
+    return;
+  }
+
+  // Guard: verify the job is still RUNNING before doing any work.
+  // With the globalThis singleton this should always pass, but if something
+  // external changes the DB status between _launch() and here, abort cleanly
+  // rather than running a duplicate excavation.
+  if (jobRow.status !== "running") {
+    console.warn(
+      `[jobs] Job ${jobId} status=${jobRow.status} at launch time (expected running) — aborting`,
+    );
     tokenPool.releaseToken(token);
     globalQueue.complete(jobId);
     return;

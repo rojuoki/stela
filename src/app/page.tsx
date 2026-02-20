@@ -191,17 +191,20 @@ export default function Home() {
     try {
       const res = await fetch(`/api/jobs/${jobId}`);
 
-      // 404 → job no longer exists; clear state and return to idle.
+      // 404 → job no longer exists (expired, purged, or wrong ID).
+      // Clear all job-related state and return UI to idle.
       if (res.status === 404) {
+        console.log(`[poll] 404 for jobId=${jobId} — job not found, resetting to idle`);
         setStatus("idle");
-        setJobInfo("");
+        setJobInfo("Job not found — may have expired");
         setError(null);
-        return;
+        return; // stop polling
       }
 
       // Other non-OK responses are transient (server restart, network blip).
-      // Keep polling — do not treat as terminal failure.
+      // Keep polling at the same interval — do not treat as terminal failure.
       if (!res.ok) {
+        console.warn(`[poll] HTTP ${res.status} for jobId=${jobId} — retrying`);
         setJobInfo(`Polling error (HTTP ${res.status}) — retrying…`);
         pollRef.current = setTimeout(() => pollJob(jobId), POLL_INTERVAL_MS);
         return;
@@ -212,6 +215,7 @@ export default function Home() {
       // ── Terminal states → stop polling ──────────────────────────────────
 
       if (job.status === "succeeded") {
+        console.log(`[poll] stop jobId=${jobId} reason=succeeded fetched=${job.fetchedCount}`);
         const accountId = job.result?.userId;
         if (accountId) {
           const loaded = await loadTweets(accountId);
@@ -221,23 +225,25 @@ export default function Home() {
         setStatus("done");
         setCacheHit(false);
         fetchCredits();
-        return;
+        return; // stop polling
       }
 
       if (job.status === "failed") {
+        console.log(`[poll] stop jobId=${jobId} reason=failed error=${job.error?.code}`);
         setStatus("failed");
         setError(job.error?.message || "Excavation failed");
-        return;
+        return; // stop polling
       }
 
       if (job.status === "canceled") {
+        console.log(`[poll] stop jobId=${jobId} reason=canceled`);
         setStatus("failed");
         setError("Job was canceled");
-        return;
+        return; // stop polling
       }
 
-      // ── Non-terminal states → update UI, continue polling ───────────────
-      // Polling interval is constant regardless of which status we are in.
+      // ── Non-terminal states → update UI and keep polling ────────────────
+      // Interval is constant — does NOT change based on which status we are in.
 
       if (job.status === "waiting_rate_limit") {
         const resumeStr = job.resumeAt
@@ -258,7 +264,8 @@ export default function Home() {
 
       pollRef.current = setTimeout(() => pollJob(jobId), POLL_INTERVAL_MS);
     } catch {
-      // Network error — keep polling rather than failing the job.
+      // Network error — keep polling rather than surfacing as a job failure.
+      console.warn(`[poll] network error for jobId=${jobId} — retrying`);
       setJobInfo("Network error — retrying…");
       pollRef.current = setTimeout(() => pollJob(jobId), POLL_INTERVAL_MS);
     }
@@ -311,6 +318,7 @@ export default function Home() {
 
       // ── Active job (new or attached) → poll ──
       if (unlock.jobId) {
+        console.log(`[poll] start jobId=${unlock.jobId} status=${unlock.status}`);
         setJobInfo("Excavating…");
         pollJob(unlock.jobId);
       }
