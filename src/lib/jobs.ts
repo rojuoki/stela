@@ -285,23 +285,45 @@ export const globalQueue = new GlobalJobQueue();
 // ─── Public API ───────────────────────────────────────────────────────────────
 
 /**
+ * Compute the target tweet count for a job based on the account's creation year.
+ *
+ *   created_year ≤ 2012  →  50   (very old accounts: archive gaps, API limits)
+ *   created_year ≤ 2018  →  75   (older accounts: moderate depth)
+ *   otherwise            → 100   (recent accounts: full depth)
+ *
+ * Exported so callers can display the value before job creation.
+ */
+export function computeTargetCount(accountCreatedAt: string | null | undefined): number {
+  if (!accountCreatedAt) return 100;
+  const year = new Date(accountCreatedAt).getUTCFullYear();
+  if (year <= 2012) return 50;
+  if (year <= 2018) return 75;
+  return 100;
+}
+
+/**
  * Create a new excavation job and hand it to the global queue.
  * Always inserted as QUEUED; the queue promotes it to RUNNING when a slot opens.
  * /api/jobs/:id polling NEVER calls this function.
+ *
+ * @param accountCreatedAt  ISO string from the accounts table (if already cached).
+ *                          Used to compute the dynamic target count; defaults to 100
+ *                          when the account is not yet in the local DB.
  */
 export function createAndRunJob(
   username: string,
-  limit: number = 100,
+  accountCreatedAt?: string | null,
   holdId?: string,
 ): string {
   const db = getDb();
   const jobId = randomUUID();
   const now = new Date().toISOString();
+  const targetCount = computeTargetCount(accountCreatedAt);
 
   db.prepare(`
     INSERT INTO jobs (id, account_username, requested_limit, hold_id, status, created_at)
     VALUES (?, ?, ?, ?, 'queued', ?)
-  `).run(jobId, username.toLowerCase(), Math.min(limit, 100), holdId ?? null, now);
+  `).run(jobId, username.toLowerCase(), targetCount, holdId ?? null, now);
 
   globalQueue.register(jobId);
   return jobId;

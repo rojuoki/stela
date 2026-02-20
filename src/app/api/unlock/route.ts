@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { createAndRunJob } from "@/lib/jobs";
+import { createAndRunJob, computeTargetCount } from "@/lib/jobs";
 import {
   getAccountByUsername,
   getCachedTweetCount,
@@ -13,7 +13,7 @@ import {
   giveCredits,
   cleanupExpiredHolds,
 } from "@/lib/repository";
-import { normalizeUsername, validateLimit, checkRateLimit } from "@/lib/validation";
+import { normalizeUsername, checkRateLimit } from "@/lib/validation";
 
 export async function POST(req: NextRequest) {
   try {
@@ -55,7 +55,6 @@ export async function POST(req: NextRequest) {
       }, { status: 400 });
     }
 
-    const limit = validateLimit(body.limit);
     // force=true bypasses cache and idempotency, always creates a new excavation job.
     // Credit rule: force=true always holds 1 credit (same as a fresh first-time unlock).
     const force = body.force === true;
@@ -153,7 +152,10 @@ export async function POST(req: NextRequest) {
     }
 
     // ── Hold credit and create new excavation job ──
-    const jobId = createAndRunJob(username, limit);
+    // Look up account.created_at (if already cached) to compute dynamic target count.
+    // For brand-new accounts not yet in the local DB, computeTargetCount defaults to 100.
+    const knownAccount = getAccountByUsername(username);
+    const jobId = createAndRunJob(username, knownAccount?.created_at);
     const holdId = holdCredits(userId, jobId, 1);
     
     if (!holdId) {
