@@ -375,200 +375,208 @@ async function runJobAsync(jobId: string): Promise<void> {
   }
   const tokenIdx = tokenPool.getTokenIndex(token);
 
-  const jobRow = db
-    .prepare("SELECT account_username, requested_limit, hold_id, resume_state, status FROM jobs WHERE id = ?")
-    .get(jobId) as
-    | { account_username: string; requested_limit: number; hold_id: string | null; resume_state: string | null; status: string }
-    | undefined;
-
-  if (!jobRow) {
-    console.warn(`[jobs] Job ${jobId} not found — skipping`);
-    tokenPool.releaseToken(token);
-    globalQueue.complete(jobId);
-    return;
-  }
-
-  // Guard: verify the job is still RUNNING before doing any work.
-  // With the globalThis singleton this should always pass, but if something
-  // external changes the DB status between _launch() and here, abort cleanly
-  // rather than running a duplicate excavation.
-  if (jobRow.status !== "running") {
-    console.warn(
-      `[jobs] Job ${jobId} status=${jobRow.status} at launch time (expected running) — aborting`,
-    );
-    tokenPool.releaseToken(token);
-    globalQueue.complete(jobId);
-    return;
-  }
-
-  const { account_username: username, requested_limit: limit, hold_id: holdId } = jobRow;
-
-  // Restore checkpoint from previous run (if any).
-  let initialCheckpoint: ExcavationCheckpoint | null = null;
-  if (jobRow.resume_state) {
-    try {
-      initialCheckpoint = JSON.parse(jobRow.resume_state) as ExcavationCheckpoint;
-      console.log(
-        `[jobs] Job ${jobId} resuming from checkpoint phase=${initialCheckpoint.phase}` +
-          (initialCheckpoint.phase === "collect"
-            ? ` window=${initialCheckpoint.collect_window_start?.slice(0, 10)} ids=${initialCheckpoint.collected_ids?.length ?? 0}`
-            : initialCheckpoint.phase === "explore_month"
-              ? ` year=${initialCheckpoint.month_scan_year} month=${initialCheckpoint.next_month}`
-              : ` next_year=${initialCheckpoint.next_year}`),
-      );
-    } catch {
-      console.warn(`[jobs] Job ${jobId} corrupt resume_state — starting fresh`);
-    }
-  }
-
-  // Persist checkpoint to DB at every safe boundary inside the excavation.
-  // On RATE_LIMIT suspend we do NOT clear this — it survives until terminal state.
-  const saveCheckpoint = (cp: ExcavationCheckpoint): void => {
-    db.prepare("UPDATE jobs SET resume_state = ? WHERE id = ?").run(
-      JSON.stringify(cp),
-      jobId,
-    );
-  };
-
-  // Progress: api_calls counter updated after every probe (display only).
-  // Incremented ONLY inside excavateEarliest → xfetch → stats.totalCalls.
-  const writeProgress = (apiCalls: number): void => {
-    db.prepare("UPDATE jobs SET api_calls = ? WHERE id = ?").run(apiCalls, jobId);
-  };
-
-  // 429 callback: persist resume_at before xfetch throws XApiStop("RATE_LIMIT").
-  // The job will be suspended after excavateEarliest returns/throws.
-  const onRateLimit = (resetEpochSec: number): void => {
-    const resumeAt = new Date(resetEpochSec * 1000).toISOString();
-    db.prepare("UPDATE jobs SET resume_at = ? WHERE id = ?").run(resumeAt, jobId);
-    console.log(
-      `[jobs] Job ${jobId} 429 — token_idx=${tokenIdx} reset_epoch=${resetEpochSec} resume_at=${resumeAt}`,
-    );
-  };
-
-  let result: ExcavationResult | null = null;
-  let rateLimitResumeAtMs: number | null = null;
+  // Track whether this job handed off to the suspend path.
+  // globalQueue.suspend() manages the queue slot itself, so we must NOT also
+  // call globalQueue.complete() in the finally block for that path.
+  let suspended = false;
 
   try {
-    result = await excavateEarliest(
-      username,
-      limit,
-      writeProgress,
-      token,
-      onRateLimit,
-      saveCheckpoint,
-      initialCheckpoint,
-    );
-  } catch (e: unknown) {
-    // If xfetch threw XApiStop("RATE_LIMIT") and it wasn't caught inside
-    // excavateEarliest, handle it here as a suspend (not a failure).
-    if (e instanceof XApiStop && e.reason === "RATE_LIMIT") {
+    const jobRow = db
+      .prepare("SELECT account_username, requested_limit, hold_id, resume_state, status FROM jobs WHERE id = ?")
+      .get(jobId) as
+      | { account_username: string; requested_limit: number; hold_id: string | null; resume_state: string | null; status: string }
+      | undefined;
+
+    if (!jobRow) {
+      console.warn(`[jobs] Job ${jobId} not found — skipping`);
+      return; // finally handles cleanup
+    }
+
+    // Guard: verify the job is still RUNNING before doing any work.
+    // With the globalThis singleton this should always pass, but if something
+    // external changes the DB status between _launch() and here, abort cleanly
+    // rather than running a duplicate excavation.
+    if (jobRow.status !== "running") {
+      console.warn(
+        `[jobs] Job ${jobId} status=${jobRow.status} at launch time (expected running) — aborting`,
+      );
+      return; // finally handles cleanup
+    }
+
+    const { account_username: username, requested_limit: limit, hold_id: holdId } = jobRow;
+
+    // Restore checkpoint from previous run (if any).
+    let initialCheckpoint: ExcavationCheckpoint | null = null;
+    if (jobRow.resume_state) {
+      try {
+        initialCheckpoint = JSON.parse(jobRow.resume_state) as ExcavationCheckpoint;
+        console.log(
+          `[jobs] Job ${jobId} resuming from checkpoint phase=${initialCheckpoint.phase}` +
+            (initialCheckpoint.phase === "collect"
+              ? ` window=${initialCheckpoint.collect_window_start?.slice(0, 10)} ids=${initialCheckpoint.collected_ids?.length ?? 0}`
+              : initialCheckpoint.phase === "explore_month"
+                ? ` year=${initialCheckpoint.month_scan_year} month=${initialCheckpoint.next_month}`
+                : ` next_year=${initialCheckpoint.next_year}`),
+        );
+      } catch {
+        console.warn(`[jobs] Job ${jobId} corrupt resume_state — starting fresh`);
+      }
+    }
+
+    // Persist checkpoint to DB at every safe boundary inside the excavation.
+    // On RATE_LIMIT suspend we do NOT clear this — it survives until terminal state.
+    const saveCheckpoint = (cp: ExcavationCheckpoint): void => {
+      db.prepare("UPDATE jobs SET resume_state = ? WHERE id = ?").run(
+        JSON.stringify(cp),
+        jobId,
+      );
+    };
+
+    // Progress: api_calls counter updated after every probe (display only).
+    // Incremented ONLY inside excavateEarliest → xfetch → stats.totalCalls.
+    const writeProgress = (apiCalls: number): void => {
+      db.prepare("UPDATE jobs SET api_calls = ? WHERE id = ?").run(apiCalls, jobId);
+    };
+
+    // 429 callback: persist resume_at before xfetch throws XApiStop("RATE_LIMIT").
+    // The job will be suspended after excavateEarliest returns/throws.
+    const onRateLimit = (resetEpochSec: number): void => {
+      const resumeAt = new Date(resetEpochSec * 1000).toISOString();
+      db.prepare("UPDATE jobs SET resume_at = ? WHERE id = ?").run(resumeAt, jobId);
+      console.log(
+        `[jobs] Job ${jobId} 429 — token_idx=${tokenIdx} reset_epoch=${resetEpochSec} resume_at=${resumeAt}`,
+      );
+    };
+
+    let result: ExcavationResult | null = null;
+    let rateLimitResumeAtMs: number | null = null;
+
+    try {
+      result = await excavateEarliest(
+        username,
+        limit,
+        writeProgress,
+        token,
+        onRateLimit,
+        saveCheckpoint,
+        initialCheckpoint,
+      );
+    } catch (e: unknown) {
+      // If xfetch threw XApiStop("RATE_LIMIT") and it wasn't caught inside
+      // excavateEarliest, handle it here as a suspend (not a failure).
+      if (e instanceof XApiStop && e.reason === "RATE_LIMIT") {
+        const row = db
+          .prepare("SELECT resume_at FROM jobs WHERE id = ?")
+          .get(jobId) as { resume_at: string | null } | undefined;
+        rateLimitResumeAtMs = row?.resume_at
+          ? new Date(row.resume_at).getTime()
+          : Date.now() + 60_000;
+      } else {
+        const msg = e instanceof Error ? e.message : String(e);
+        failJobInDb(jobId, "EXCAVATION_ERROR", msg, undefined, holdId);
+        return; // finally handles cleanup
+      }
+    }
+
+    // result.stopReason === "RATE_LIMIT" means excavateEarliest caught the
+    // XApiStop internally and returned it as an errorResult — same treatment.
+    if (result && result.stopReason === "RATE_LIMIT") {
       const row = db
         .prepare("SELECT resume_at FROM jobs WHERE id = ?")
         .get(jobId) as { resume_at: string | null } | undefined;
       rateLimitResumeAtMs = row?.resume_at
         ? new Date(row.resume_at).getTime()
         : Date.now() + 60_000;
-    } else {
-      const msg = e instanceof Error ? e.message : String(e);
-      failJobInDb(jobId, "EXCAVATION_ERROR", msg, undefined, holdId);
-      tokenPool.releaseToken(token);
+      result = null; // treat as suspension, not failure
+    }
+
+    // ── Suspend path (429) ───────────────────────────────────────────────────
+    if (rateLimitResumeAtMs !== null) {
+      // Revert to QUEUED so the queue will re-launch after cooldown.
+      db.prepare(
+        "UPDATE jobs SET status = 'queued', resume_at = ? WHERE id = ?",
+      ).run(new Date(rateLimitResumeAtMs).toISOString(), jobId);
+
+      console.log(
+        `[jobs] Job ${jobId} SUSPENDED token_idx=${tokenIdx} resume_at=${new Date(rateLimitResumeAtMs).toISOString()}`,
+      );
+
+      suspended = true;
+      globalQueue.suspend(jobId, rateLimitResumeAtMs);
+      return; // finally releases token; complete() is skipped via suspended flag
+    }
+
+    if (!result) {
+      // Should not reach here, but guard anyway.
+      failJobInDb(jobId, "INTERNAL_ERROR", "No result and no rate limit error");
+      return; // finally handles cleanup
+    }
+
+    // ── Hard failure path ────────────────────────────────────────────────────
+    const hardFailReasons = ["PROTECTED_OR_SUSPENDED_OR_NOT_FOUND", "API_ERROR"];
+    if (hardFailReasons.includes(result.stopReason) && result.fetchedCount === 0) {
+      failJobInDb(jobId, result.stopReason, `Stop reason: ${result.stopReason}`, result, holdId);
+      return; // finally handles cleanup
+    }
+
+    // ── Success path ─────────────────────────────────────────────────────────
+    if (holdId && result.fetchedCount > 0) {
+      const captured = captureHeld(holdId, `Excavation success: ${result.fetchedCount} posts`);
+      console.log(
+        `[jobs] Credit ${captured ? "captured" : "capture failed"} for job ${jobId}`,
+      );
+    } else if (holdId && result.fetchedCount === 0) {
+      const released = releaseHeld(holdId, "Excavation returned 0 posts");
+      console.log(
+        `[jobs] Credit ${released ? "released" : "release failed"} for job ${jobId} (0 posts)`,
+      );
+    }
+
+    db.prepare(`
+      UPDATE jobs
+      SET status = 'succeeded',
+          account_id = ?,
+          api_calls = ?,
+          fetched_count = ?,
+          result_json = ?,
+          resume_at = NULL,
+          resume_state = NULL,
+          finished_at = ?
+      WHERE id = ?
+    `).run(
+      result.userId || null,
+      result.apiCalls,
+      result.fetchedCount,
+      JSON.stringify(result),
+      new Date().toISOString(),
+      jobId,
+    );
+
+    if (result.userId && result.fetchedCount > 0) {
+      db.prepare(`
+        INSERT OR IGNORE INTO unlocks (user_id, account_id, job_id, unlocked_at)
+        VALUES ('anonymous', ?, ?, ?)
+      `).run(result.userId, jobId, new Date().toISOString());
+    }
+
+    console.log(
+      `[jobs] Job ${jobId} SUCCEEDED token_idx=${tokenIdx}: ${result.fetchedCount} tweets, ${result.apiCalls} API calls`,
+    );
+    // fall through to finally
+
+  } finally {
+    // Always release the token and free the worker slot, regardless of how the
+    // job exited. This ensures the next queued job can start even if an
+    // unexpected exception was thrown mid-success or mid-failure.
+    console.log(`[worker] released job=${jobId} token_idx=${tokenIdx}`);
+    tokenPool.releaseToken(token);
+    if (!suspended) {
+      // globalQueue.suspend() already manages the queue slot for the 429 path.
+      // For every other exit (success, failure, abort) we must call complete().
       globalQueue.complete(jobId);
-      return;
+      console.log(`[queue] attempting to start next job`);
     }
   }
-
-  // result.stopReason === "RATE_LIMIT" means excavateEarliest caught the
-  // XApiStop internally and returned it as an errorResult — same treatment.
-  if (result && result.stopReason === "RATE_LIMIT") {
-    const row = db
-      .prepare("SELECT resume_at FROM jobs WHERE id = ?")
-      .get(jobId) as { resume_at: string | null } | undefined;
-    rateLimitResumeAtMs = row?.resume_at
-      ? new Date(row.resume_at).getTime()
-      : Date.now() + 60_000;
-    result = null; // treat as suspension, not failure
-  }
-
-  // ── Suspend path (429) ─────────────────────────────────────────────────────
-  if (rateLimitResumeAtMs !== null) {
-    // Revert to QUEUED so the queue will re-launch after cooldown.
-    db.prepare(
-      "UPDATE jobs SET status = 'queued', resume_at = ? WHERE id = ?",
-    ).run(new Date(rateLimitResumeAtMs).toISOString(), jobId);
-
-    console.log(
-      `[jobs] Job ${jobId} SUSPENDED token_idx=${tokenIdx} resume_at=${new Date(rateLimitResumeAtMs).toISOString()}`,
-    );
-
-    tokenPool.releaseToken(token);
-    globalQueue.suspend(jobId, rateLimitResumeAtMs);
-    return;
-  }
-
-  if (!result) {
-    // Should not reach here, but guard anyway.
-    failJobInDb(jobId, "INTERNAL_ERROR", "No result and no rate limit error");
-    tokenPool.releaseToken(token);
-    globalQueue.complete(jobId);
-    return;
-  }
-
-  // ── Hard failure path ──────────────────────────────────────────────────────
-  const hardFailReasons = ["PROTECTED_OR_SUSPENDED_OR_NOT_FOUND", "API_ERROR"];
-  if (hardFailReasons.includes(result.stopReason) && result.fetchedCount === 0) {
-    failJobInDb(jobId, result.stopReason, `Stop reason: ${result.stopReason}`, result, holdId);
-    tokenPool.releaseToken(token);
-    globalQueue.complete(jobId);
-    return;
-  }
-
-  // ── Success path ───────────────────────────────────────────────────────────
-  if (holdId && result.fetchedCount > 0) {
-    const captured = captureHeld(holdId, `Excavation success: ${result.fetchedCount} posts`);
-    console.log(
-      `[jobs] Credit ${captured ? "captured" : "capture failed"} for job ${jobId}`,
-    );
-  } else if (holdId && result.fetchedCount === 0) {
-    const released = releaseHeld(holdId, "Excavation returned 0 posts");
-    console.log(
-      `[jobs] Credit ${released ? "released" : "release failed"} for job ${jobId} (0 posts)`,
-    );
-  }
-
-  db.prepare(`
-    UPDATE jobs
-    SET status = 'succeeded',
-        account_id = ?,
-        api_calls = ?,
-        fetched_count = ?,
-        result_json = ?,
-        resume_at = NULL,
-        resume_state = NULL,
-        finished_at = ?
-    WHERE id = ?
-  `).run(
-    result.userId || null,
-    result.apiCalls,
-    result.fetchedCount,
-    JSON.stringify(result),
-    new Date().toISOString(),
-    jobId,
-  );
-
-  if (result.userId && result.fetchedCount > 0) {
-    db.prepare(`
-      INSERT OR IGNORE INTO unlocks (user_id, account_id, job_id, unlocked_at)
-      VALUES ('anonymous', ?, ?, ?)
-    `).run(result.userId, jobId, new Date().toISOString());
-  }
-
-  console.log(
-    `[jobs] Job ${jobId} SUCCEEDED token_idx=${tokenIdx}: ${result.fetchedCount} tweets, ${result.apiCalls} API calls`,
-  );
-
-  tokenPool.releaseToken(token);
-  globalQueue.complete(jobId);
 }
 
 function failJobInDb(

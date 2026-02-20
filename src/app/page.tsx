@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useRef, useCallback, useEffect } from "react";
+import { useState, useRef, useEffect } from "react";
 
 type Status = "idle" | "running" | "done" | "failed";
 
@@ -74,7 +74,11 @@ export default function Home() {
   const [jobInfo, setJobInfo] = useState<string>("");
   const [cacheHit, setCacheHit] = useState(false);
   const [credits, setCredits] = useState<number>(0);
-  
+
+  // Stable job ID — stored in state so polling survives re-renders.
+  // Setting this to a non-null value starts polling; setting to null stops it.
+  const [activeJobId, setActiveJobId] = useState<string | null>(null);
+
   // Account preview state
   const [accountStatus, setAccountStatus] = useState<AccountStatus>("idle");
   const [accountData, setAccountData] = useState<AccountData | null>(null);
@@ -83,11 +87,9 @@ export default function Home() {
   // Frontend session cache to avoid repeated lookups
   const [sessionCache, setSessionCache] = useState<Map<string, AccountData | { error: string }>>(new Map());
   
-  const pollRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lookupTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const cleanup = () => {
-    if (pollRef.current) clearTimeout(pollRef.current);
     if (lookupTimeoutRef.current) clearTimeout(lookupTimeoutRef.current);
   };
 
@@ -187,95 +189,123 @@ export default function Home() {
     return [];
   };
 
-  const pollJob = useCallback(async (jobId: string) => {
-    try {
-      const res = await fetch(`/api/jobs/${jobId}`);
+  // ── Polling driven by activeJobId ──────────────────────────────────────────
+  // Using useEffect + state rather than a useCallback fire-and-forget ensures
+  // the jobId survives re-renders and cleanup is handled automatically.
+  useEffect(() => {
+    if (!activeJobId) return;
 
-      // 404 → job no longer exists (expired, purged, or wrong ID).
-      // Clear all job-related state and return UI to idle.
-      if (res.status === 404) {
-        console.log(`[poll] 404 for jobId=${jobId} — job not found, resetting to idle`);
-        setStatus("idle");
-        setJobInfo("Job not found — may have expired");
-        setError(null);
-        return; // stop polling
-      }
+    console.log(`[poll] start jobId=${activeJobId}`);
 
-      // Other non-OK responses are transient (server restart, network blip).
-      // Keep polling at the same interval — do not treat as terminal failure.
-      if (!res.ok) {
-        console.warn(`[poll] HTTP ${res.status} for jobId=${jobId} — retrying`);
-        setJobInfo(`Polling error (HTTP ${res.status}) — retrying…`);
-        pollRef.current = setTimeout(() => pollJob(jobId), POLL_INTERVAL_MS);
-        return;
-      }
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
 
-      const job: JobResponse = await res.json();
+    const poll = async () => {
+      if (cancelled) return;
 
-      // ── Terminal states → stop polling ──────────────────────────────────
+      try {
+        const res = await fetch(`/api/jobs/${activeJobId}`);
 
-      if (job.status === "succeeded") {
-        console.log(`[poll] stop jobId=${jobId} reason=succeeded fetched=${job.fetchedCount}`);
-        const accountId = job.result?.userId;
-        if (accountId) {
-          const loaded = await loadTweets(accountId);
-          setTweets(loaded);
+        if (cancelled) return;
+
+        // 404 → job no longer exists (expired, purged, or wrong ID).
+        if (res.status === 404) {
+          console.log(`[poll] 404 jobId=${activeJobId} — resetting to idle`);
+          setStatus("idle");
+          setJobInfo("Job not found — may have expired");
+          setError(null);
+          setActiveJobId(null); // stops this effect
+          return;
         }
-        setJobInfo(`${job.fetchedCount} posts · ${job.apiCalls} API calls`);
-        setStatus("done");
-        setCacheHit(false);
-        fetchCredits();
-        return; // stop polling
+
+        // Transient server/network error — retry at same interval.
+        if (!res.ok) {
+          console.warn(`[poll] HTTP ${res.status} jobId=${activeJobId} — retrying`);
+          setJobInfo(`Polling error (HTTP ${res.status}) — retrying…`);
+          timer = setTimeout(poll, POLL_INTERVAL_MS);
+          return;
+        }
+
+        const job: JobResponse = await res.json();
+
+        // ── Terminal states → stop polling ────────────────────────────────
+
+        if (job.status === "succeeded") {
+          console.log(`[poll] stop jobId=${activeJobId} reason=succeeded fetched=${job.fetchedCount}`);
+          const accountId = job.result?.userId;
+          if (accountId) {
+            const loaded = await loadTweets(accountId);
+            if (!cancelled) setTweets(loaded);
+          }
+          if (!cancelled) {
+            setJobInfo(`${job.fetchedCount} posts · ${job.apiCalls} API calls`);
+            setStatus("done");
+            setCacheHit(false);
+            fetchCredits();
+            setActiveJobId(null); // stops this effect
+          }
+          return;
+        }
+
+        if (job.status === "failed") {
+          console.log(`[poll] stop jobId=${activeJobId} reason=failed error=${job.error?.code}`);
+          setStatus("failed");
+          setError(job.error?.message || "Excavation failed");
+          setActiveJobId(null);
+          return;
+        }
+
+        if (job.status === "canceled") {
+          console.log(`[poll] stop jobId=${activeJobId} reason=canceled`);
+          setStatus("failed");
+          setError("Job was canceled");
+          setActiveJobId(null);
+          return;
+        }
+
+        // ── Non-terminal → update UI and schedule next tick ──────────────
+
+        if (job.status === "waiting_rate_limit") {
+          const resumeStr = job.resumeAt
+            ? ` (resumes ${new Date(job.resumeAt).toLocaleTimeString()})`
+            : "";
+          setJobInfo(`Rate limited — waiting for cooldown${resumeStr}… (API calls: ${job.apiCalls})`);
+        } else if (job.status === "queued") {
+          const pos = job.queuePosition;
+          setJobInfo(
+            pos != null
+              ? `Queued (position ${pos}) — waiting for slot…`
+              : `Queued — waiting for slot…`,
+          );
+        } else {
+          setJobInfo(`Excavating… (API calls: ${job.apiCalls})`);
+        }
+
+        timer = setTimeout(poll, POLL_INTERVAL_MS);
+      } catch {
+        if (!cancelled) {
+          console.warn(`[poll] network error jobId=${activeJobId} — retrying`);
+          setJobInfo("Network error — retrying…");
+          timer = setTimeout(poll, POLL_INTERVAL_MS);
+        }
       }
+    };
 
-      if (job.status === "failed") {
-        console.log(`[poll] stop jobId=${jobId} reason=failed error=${job.error?.code}`);
-        setStatus("failed");
-        setError(job.error?.message || "Excavation failed");
-        return; // stop polling
-      }
+    poll();
 
-      if (job.status === "canceled") {
-        console.log(`[poll] stop jobId=${jobId} reason=canceled`);
-        setStatus("failed");
-        setError("Job was canceled");
-        return; // stop polling
-      }
-
-      // ── Non-terminal states → update UI and keep polling ────────────────
-      // Interval is constant — does NOT change based on which status we are in.
-
-      if (job.status === "waiting_rate_limit") {
-        const resumeStr = job.resumeAt
-          ? ` (resumes ${new Date(job.resumeAt).toLocaleTimeString()})`
-          : "";
-        setJobInfo(`Rate limited — waiting for cooldown${resumeStr}… (API calls: ${job.apiCalls})`);
-      } else if (job.status === "queued") {
-        const pos = job.queuePosition;
-        setJobInfo(
-          pos != null
-            ? `Queued (position ${pos}) — waiting for slot…`
-            : `Queued — waiting for slot…`,
-        );
-      } else {
-        // running, or any unknown future status
-        setJobInfo(`Excavating… (API calls: ${job.apiCalls})`);
-      }
-
-      pollRef.current = setTimeout(() => pollJob(jobId), POLL_INTERVAL_MS);
-    } catch {
-      // Network error — keep polling rather than surfacing as a job failure.
-      console.warn(`[poll] network error for jobId=${jobId} — retrying`);
-      setJobInfo("Network error — retrying…");
-      pollRef.current = setTimeout(() => pollJob(jobId), POLL_INTERVAL_MS);
-    }
-  }, []);
+    return () => {
+      console.log(`[poll] cleanup jobId=${activeJobId}`);
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+    };
+  }, [activeJobId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleUnlock = async (force = false) => {
     const raw = username.trim().replace(/^@/, "");
     if (!raw) return;
 
     cleanup();
+    setActiveJobId(null); // cancel any previous poll loop
     setStatus("running");
     setError(null);
     setTweets([]);
@@ -316,11 +346,10 @@ export default function Home() {
         return;
       }
 
-      // ── Active job (new or attached) → poll ──
+      // ── Active job (new or attached) → start polling via state ──
       if (unlock.jobId) {
-        console.log(`[poll] start jobId=${unlock.jobId} status=${unlock.status}`);
         setJobInfo("Excavating…");
-        pollJob(unlock.jobId);
+        setActiveJobId(unlock.jobId); // triggers useEffect → starts polling
       }
     } catch {
       setStatus("failed");
