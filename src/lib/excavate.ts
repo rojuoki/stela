@@ -69,7 +69,7 @@ const MAX_COLLECT_PAGES_PER_WINDOW = 5;
 
 // ── Adaptive window sizing constants ──────────────────────────────────────────
 // Controls how collectSpanDays grows/shrinks based on hit density per window.
-const TARGET_MIN_HITS = 3;         // below this → window is "low density"
+const TARGET_MIN_HITS = 10;        // below this → window is "low density"
 const MIN_COLLECT_SPAN_DAYS = 7;   // floor to prevent runaway shrink
 // ceiling = COLLECT_MAX_SPAN_DAYS (reuse existing)
 const GROW_FACTOR_ZERO = 8;        // aggressive grow when window is empty
@@ -146,6 +146,18 @@ export interface ExcavationCheckpoint {
    * loading tweets from prior jobs.
    */
   collected_ids?: string[];
+
+  // ── Mid-window pagination resume (COLLECT phase only) ──────────────────────
+  // Set after every successful page fetch when next_token is non-null.
+  // Cleared (null) by saveWindowCheckpoint when the window finishes.
+  /** ISO string — the end boundary of the window currently being paginated. */
+  collect_window_end?: string | null;
+  /** X API next_token for the next page to fetch in the current window. null = no mid-window state. */
+  collect_next_token?: string | null;
+  /** Whether the window's pagination was exhausted (always false when next_token is set). */
+  collect_exhausted?: boolean;
+  /** Number of pages already fetched in the current window (for debug logging). */
+  collect_pages_fetched?: number;
 }
 
 // ─── Entry point ───────────────────────────────────────
@@ -502,11 +514,26 @@ async function excavateFullArchive(
   const collectInitialSpan =
     cp?.phase === "collect" ? cp.collect_span_days : COLLECT_INITIAL_SPAN_DAYS;
 
+  // Mid-window pagination resume: extract saved page-level state (if any).
+  const collectResumeWindowEnd =
+    cp?.phase === "collect" && cp.collect_next_token && cp.collect_window_end
+      ? new Date(cp.collect_window_end)
+      : null;
+  const collectResumeNextToken =
+    cp?.phase === "collect" && cp.collect_next_token ? cp.collect_next_token : null;
+  const collectResumePagesFetched =
+    cp?.phase === "collect" && cp.collect_pages_fetched != null
+      ? cp.collect_pages_fetched
+      : undefined;
+
   // Build a full collect-phase checkpoint for the save callback.
+  // pageState is set for mid-window page checkpoints; omitted for window-level checkpoints
+  // (which clears collect_next_token, preventing stale resume state).
   const makeCollectCp = (
     nextWindowStart: Date,
     nextSpanDays: number,
     collectedIds: string[],
+    pageState?: { windowEnd: Date; nextToken: string; pagesFetched: number },
   ): ExcavationCheckpoint => ({
     phase: "collect",
     next_year: earliestHitYear,
@@ -518,6 +545,11 @@ async function excavateFullArchive(
     collect_window_start: nextWindowStart.toISOString(),
     collect_span_days: nextSpanDays,
     collected_ids: collectedIds,
+    // Page-level fields (null when window-level checkpoint, clearing mid-window state).
+    collect_window_end: pageState?.windowEnd.toISOString() ?? null,
+    collect_next_token: pageState?.nextToken ?? null,
+    collect_exhausted: pageState ? false : undefined,
+    collect_pages_fetched: pageState?.pagesFetched,
   });
 
   const standardStop = await collectWindowPass(
@@ -534,8 +566,17 @@ async function excavateFullArchive(
       userId: user.id,
       resumeFrom: collectResumeFrom,
       initialSpanDays: collectInitialSpan,
+      resumeWindowEnd: collectResumeWindowEnd,
+      resumeNextToken: collectResumeNextToken,
+      resumePagesFetched: collectResumePagesFetched,
+      // Window-level checkpoint: clears page-level fields (collect_next_token = null).
       saveWindowCheckpoint: saveCheckpoint
         ? (ws, sd, ids) => saveCheckpoint(makeCollectCp(ws, sd, ids))
+        : undefined,
+      // Page-level checkpoint: saves next_token so resume skips already-fetched pages.
+      savePageCheckpoint: saveCheckpoint
+        ? (ws, we, nt, pf, ids, sd) =>
+            saveCheckpoint(makeCollectCp(ws, sd, ids, { windowEnd: we, nextToken: nt, pagesFetched: pf }))
         : undefined,
     },
   );
@@ -639,6 +680,27 @@ interface CollectCheckpointOpts {
     nextSpanDays: number,
     collectedIds: string[],
   ) => void;
+
+  // ── Mid-window pagination resume ─────────────────────────────────────────
+  /** The end boundary of the partially-completed window being resumed. */
+  resumeWindowEnd?: Date | null;
+  /** Pagination token to resume from within the current window (skip already-fetched pages). */
+  resumeNextToken?: string | null;
+  /** Pages already fetched in the current window before suspend (for logging). */
+  resumePagesFetched?: number;
+  /**
+   * Called after each page fetch when a next_token is available (more pages remain).
+   * Fires BEFORE the next API call so the state is saved if 429 hits next.
+   * Args: windowStart, windowEnd, nextToken, pagesFetched, collectedIds (all so far), currentSpanDays.
+   */
+  savePageCheckpoint?: (
+    windowStart: Date,
+    windowEnd: Date,
+    nextToken: string,
+    pagesFetched: number,
+    collectedIds: string[],
+    currentSpanDays: number,
+  ) => void;
 }
 
 /**
@@ -665,6 +727,13 @@ async function collectWindowPass(
   let collectSpanDays = checkpointOpts?.initialSpanDays ?? COLLECT_INITIAL_SPAN_DAYS;
   let stopReason: StopReason = "ACCOUNT_HAS_LESS_THAN_LIMIT";
 
+  // True only for the very first window when a mid-window pagination token was saved.
+  // After the first window completes (or if no token was saved), this is always false.
+  let resumingMidWindow =
+    checkpointOpts?.resumeFrom != null &&
+    checkpointOpts?.resumeWindowEnd != null &&
+    checkpointOpts?.resumeNextToken != null;
+
   // If the resume point is at or past `end`, the collect phase is already done.
   if (collectStart >= end) {
     console.log(
@@ -674,9 +743,15 @@ async function collectWindowPass(
   }
 
   if (checkpointOpts?.resumeFrom) {
-    console.log(
-      `[collect] @${username} resuming from window=${collectStart.toISOString().slice(0, 10)} already_have=${collected.size}`,
-    );
+    if (resumingMidWindow) {
+      console.log(
+        `[collect] @${username} resuming mid-window=${collectStart.toISOString().slice(0, 10)} next_token=${checkpointOpts.resumeNextToken} pages_done=${checkpointOpts.resumePagesFetched ?? "?"} already_have=${collected.size}`,
+      );
+    } else {
+      console.log(
+        `[collect] @${username} resuming from window=${collectStart.toISOString().slice(0, 10)} already_have=${collected.size}`,
+      );
+    }
   }
 
   while (
@@ -684,37 +759,83 @@ async function collectWindowPass(
     stats.totalCalls < callCeiling &&
     collectStart < end
   ) {
-    const collectEnd = minDate(addDays(collectStart, collectSpanDays), end);
+    // For a mid-window resume, the window end was already computed and saved.
+    // Use it directly rather than re-computing from collectSpanDays.
+    const collectEnd = resumingMidWindow
+      ? checkpointOpts!.resumeWindowEnd!
+      : minDate(addDays(collectStart, collectSpanDays), end);
 
     console.log(
       `[collect] @${username} window=[${collectStart.toISOString().slice(0, 10)}, ${collectEnd.toISOString().slice(0, 10)}] have=${collected.size}`,
     );
 
-    let page: TimelinePage;
-    try {
-      page = await searchAllTweets(
-        query,
-        collectStart.toISOString(),
-        collectEnd.toISOString(),
-        stats,
-        100,
-        undefined,
-        "recency",
+    // Accumulated tweets for this window across all pages.
+    const windowTweets: XTweet[] = [];
+    let nextToken: string | undefined;
+    let pagesInWindow: number;
+
+    if (resumingMidWindow) {
+      // Skip page 1 re-fetch; jump straight to the saved pagination position.
+      // Tweets from previously-fetched pages are already in DB and will be
+      // restored into `collected` from checkpoint (via collected_ids).
+      console.log(
+        `[checkpoint] COLLECT resume from next_token=${checkpointOpts!.resumeNextToken}`,
       );
-    } catch (e) {
-      if (e instanceof XApiStop && e.statusCode === 403) throw e;
-      if (e instanceof XApiStop) {
-        stopReason = e.reason as StopReason;
-        break;
+      nextToken = checkpointOpts!.resumeNextToken!;
+      pagesInWindow = checkpointOpts!.resumePagesFetched ?? 1;
+      resumingMidWindow = false; // only applies to the first window
+    } else {
+      // Fresh window: fetch page 1.
+      let page: TimelinePage;
+      try {
+        page = await searchAllTweets(
+          query,
+          collectStart.toISOString(),
+          collectEnd.toISOString(),
+          stats,
+          100,
+          undefined,
+          "recency",
+        );
+      } catch (e) {
+        if (e instanceof XApiStop && e.statusCode === 403) throw e;
+        if (e instanceof XApiStop) {
+          stopReason = e.reason as StopReason;
+          break;
+        }
+        throw e;
       }
-      throw e;
+
+      windowTweets.push(...page.tweets);
+      nextToken = page.nextToken;
+      pagesInWindow = 1;
+
+      // Store page 1 tweets immediately so they survive a 429 on the next call.
+      if (checkpointOpts?.userId && page.tweets.length > 0) {
+        storeTweets(checkpointOpts.userId, page.tweets);
+      }
+
+      // Save page checkpoint BEFORE making the next API call (if more pages remain).
+      if (nextToken && checkpointOpts?.savePageCheckpoint) {
+        const pageCollectedIds = [
+          ...collected.keys(),
+          ...windowTweets.map((t) => t.id),
+        ];
+        checkpointOpts.savePageCheckpoint(
+          collectStart,
+          collectEnd,
+          nextToken,
+          pagesInWindow,
+          pageCollectedIds,
+          collectSpanDays,
+        );
+        console.log(
+          `[checkpoint] COLLECT page saved next_token=${nextToken} exhausted=false pages=${pagesInWindow}`,
+        );
+      }
     }
 
     // Paginate within window (bounded: MAX_COLLECT_PAGES_PER_WINDOW pages).
-    const windowTweets: XTweet[] = [...page.tweets];
-    let nextToken = page.nextToken;
-    let pagesInWindow = 1;
-
     while (
       nextToken &&
       stats.totalCalls < callCeiling &&
@@ -743,6 +864,30 @@ async function collectWindowPass(
       windowTweets.push(...nextPage.tweets);
       nextToken = nextPage.nextToken;
       pagesInWindow++;
+
+      // Store this page's tweets immediately for the same reason.
+      if (checkpointOpts?.userId && nextPage.tweets.length > 0) {
+        storeTweets(checkpointOpts.userId, nextPage.tweets);
+      }
+
+      // Save page checkpoint when more pages remain.
+      if (nextToken && checkpointOpts?.savePageCheckpoint) {
+        const pageCollectedIds = [
+          ...collected.keys(),
+          ...windowTweets.map((t) => t.id),
+        ];
+        checkpointOpts.savePageCheckpoint(
+          collectStart,
+          collectEnd,
+          nextToken,
+          pagesInWindow,
+          pageCollectedIds,
+          collectSpanDays,
+        );
+        console.log(
+          `[checkpoint] COLLECT page saved next_token=${nextToken} exhausted=false pages=${pagesInWindow}`,
+        );
+      }
     }
 
     const exhausted = !nextToken;
