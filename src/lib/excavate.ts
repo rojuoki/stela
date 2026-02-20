@@ -67,6 +67,15 @@ const COLLECT_MAX_SPAN_DAYS = 365 * 2;
 /** Max pages to paginate within a single collect window (100/page = 500 tweets max). */
 const MAX_COLLECT_PAGES_PER_WINDOW = 5;
 
+// ── Adaptive window sizing constants ──────────────────────────────────────────
+// Controls how collectSpanDays grows/shrinks based on hit density per window.
+const TARGET_MIN_HITS = 3;         // below this → window is "low density"
+const MIN_COLLECT_SPAN_DAYS = 7;   // floor to prevent runaway shrink
+// ceiling = COLLECT_MAX_SPAN_DAYS (reuse existing)
+const GROW_FACTOR_ZERO = 8;        // aggressive grow when window is empty
+const GROW_FACTOR_LOW  = 4;        // gentle grow when window has <TARGET_MIN_HITS tweets
+const SHRINK_FACTOR_FULL = 0.5;    // halve span when window is clogged (page cap hit)
+
 /** Fallback (timeline) constants — same behaviour as previous implementation. */
 const FALLBACK_INITIAL_SPAN_DAYS = 30;
 const FALLBACK_MAX_SPAN_DAYS = 365 * 2;
@@ -741,8 +750,10 @@ async function collectWindowPass(
       `[collect] window yielded ${windowTweets.length} tweets (${pagesInWindow} pages, ${exhausted ? "exhausted" : "page-limit hit"})`,
     );
 
+    const sizeBeforeWindow = collected.size;
     onProgress?.(stats.totalCalls);
     for (const t of windowTweets) collected.set(t.id, t);
+    const uniqueNew = collected.size - sizeBeforeWindow;
 
     // ── Incremental storage — persist this window's tweets to DB so they
     //    survive a 429 suspend and can be reloaded on resume.
@@ -750,11 +761,37 @@ async function collectWindowPass(
       storeTweets(checkpointOpts.userId, windowTweets);
     }
 
+    // ── Adaptive window sizing ─────────────────────────────────────────────
+    // Grow aggressively on empty windows (sparse/early account) to reduce
+    // wasted API calls. Shrink when the page cap is hit (dense period) so we
+    // don't skip tweets on the earliest side.
+    const clogged = !exhausted && pagesInWindow >= MAX_COLLECT_PAGES_PER_WINDOW;
+    let adaptAction: string;
+    let nextSpanDays: number;
+
+    if (uniqueNew === 0) {
+      nextSpanDays = Math.min(collectSpanDays * GROW_FACTOR_ZERO, COLLECT_MAX_SPAN_DAYS);
+      adaptAction = "grow_zero";
+    } else if (uniqueNew < TARGET_MIN_HITS) {
+      nextSpanDays = Math.min(collectSpanDays * GROW_FACTOR_LOW, COLLECT_MAX_SPAN_DAYS);
+      adaptAction = "grow_low";
+    } else if (clogged) {
+      nextSpanDays = Math.max(Math.floor(collectSpanDays * SHRINK_FACTOR_FULL), MIN_COLLECT_SPAN_DAYS);
+      adaptAction = "shrink_full";
+    } else {
+      nextSpanDays = collectSpanDays;
+      adaptAction = "keep";
+    }
+
+    console.log(
+      `[collect][adaptive] spanDays=${collectSpanDays} uniqueNew=${uniqueNew} pages=${pagesInWindow} exhausted=${exhausted} action=${adaptAction} nextSpanDays=${nextSpanDays}`,
+    );
+
     if (collected.size >= collectLimit) {
       stopReason = "OK_LIMIT_REACHED";
       // Advance window before saving checkpoint to mark this window done.
       collectStart = collectEnd;
-      collectSpanDays = Math.min(collectSpanDays * 2, COLLECT_MAX_SPAN_DAYS);
+      collectSpanDays = nextSpanDays;
       checkpointOpts?.saveWindowCheckpoint?.(
         collectStart,
         collectSpanDays,
@@ -768,9 +805,9 @@ async function collectWindowPass(
       break;
     }
 
-    // Advance window; double span for sparse periods.
+    // Advance window using the adaptively computed span.
     collectStart = collectEnd;
-    collectSpanDays = Math.min(collectSpanDays * 2, COLLECT_MAX_SPAN_DAYS);
+    collectSpanDays = nextSpanDays;
 
     // Checkpoint: this window done, next window is collectStart.
     checkpointOpts?.saveWindowCheckpoint?.(
