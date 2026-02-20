@@ -986,12 +986,15 @@ function loadTweetsFromDbByIds(accountId: string, ids: string[]): XTweet[] {
 
   return rows.map((r) => ({
     id: r.id,
+    author_id: accountId,
     created_at: r.created_at,
     text: r.text,
     public_metrics: {
       like_count: r.like_count,
       retweet_count: r.retweet_count,
       reply_count: r.reply_count,
+      quote_count: 0,
+      impression_count: 0,
     },
     attachments: r.media_json ? JSON.parse(r.media_json) : undefined,
   }));

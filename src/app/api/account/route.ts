@@ -31,8 +31,13 @@ export async function GET(req: NextRequest) {
 
     const { searchParams } = new URL(req.url);
     const rawUsername = searchParams.get("username");
-    
-    // Input validation
+
+    // Input validation — guard null before passing to normalizeUsername
+    if (!rawUsername) {
+      return NextResponse.json({
+        error: "Invalid username format. Must be 1-15 characters, letters/numbers/underscore only."
+      }, { status: 400 });
+    }
     const username = normalizeUsername(rawUsername);
     if (!username) {
       return NextResponse.json({ 
@@ -71,7 +76,7 @@ export async function GET(req: NextRequest) {
         user.id,
         user.username.toLowerCase(),
         user.name,
-        user.profile_image_url || null,
+        null, // avatar_url not returned by getUserByUsername
         user.created_at,
         user.protected ? 1 : 0,
         new Date().toISOString()
@@ -83,7 +88,7 @@ export async function GET(req: NextRequest) {
         account_id: user.id,
         username: user.username,
         display_name: user.name,
-        avatar_url: user.profile_image_url || null,
+        avatar_url: null,
         created_at: user.created_at,
         protected: user.protected,
         source: "api"
