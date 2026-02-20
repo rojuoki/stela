@@ -26,7 +26,7 @@
 
 import { randomUUID } from "crypto";
 import { getDb } from "./db";
-import { excavateEarliest, type ExcavationResult } from "./excavate";
+import { excavateEarliest, type ExcavationCheckpoint, type ExcavationResult } from "./excavate";
 import { captureHeld, releaseHeld } from "./repository";
 import { tokenPool } from "./tokenPool";
 import { XApiStop } from "./xclient";
@@ -48,6 +48,12 @@ export interface JobRecord {
   hold_id: string | null;
   /** Set when a 429 suspends the job; cleared on terminal state. ISO-8601. */
   resume_at: string | null;
+  /**
+   * JSON-serialised ExcavationCheckpoint. Written at every safe boundary so the
+   * excavation can resume from the exact last point after a 429 suspend.
+   * Cleared (NULL) on any terminal state (succeeded / failed).
+   */
+  resume_state: string | null;
 }
 
 // ─── Global Serialization Queue ───────────────────────────────────────────────
@@ -327,9 +333,9 @@ async function runJobAsync(jobId: string): Promise<void> {
   const tokenIdx = tokenPool.getTokenIndex(token);
 
   const jobRow = db
-    .prepare("SELECT account_username, requested_limit, hold_id FROM jobs WHERE id = ?")
+    .prepare("SELECT account_username, requested_limit, hold_id, resume_state FROM jobs WHERE id = ?")
     .get(jobId) as
-    | { account_username: string; requested_limit: number; hold_id: string | null }
+    | { account_username: string; requested_limit: number; hold_id: string | null; resume_state: string | null }
     | undefined;
 
   if (!jobRow) {
@@ -340,6 +346,33 @@ async function runJobAsync(jobId: string): Promise<void> {
   }
 
   const { account_username: username, requested_limit: limit, hold_id: holdId } = jobRow;
+
+  // Restore checkpoint from previous run (if any).
+  let initialCheckpoint: ExcavationCheckpoint | null = null;
+  if (jobRow.resume_state) {
+    try {
+      initialCheckpoint = JSON.parse(jobRow.resume_state) as ExcavationCheckpoint;
+      console.log(
+        `[jobs] Job ${jobId} resuming from checkpoint phase=${initialCheckpoint.phase}` +
+          (initialCheckpoint.phase === "collect"
+            ? ` window=${initialCheckpoint.collect_window_start?.slice(0, 10)} ids=${initialCheckpoint.collected_ids?.length ?? 0}`
+            : initialCheckpoint.phase === "explore_month"
+              ? ` year=${initialCheckpoint.month_scan_year} month=${initialCheckpoint.next_month}`
+              : ` next_year=${initialCheckpoint.next_year}`),
+      );
+    } catch {
+      console.warn(`[jobs] Job ${jobId} corrupt resume_state — starting fresh`);
+    }
+  }
+
+  // Persist checkpoint to DB at every safe boundary inside the excavation.
+  // On RATE_LIMIT suspend we do NOT clear this — it survives until terminal state.
+  const saveCheckpoint = (cp: ExcavationCheckpoint): void => {
+    db.prepare("UPDATE jobs SET resume_state = ? WHERE id = ?").run(
+      JSON.stringify(cp),
+      jobId,
+    );
+  };
 
   // Progress: api_calls counter updated after every probe (display only).
   // Incremented ONLY inside excavateEarliest → xfetch → stats.totalCalls.
@@ -361,7 +394,15 @@ async function runJobAsync(jobId: string): Promise<void> {
   let rateLimitResumeAtMs: number | null = null;
 
   try {
-    result = await excavateEarliest(username, limit, writeProgress, token, onRateLimit);
+    result = await excavateEarliest(
+      username,
+      limit,
+      writeProgress,
+      token,
+      onRateLimit,
+      saveCheckpoint,
+      initialCheckpoint,
+    );
   } catch (e: unknown) {
     // If xfetch threw XApiStop("RATE_LIMIT") and it wasn't caught inside
     // excavateEarliest, handle it here as a suspend (not a failure).
@@ -447,6 +488,7 @@ async function runJobAsync(jobId: string): Promise<void> {
         fetched_count = ?,
         result_json = ?,
         resume_at = NULL,
+        resume_state = NULL,
         finished_at = ?
     WHERE id = ?
   `).run(
@@ -498,6 +540,7 @@ function failJobInDb(
         fetched_count = ?,
         result_json = ?,
         resume_at = NULL,
+        resume_state = NULL,
         finished_at = ?
     WHERE id = ?
   `).run(

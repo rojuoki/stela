@@ -9,6 +9,7 @@ import {
   getCreditBalance,
   holdCredits,
   captureHeld,
+  spendCredits,
   giveCredits,
   cleanupExpiredHolds,
 } from "@/lib/repository";
@@ -100,16 +101,15 @@ export async function POST(req: NextRequest) {
               }, { status: 402 });
             }
             
-            // Create a dummy hold and immediately capture for cache hit
-            const holdId = holdCredits(userId, "cache-hit", 1);
-            if (!holdId) {
+            // Cache-hit is synchronous — spend directly (no async job → no hold needed).
+            // holdCredits requires a real jobs row (FK) and is not appropriate here.
+            const spent = spendCredits(userId, 1, `Cache hit unlock for @${username}`);
+            if (!spent) {
               return NextResponse.json({
-                error: "Failed to hold credits",
+                error: "Failed to deduct credits",
                 balance: currentBalance.balance,
               }, { status: 500 });
             }
-            
-            captureHeld(holdId, `Cache hit unlock for @${username}`);
             recordUnlock(userId, account.account_id, "cache-hit-paid");
             
             console.log(`[unlock] Paid cache hit for @${username}: ${cachedCount} tweets, 1 credit consumed`);

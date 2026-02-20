@@ -20,6 +20,12 @@
  *   - NEVER paginate newest→oldest exhaustively.
  *   - NEVER crawl full timeline.
  *   - All calls bounded by MAX_API_CALLS (or callCeiling for deep).
+ *
+ * Checkpoint / resume:
+ *   Callers may pass saveCheckpoint + initialCheckpoint to enable
+ *   checkpoint-based resume after a 429 suspension. The checkpoint is saved
+ *   at every safe boundary (after each successful API probe or collect window).
+ *   On resume, the excavation continues from the exact last saved point.
  */
 
 import {
@@ -93,6 +99,46 @@ export interface ExcavationResult {
   deepAddedCount?: number;
 }
 
+/**
+ * Persisted at every safe boundary (after each successful probe or collect window).
+ * On resume, the excavation restores state from this snapshot and continues
+ * from the exact last saved point — without re-running any completed step.
+ *
+ * Lifecycle:
+ *   jobs.ts writes this to DB on every saveCheckpoint call.
+ *   On success/failure the DB column is set to NULL.
+ *   On 429 suspend the column is left as-is (preserved for next run).
+ */
+export interface ExcavationCheckpoint {
+  /** Current phase at the time of the checkpoint. */
+  phase: "explore_year" | "explore_month" | "collect";
+
+  // ── Explore state ───────────────────────────────────
+  /** Year loop should resume from this year (all prior years confirmed done). */
+  next_year: number;
+  /** Set when phase === "explore_month": which year we were scanning. */
+  month_scan_year?: number;
+  /** Set when phase === "explore_month": next month index (0-based) to probe. */
+  next_month?: number;
+  earliest_hit_year: number;
+  zero_streak: number;
+  deep_triggered: boolean;
+  allow_deep: boolean;
+
+  // ── Region / collect state ──────────────────────────
+  /** ISO string — set once the earliest region is found. */
+  earliest_region_start: string | null;
+  /** ISO string — the NEXT window start for the collect phase. null = collect done. */
+  collect_window_start: string | null;
+  collect_span_days: number;
+  /**
+   * Tweet IDs already collected and stored to DB during this job.
+   * Used to reconstruct the in-memory collected Map on resume without
+   * loading tweets from prior jobs.
+   */
+  collected_ids?: string[];
+}
+
 // ─── Entry point ───────────────────────────────────────
 
 export async function excavateEarliest(
@@ -104,6 +150,10 @@ export async function excavateEarliest(
   token?: string,
   /** Called when a 429 is received (before the in-process wait). Arg = reset epoch (seconds). */
   onRateLimit?: (resetEpochSec: number) => void,
+  /** Called at every safe boundary to persist checkpoint to DB. */
+  saveCheckpoint?: (cp: ExcavationCheckpoint) => void,
+  /** Checkpoint from a previous run; when present, resume from that point. */
+  initialCheckpoint?: ExcavationCheckpoint | null,
 ): Promise<ExcavationResult> {
   const stats = createStats(token, onRateLimit);
   const effectiveLimit = Math.min(limit, 100);
@@ -133,7 +183,15 @@ export async function excavateEarliest(
   // Attempt full-archive; fall back if the token lacks that access (403).
   const query = `from:${user.username} -is:retweet`;
   try {
-    return await excavateFullArchive(user, query, effectiveLimit, stats, onProgress);
+    return await excavateFullArchive(
+      user,
+      query,
+      effectiveLimit,
+      stats,
+      onProgress,
+      saveCheckpoint,
+      initialCheckpoint,
+    );
   } catch (e) {
     if (e instanceof XApiStop && e.statusCode === 403) {
       console.log(
@@ -153,6 +211,8 @@ async function excavateFullArchive(
   limit: number,
   stats: ApiCallStats,
   onProgress?: (apiCalls: number) => void,
+  saveCheckpoint?: (cp: ExcavationCheckpoint) => void,
+  cp?: ExcavationCheckpoint | null,
 ): Promise<ExcavationResult> {
   const accountCreated = new Date(user.created_at);
   const now = new Date();
@@ -160,133 +220,241 @@ async function excavateFullArchive(
   const endYear = now.getUTCFullYear();
 
   console.log(
-    `[explore] @${user.username} account_created=${user.created_at} query="${query}"`,
+    `[explore] @${user.username} account_created=${user.created_at} query="${query}"${cp ? ` (resuming from phase=${cp.phase})` : ""}`,
   );
 
-  // ── Phase A: Explore — coarse (years) → fine (months) ──
+  // ── Restore from checkpoint ─────────────────────────
+
+  const allowDeep: boolean =
+    cp?.allow_deep ?? (accountCreated.getUTCFullYear() <= 2018);
+  console.log(`[deep] account_created=${accountCreated.getUTCFullYear()} allowDeep=${allowDeep}`);
 
   let earliestRegionStart: Date | null = null;
+  let deepTriggered: boolean = cp?.deep_triggered ?? false;
+  let earliestHitYear: number = cp?.earliest_hit_year ?? -1;
 
-  // Deep-trigger state — set during month scan, used after collect.
-  let deepTriggered = false;
-  let earliestHitYear = -1;
+  const collected = new Map<string, XTweet>();
 
-  // Deep backfill is expensive: restrict to old accounts (created <= 2018) where
-  // the full-archive index is most likely to have gaps in early months.
-  const createdYear = accountCreated.getUTCFullYear();
-  const allowDeep = createdYear <= 2018;
-  console.log(`[deep] account_created=${createdYear} allowDeep=${allowDeep}`);
+  // If resuming from collect phase, skip explore entirely and reload saved tweets.
+  if (cp?.phase === "collect" && cp.earliest_region_start) {
+    earliestRegionStart = new Date(cp.earliest_region_start);
+    deepTriggered = cp.deep_triggered;
+    earliestHitYear = cp.earliest_hit_year;
 
-  yearLoop: for (
-    let year = startYear;
-    year <= endYear && stats.totalCalls < MAX_API_CALLS;
-    year++
-  ) {
-    const yearStart =
-      year === startYear ? accountCreated : new Date(Date.UTC(year, 0, 1));
-    const yearEnd = new Date(Date.UTC(year + 1, 0, 1));
-    const yEndStr = minDate(yearEnd, now).toISOString();
-
-    // Explore probes: omit sort_order so the API uses its full-archive index
-    // without a recency bias, improving recall of very old tweets.
-    let yPage: TimelinePage;
-    try {
-      yPage = await searchAllTweets(query, yearStart.toISOString(), yEndStr, stats, 5);
-    } catch (e) {
-      if (e instanceof XApiStop && e.statusCode === 403) throw e;
-      if (e instanceof XApiStop) {
-        return errorResult(user.username, limit, stats, e.reason as StopReason, "full_archive");
-      }
-      throw e;
+    if (cp.collected_ids && cp.collected_ids.length > 0) {
+      const restored = loadTweetsFromDbByIds(user.id, cp.collected_ids);
+      for (const t of restored) collected.set(t.id, t);
+      console.log(
+        `[checkpoint] Restored ${collected.size} tweets for @${user.username} (${cp.collected_ids.length} IDs)`,
+      );
     }
+  } else {
+    // ── Phase A: Explore — coarse (years) → fine (months) ──
 
-    // Detect based on the OLDEST tweet in the response, not the newest.
-    const yOldest = oldestInPage(yPage.tweets);
-    console.log(
-      `[explore] year=${year} window=[${yearStart.toISOString().slice(0, 10)}, ${yEndStr.slice(0, 10)}] found=${yPage.tweets.length} oldest=${yOldest?.created_at.slice(0, 10) ?? "none"}`,
-    );
+    // Determine where to resume in the year loop.
+    const resumeFromYear =
+      cp?.phase === "explore_year" ? cp.next_year : startYear;
 
-    onProgress?.(stats.totalCalls);
-    await sleep(EXPLORE_INTER_REQUEST_DELAY_MS);
+    // If resuming mid-month-scan, we'll skip the year probe for that year.
+    const skipYearProbeFor =
+      cp?.phase === "explore_month" ? cp.month_scan_year : undefined;
 
-    if (!yOldest) continue;
-
-    // Year has tweets — narrow to earliest month within it.
-    earliestHitYear = year;
-    const monthFrom = year === startYear ? accountCreated.getUTCMonth() : 0;
-
-    // zeroStreak: consecutive empty months from the start of this month scan.
-    // A streak ≥ DEEP_TRIGGER_ZERO_STREAK followed by a hit means we may have
-    // missed an early period (e.g. YouTube: Jan–Jul empty, Aug has tweets).
-    let zeroStreak = 0;
-
-    for (
-      let m = monthFrom;
-      m < 12 && stats.totalCalls < MAX_API_CALLS;
-      m++
+    yearLoop: for (
+      let year = resumeFromYear;
+      year <= endYear && stats.totalCalls < MAX_API_CALLS;
+      year++
     ) {
-      const mStart = new Date(Date.UTC(year, m, 1));
-      const mEnd = new Date(Date.UTC(year, m + 1, 1));
-      if (mStart >= now) break;
+      const yearStart =
+        year === startYear ? accountCreated : new Date(Date.UTC(year, 0, 1));
+      const yearEnd = new Date(Date.UTC(year + 1, 0, 1));
+      const yEndStr = minDate(yearEnd, now).toISOString();
 
-      let mPage: TimelinePage;
-      try {
-        // No sort_order — same rationale as year probe.
-        mPage = await searchAllTweets(
-          query,
-          mStart.toISOString(),
-          minDate(mEnd, now).toISOString(),
-          stats,
-          5,
-        );
-      } catch (e) {
-        if (e instanceof XApiStop && e.statusCode === 403) throw e;
-        if (e instanceof XApiStop) {
-          return errorResult(user.username, limit, stats, e.reason as StopReason, "full_archive");
-        }
-        throw e;
-      }
+      // ── Year probe (skipped when resuming mid-month-scan for this year) ──
 
-      // Detect based on the OLDEST tweet in the response.
-      const mOldest = oldestInPage(mPage.tweets);
-      console.log(
-        `[explore] month=${year}-${String(m + 1).padStart(2, "0")} window=[${mStart.toISOString().slice(0, 10)}, ${minDate(mEnd, now).toISOString().slice(0, 10)}] found=${mPage.tweets.length} oldest=${mOldest?.created_at.slice(0, 10) ?? "none"}`,
-      );
-
-      onProgress?.(stats.totalCalls);
-      await sleep(EXPLORE_INTER_REQUEST_DELAY_MS);
-
-      if (!mOldest) {
-        // Empty month — extend the streak; existing explore logic unchanged.
-        zeroStreak++;
-      } else {
-        // Found tweets in this month.
-        // Check for missing-early-months pattern before setting the region.
-        if (zeroStreak >= DEEP_TRIGGER_ZERO_STREAK) {
-          if (allowDeep) {
-            deepTriggered = true;
-            console.log(
-              `[deep] trigger: year=${year} zeroStreak=${zeroStreak} firstHitMonth=${m + 1} reason=MISSING_EARLY_MONTHS`,
-            );
-          } else {
-            console.log(
-              `[deep] skipped: new account (created=${createdYear} zeroStreak=${zeroStreak})`,
-            );
+      if (year !== skipYearProbeFor) {
+        let yPage: TimelinePage;
+        try {
+          yPage = await searchAllTweets(query, yearStart.toISOString(), yEndStr, stats, 5);
+        } catch (e) {
+          if (e instanceof XApiStop && e.statusCode === 403) throw e;
+          if (e instanceof XApiStop) {
+            return errorResult(user.username, limit, stats, e.reason as StopReason, "full_archive");
           }
+          throw e;
         }
-        earliestRegionStart = mStart;
-        break yearLoop;
-      }
-    }
 
-    // Month scan exhausted but year had tweets (unlikely API inconsistency).
-    // Use year start as a safe collect origin so we don't miss anything.
-    if (!earliestRegionStart) {
-      earliestRegionStart = yearStart;
-      console.log(
-        `[explore] month scan yielded nothing despite year hit — using year start ${yearStart.toISOString().slice(0, 10)} as region`,
-      );
-      break;
+        const yOldest = oldestInPage(yPage.tweets);
+        console.log(
+          `[explore] year=${year} window=[${yearStart.toISOString().slice(0, 10)}, ${yEndStr.slice(0, 10)}] found=${yPage.tweets.length} oldest=${yOldest?.created_at.slice(0, 10) ?? "none"}`,
+        );
+        onProgress?.(stats.totalCalls);
+        await sleep(EXPLORE_INTER_REQUEST_DELAY_MS);
+
+        if (!yOldest) {
+          // Year has no tweets — save and move to next year.
+          saveCheckpoint?.({
+            phase: "explore_year",
+            next_year: year + 1,
+            earliest_hit_year: -1,
+            zero_streak: 0,
+            deep_triggered: false,
+            allow_deep: allowDeep,
+            earliest_region_start: null,
+            collect_window_start: null,
+            collect_span_days: COLLECT_INITIAL_SPAN_DAYS,
+          });
+          continue;
+        }
+
+        // Year has tweets — begin month scan.
+        earliestHitYear = year;
+      } else {
+        // Resuming mid-month-scan: we already know this year has tweets.
+        earliestHitYear = year;
+        console.log(
+          `[explore] year=${year} — skipping year probe (resuming mid-month-scan)`,
+        );
+      }
+
+      // ── Month scan ──────────────────────────────────
+
+      const monthFrom =
+        year === skipYearProbeFor && cp?.next_month !== undefined
+          ? cp.next_month
+          : year === startYear
+            ? accountCreated.getUTCMonth()
+            : 0;
+
+      let zeroStreak =
+        year === skipYearProbeFor ? (cp?.zero_streak ?? 0) : 0;
+
+      // deepTriggered may already be restored; don't reset it for this year's scan.
+      if (year !== skipYearProbeFor) deepTriggered = false;
+
+      // Checkpoint: entering month scan for this year.
+      saveCheckpoint?.({
+        phase: "explore_month",
+        next_year: year,
+        month_scan_year: year,
+        next_month: monthFrom,
+        earliest_hit_year: year,
+        zero_streak: zeroStreak,
+        deep_triggered: deepTriggered,
+        allow_deep: allowDeep,
+        earliest_region_start: null,
+        collect_window_start: null,
+        collect_span_days: COLLECT_INITIAL_SPAN_DAYS,
+      });
+
+      for (
+        let m = monthFrom;
+        m < 12 && stats.totalCalls < MAX_API_CALLS;
+        m++
+      ) {
+        const mStart = new Date(Date.UTC(year, m, 1));
+        const mEnd = new Date(Date.UTC(year, m + 1, 1));
+        if (mStart >= now) break;
+
+        let mPage: TimelinePage;
+        try {
+          mPage = await searchAllTweets(
+            query,
+            mStart.toISOString(),
+            minDate(mEnd, now).toISOString(),
+            stats,
+            5,
+          );
+        } catch (e) {
+          if (e instanceof XApiStop && e.statusCode === 403) throw e;
+          if (e instanceof XApiStop) {
+            return errorResult(user.username, limit, stats, e.reason as StopReason, "full_archive");
+          }
+          throw e;
+        }
+
+        const mOldest = oldestInPage(mPage.tweets);
+        console.log(
+          `[explore] month=${year}-${String(m + 1).padStart(2, "0")} window=[${mStart.toISOString().slice(0, 10)}, ${minDate(mEnd, now).toISOString().slice(0, 10)}] found=${mPage.tweets.length} oldest=${mOldest?.created_at.slice(0, 10) ?? "none"}`,
+        );
+        onProgress?.(stats.totalCalls);
+        await sleep(EXPLORE_INTER_REQUEST_DELAY_MS);
+
+        if (!mOldest) {
+          zeroStreak++;
+          // Checkpoint: this month is done, no tweets found.
+          saveCheckpoint?.({
+            phase: "explore_month",
+            next_year: year,
+            month_scan_year: year,
+            next_month: m + 1,
+            earliest_hit_year: year,
+            zero_streak: zeroStreak,
+            deep_triggered: deepTriggered,
+            allow_deep: allowDeep,
+            earliest_region_start: null,
+            collect_window_start: null,
+            collect_span_days: COLLECT_INITIAL_SPAN_DAYS,
+          });
+        } else {
+          // Found tweets in this month.
+          if (zeroStreak >= DEEP_TRIGGER_ZERO_STREAK) {
+            if (allowDeep) {
+              deepTriggered = true;
+              console.log(
+                `[deep] trigger: year=${year} zeroStreak=${zeroStreak} firstHitMonth=${m + 1} reason=MISSING_EARLY_MONTHS`,
+              );
+            } else {
+              console.log(
+                `[deep] skipped: new account (created=${accountCreated.getUTCFullYear()} zeroStreak=${zeroStreak})`,
+              );
+            }
+          }
+
+          earliestRegionStart = mStart;
+
+          // Checkpoint: found the earliest region, about to enter collect.
+          saveCheckpoint?.({
+            phase: "collect",
+            next_year: year,
+            month_scan_year: year,
+            next_month: m,
+            earliest_hit_year: year,
+            zero_streak: zeroStreak,
+            deep_triggered: deepTriggered,
+            allow_deep: allowDeep,
+            earliest_region_start: earliestRegionStart.toISOString(),
+            collect_window_start: earliestRegionStart.toISOString(),
+            collect_span_days: COLLECT_INITIAL_SPAN_DAYS,
+            collected_ids: [],
+          });
+
+          break yearLoop;
+        }
+      }
+
+      // Month scan exhausted but year had tweets (unlikely API inconsistency).
+      // Use year start as a safe collect origin so we don't miss anything.
+      if (!earliestRegionStart) {
+        earliestRegionStart = yearStart;
+        console.log(
+          `[explore] month scan yielded nothing despite year hit — using year start ${yearStart.toISOString().slice(0, 10)} as region`,
+        );
+        saveCheckpoint?.({
+          phase: "collect",
+          next_year: year,
+          month_scan_year: year,
+          next_month: 0,
+          earliest_hit_year: year,
+          zero_streak: zeroStreak,
+          deep_triggered: deepTriggered,
+          allow_deep: allowDeep,
+          earliest_region_start: earliestRegionStart.toISOString(),
+          collect_window_start: earliestRegionStart.toISOString(),
+          collect_span_days: COLLECT_INITIAL_SPAN_DAYS,
+          collected_ids: [],
+        });
+        break;
+      }
     }
   }
 
@@ -317,7 +485,31 @@ async function excavateFullArchive(
 
   // ── Phase B: Collect from earliest region forward ──
 
-  const collected = new Map<string, XTweet>();
+  // Determine collect resume point from checkpoint.
+  const collectResumeFrom =
+    cp?.phase === "collect" && cp.collect_window_start
+      ? new Date(cp.collect_window_start)
+      : null;
+  const collectInitialSpan =
+    cp?.phase === "collect" ? cp.collect_span_days : COLLECT_INITIAL_SPAN_DAYS;
+
+  // Build a full collect-phase checkpoint for the save callback.
+  const makeCollectCp = (
+    nextWindowStart: Date,
+    nextSpanDays: number,
+    collectedIds: string[],
+  ): ExcavationCheckpoint => ({
+    phase: "collect",
+    next_year: earliestHitYear,
+    earliest_hit_year: earliestHitYear,
+    zero_streak: 0,
+    deep_triggered: deepTriggered,
+    allow_deep: allowDeep,
+    earliest_region_start: earliestRegionStart!.toISOString(),
+    collect_window_start: nextWindowStart.toISOString(),
+    collect_span_days: nextSpanDays,
+    collected_ids: collectedIds,
+  });
 
   const standardStop = await collectWindowPass(
     query,
@@ -325,29 +517,29 @@ async function excavateFullArchive(
     now,
     stats,
     collected,
-    MAX_API_CALLS,  // budget ceiling (global)
-    limit,          // stop once we have enough for normal result
+    MAX_API_CALLS,
+    limit,
     user.username,
     onProgress,
+    {
+      userId: user.id,
+      resumeFrom: collectResumeFrom,
+      initialSpanDays: collectInitialSpan,
+      saveWindowCheckpoint: saveCheckpoint
+        ? (ws, sd, ids) => saveCheckpoint(makeCollectCp(ws, sd, ids))
+        : undefined,
+    },
   );
   let stopReason: StopReason = standardStop;
 
   // ── Phase C: Deep backfill (missing early period) ──
-  //
-  // Runs the same collect code path over [accountCreated, earliestRegionStart) to
-  // recover tweets the explore phase may have skipped due to API index gaps.
-  // Budget: min(remaining calls, MAX_API_CALLS_DEEP) — never exceeds global cap.
 
   let deepAddedCount = 0;
 
   if (deepTriggered && earliestHitYear > 0) {
-    // Deep range starts at account_created_at — never at year boundary —
-    // so accounts created mid-year (e.g. YouTube: 2007-11-13) are fully covered.
-    // Optionally clamped to X full-archive floor (2006-03-21) but NOT moved later
-    // than accountCreated, so the range is always [accountCreated, earliestRegionStart).
     const X_ARCHIVE_FLOOR = new Date("2006-03-21T00:00:00Z");
     const deepStart = maxDate(X_ARCHIVE_FLOOR, accountCreated);
-    const deepEnd = earliestRegionStart; // exclusive upper bound
+    const deepEnd = earliestRegionStart;
     const remainingBudget = MAX_API_CALLS - stats.totalCalls;
     const deepCallBudget = Math.min(remainingBudget, MAX_API_CALLS_DEEP);
 
@@ -359,6 +551,8 @@ async function excavateFullArchive(
         `[deep] backfill range=[${deepStart.toISOString().slice(0, 10)}, ${deepEnd.toISOString().slice(0, 10)}) account_created=${accountCreated.toISOString().slice(0, 10)} budget=${deepCallBudget}`,
       );
 
+      // Deep backfill uses incremental storage but no checkpoint (bounded budget,
+      // and standard collect results are already safe in DB if 429 hits here).
       const deepStop = await collectWindowPass(
         query,
         deepStart,
@@ -366,9 +560,10 @@ async function excavateFullArchive(
         stats,
         collected,
         deepCallCeiling,
-        Number.MAX_SAFE_INTEGER, // no count limit — merge + sort happens after
+        Number.MAX_SAFE_INTEGER,
         user.username,
         onProgress,
+        { userId: user.id },
       );
 
       deepAddedCount = collected.size - sizeBefore;
@@ -419,6 +614,24 @@ async function excavateFullArchive(
 
 // ─── Shared collect pass ────────────────────────────────
 
+interface CollectCheckpointOpts {
+  /** Account ID for incremental tweet storage after each window. */
+  userId: string;
+  /** If set, skip windows until collectStart >= resumeFrom. */
+  resumeFrom?: Date | null;
+  /** Override the default initial window span. */
+  initialSpanDays?: number;
+  /**
+   * Called after each completed window.
+   * Args: nextWindowStart, nextSpanDays, all collected IDs so far.
+   */
+  saveWindowCheckpoint?: (
+    nextWindowStart: Date,
+    nextSpanDays: number,
+    collectedIds: string[],
+  ) => void;
+}
+
 /**
  * Runs one bounded collect pass over [start, end).
  * Paginates windows forward with recency sort, accumulates into `collected`.
@@ -436,10 +649,26 @@ async function collectWindowPass(
   collectLimit: number,
   username: string,
   onProgress?: (apiCalls: number) => void,
+  checkpointOpts?: CollectCheckpointOpts,
 ): Promise<StopReason> {
-  let collectStart = start;
-  let collectSpanDays = COLLECT_INITIAL_SPAN_DAYS;
+  // Resume from saved window if provided; otherwise start from the beginning.
+  let collectStart = checkpointOpts?.resumeFrom ?? start;
+  let collectSpanDays = checkpointOpts?.initialSpanDays ?? COLLECT_INITIAL_SPAN_DAYS;
   let stopReason: StopReason = "ACCOUNT_HAS_LESS_THAN_LIMIT";
+
+  // If the resume point is at or past `end`, the collect phase is already done.
+  if (collectStart >= end) {
+    console.log(
+      `[collect] @${username} collect phase already complete (resumeFrom=${collectStart.toISOString().slice(0, 10)} >= end=${end.toISOString().slice(0, 10)})`,
+    );
+    return "ACCOUNT_HAS_LESS_THAN_LIMIT";
+  }
+
+  if (checkpointOpts?.resumeFrom) {
+    console.log(
+      `[collect] @${username} resuming from window=${collectStart.toISOString().slice(0, 10)} already_have=${collected.size}`,
+    );
+  }
 
   while (
     collected.size < collectLimit &&
@@ -454,7 +683,6 @@ async function collectWindowPass(
 
     let page: TimelinePage;
     try {
-      // Collect phase: use recency sort for consistent newest-first pagination.
       page = await searchAllTweets(
         query,
         collectStart.toISOString(),
@@ -474,7 +702,6 @@ async function collectWindowPass(
     }
 
     // Paginate within window (bounded: MAX_COLLECT_PAGES_PER_WINDOW pages).
-    // search/all returns newest-first; we gather all, then sort ascending later.
     const windowTweets: XTweet[] = [...page.tweets];
     let nextToken = page.nextToken;
     let pagesInWindow = 1;
@@ -517,8 +744,22 @@ async function collectWindowPass(
     onProgress?.(stats.totalCalls);
     for (const t of windowTweets) collected.set(t.id, t);
 
+    // ── Incremental storage — persist this window's tweets to DB so they
+    //    survive a 429 suspend and can be reloaded on resume.
+    if (checkpointOpts?.userId && windowTweets.length > 0) {
+      storeTweets(checkpointOpts.userId, windowTweets);
+    }
+
     if (collected.size >= collectLimit) {
       stopReason = "OK_LIMIT_REACHED";
+      // Advance window before saving checkpoint to mark this window done.
+      collectStart = collectEnd;
+      collectSpanDays = Math.min(collectSpanDays * 2, COLLECT_MAX_SPAN_DAYS);
+      checkpointOpts?.saveWindowCheckpoint?.(
+        collectStart,
+        collectSpanDays,
+        [...collected.keys()],
+      );
       break;
     }
 
@@ -530,6 +771,13 @@ async function collectWindowPass(
     // Advance window; double span for sparse periods.
     collectStart = collectEnd;
     collectSpanDays = Math.min(collectSpanDays * 2, COLLECT_MAX_SPAN_DAYS);
+
+    // Checkpoint: this window done, next window is collectStart.
+    checkpointOpts?.saveWindowCheckpoint?.(
+      collectStart,
+      collectSpanDays,
+      [...collected.keys()],
+    );
   }
 
   if (stats.totalCalls >= callCeiling && stopReason === "ACCOUNT_HAS_LESS_THAN_LIMIT") {
@@ -682,6 +930,7 @@ function upsertAccount(user: XUser) {
 }
 
 function storeTweets(userId: string, tweets: XTweet[]): number {
+  if (!tweets.length) return 0;
   const db = getDb();
   const insert = db.prepare(`
     INSERT OR IGNORE INTO tweets (post_id, account_id, created_at, full_text, media_json, like_count, retweet_count, reply_count, fetched_at)
@@ -707,6 +956,45 @@ function storeTweets(userId: string, tweets: XTweet[]): number {
   });
   tx();
   return newCount;
+}
+
+/**
+ * Load specific tweets from the DB by their IDs.
+ * Used on resume to reconstruct the in-memory `collected` Map without
+ * loading tweets from prior jobs (which would give a wrong size count).
+ */
+function loadTweetsFromDbByIds(accountId: string, ids: string[]): XTweet[] {
+  if (!ids.length) return [];
+  const db = getDb();
+  const placeholders = ids.map(() => "?").join(",");
+  const rows = db
+    .prepare(
+      `SELECT post_id AS id, created_at, full_text AS text,
+              like_count, retweet_count, reply_count, media_json
+       FROM tweets
+       WHERE account_id = ? AND post_id IN (${placeholders})`,
+    )
+    .all(accountId, ...ids) as Array<{
+    id: string;
+    created_at: string;
+    text: string;
+    like_count: number;
+    retweet_count: number;
+    reply_count: number;
+    media_json: string | null;
+  }>;
+
+  return rows.map((r) => ({
+    id: r.id,
+    created_at: r.created_at,
+    text: r.text,
+    public_metrics: {
+      like_count: r.like_count,
+      retweet_count: r.retweet_count,
+      reply_count: r.reply_count,
+    },
+    attachments: r.media_json ? JSON.parse(r.media_json) : undefined,
+  }));
 }
 
 // ─── Util ───────────────────────────────────────────────

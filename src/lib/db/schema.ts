@@ -35,7 +35,11 @@ CREATE TABLE IF NOT EXISTS jobs (
   finished_at   TEXT,
   -- Set when a 429 occurs mid-job; cleared on completion.
   -- API layer returns status=waiting_rate_limit when this is set and in the future.
-  resume_at     TEXT
+  resume_at     TEXT,
+  -- JSON blob (ExcavationCheckpoint) persisted at each safe boundary so the
+  -- job can continue from where it left off after a 429 suspend+resume.
+  -- Cleared (NULL) when the job reaches a terminal state.
+  resume_state  TEXT
 );
 
 -- Stored tweets (earliest 100 per account)

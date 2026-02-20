@@ -171,6 +171,35 @@ export function holdCredits(userId: string, jobId: string, amount: number = 1): 
   }
 }
 
+/**
+ * Immediately spend credits without a hold (for synchronous operations like
+ * cache-hit unlocks where there is no async job and no hold/capture cycle).
+ * Returns false if balance is insufficient or the transaction fails.
+ */
+export function spendCredits(userId: string, amount: number, reason: string): boolean {
+  const db = getDb();
+  const now = new Date().toISOString();
+  try {
+    return (db.transaction(() => {
+      const balance = getCreditBalance(userId);
+      if (balance.balance < amount) return false;
+
+      db.prepare(`UPDATE credits SET balance = balance - ?, total_spent = total_spent + ?, updated_at = ? WHERE user_id = ?`)
+        .run(amount, amount, now, userId);
+
+      db.prepare(`
+        INSERT INTO credit_events (user_id, event_type, amount, balance_after, reason, created_at)
+        VALUES (?, 'captured', ?, ?, ?, ?)
+      `).run(userId, amount, balance.balance - amount, reason, now);
+
+      return true;
+    }))() as boolean;
+  } catch (e) {
+    console.error('[credits] spendCredits failed:', e);
+    return false;
+  }
+}
+
 /** Capture held credits (consume them on successful unlock) */
 export function captureHeld(holdId: string, reason: string = 'Unlock successful'): boolean {
   const db = getDb();

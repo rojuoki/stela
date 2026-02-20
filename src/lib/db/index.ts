@@ -26,10 +26,17 @@ function applySchema(db: Database.Database): void {
  * Each migration is idempotent (checked before applying).
  */
 function runMigrations(db: Database.Database): void {
-  // M-001: add resume_at column to jobs (TokenPool / WAITING_RATE_LIMIT support)
   const cols = db.prepare("PRAGMA table_info(jobs)").all() as Array<{ name: string }>;
+
+  // M-001: add resume_at column to jobs (TokenPool / WAITING_RATE_LIMIT support)
   if (!cols.some((c) => c.name === "resume_at")) {
     db.prepare("ALTER TABLE jobs ADD COLUMN resume_at TEXT").run();
     console.log("[db] Migration M-001: added jobs.resume_at");
+  }
+
+  // M-002: add resume_state column to jobs (checkpoint-based resume after 429)
+  if (!cols.some((c) => c.name === "resume_state")) {
+    db.prepare("ALTER TABLE jobs ADD COLUMN resume_state TEXT").run();
+    console.log("[db] Migration M-002: added jobs.resume_state");
   }
 }
