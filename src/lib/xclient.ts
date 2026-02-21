@@ -1,6 +1,9 @@
 /**
  * STELA X API v2 client — server-only, minimal, observable.
  * Uses Bearer token from env. Never exposed to browser.
+ *
+ * ALL X API HTTP requests go through xfetch(). There is no other fetch path.
+ * end_time is clamped on the URLSearchParams immediately before fetch().
  */
 
 import { tokenPool } from "./tokenPool";
@@ -18,6 +21,27 @@ const BACKOFF_BASE_MS = 1000;
 
 /** Total X API fetch calls since server start — debug only. */
 let xCallCount = 0;
+
+// ─── end_time safety ──────────────────────────────────
+
+const SAFE_MARGIN_MS = 120_000;
+
+function clampEndTime(searchParams: URLSearchParams): void {
+  const safeNow = new Date(Date.now() - SAFE_MARGIN_MS).toISOString();
+
+  const requested = searchParams.get("end_time");
+  if (!requested) {
+    searchParams.set("end_time", safeNow);
+    return;
+  }
+
+  if (new Date(requested).getTime() > Date.now() - SAFE_MARGIN_MS) {
+    console.log(`[clamp] end_time ${requested} → ${safeNow}`);
+    searchParams.set("end_time", safeNow);
+  }
+}
+
+// ─── Types ────────────────────────────────────────────
 
 export interface XUser {
   id: string;
@@ -76,6 +100,8 @@ export class XApiStop extends Error {
   }
 }
 
+// ─── Single HTTP gateway ──────────────────────────────
+
 /**
  * All calls are strictly sequential — no Promise.all anywhere in this module.
  * Rate-limit retries (429) use a separate counter so they never consume the
@@ -91,24 +117,34 @@ async function xfetch(
     if (v !== undefined && v !== "") url.searchParams.set(k, v);
   }
 
-  let generalAttempt = 0; // counts network-error / 5xx retries only
+  // ── end_time safety gate — runs on the final URLSearchParams ──
+  if (url.searchParams.has("start_time")) {
+    clampEndTime(url.searchParams);
+
+    const st = url.searchParams.get("start_time")!;
+    const et = url.searchParams.get("end_time")!;
+    if (st >= et) {
+      console.log(`[xfetch][skip] start_time=${st} >= end_time=${et} — returning empty`);
+      return { data: [], meta: {} };
+    }
+
+    console.log(`FINAL_SEARCH_URL ${url.toString()}`);
+  }
+
+  let generalAttempt = 0;
   let lastError: Error | null = null;
 
-  // Resolve token once per xfetch call. stats.token (from TokenPool) takes
-  // precedence; BEARER() is the env-var fallback for single-token deployments.
   const activeToken = stats.token ?? BEARER();
 
   while (generalAttempt <= MAX_RETRIES) {
     stats.totalCalls++;
     const label = `[X API] ${endpoint} attempt=${generalAttempt}`;
-    console.log(`${label} → ${url.toString()}`);
 
     let res: Response;
     try {
       res = await fetch(url.toString(), {
         headers: { Authorization: `Bearer ${activeToken}` },
       });
-      // Update token pool state with every response (remaining / reset counters).
       if (stats.token) {
         tokenPool.updateFromHeaders(activeToken, res.headers);
       }
@@ -139,16 +175,12 @@ async function xfetch(
     console.error(`${label} HTTP ${res.status}: ${body.slice(0, 300)}`);
     stats.errors.push({ status: res.status, body: body.slice(0, 500), endpoint });
 
-    // 429 — do NOT sleep/retry here.
-    // Notify the token pool and the job runner, then throw so the job runner
-    // can suspend the job and re-schedule via a timer (no server sleep loops).
     if (res.status === 429) {
       const resetHeader = res.headers.get("x-rate-limit-reset");
       const resetEpochSec = resetHeader
         ? parseInt(resetHeader, 10)
         : Math.floor((Date.now() + 60_000) / 1000);
 
-      // Mark token in cooldown; notify job runner to persist resume_at in DB.
       if (stats.token) tokenPool.onRateLimit(activeToken, resetEpochSec);
       stats.onRateLimit?.(resetEpochSec);
 
@@ -160,12 +192,10 @@ async function xfetch(
       throw new XApiStop("RATE_LIMIT", 429, `Token reset at epoch ${resetEpochSec}`);
     }
 
-    // 401/403 → stop immediately
     if (res.status === 401 || res.status === 403) {
       throw new XApiStop("API_ERROR", res.status, body.slice(0, 200));
     }
 
-    // 5xx → retry with backoff
     generalAttempt++;
     if (res.status >= 500 && generalAttempt <= MAX_RETRIES) {
       await sleep(BACKOFF_BASE_MS * 2 ** (generalAttempt - 1));

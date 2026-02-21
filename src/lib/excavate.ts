@@ -80,6 +80,13 @@ const SHRINK_FACTOR_FULL = 0.5;    // halve span when window is clogged (page ca
 const FALLBACK_INITIAL_SPAN_DAYS = 30;
 const FALLBACK_MAX_SPAN_DAYS = 365 * 2;
 
+/**
+ * end_time safety buffer: keep end_time at least this many ms before now.
+ * 60 s covers the X API's 10 s minimum requirement plus up to ~50 s of
+ * clock skew between the local host and X's servers.
+ */
+const END_TIME_SAFETY_MS = 60_000;
+
 // ─── Types ─────────────────────────────────────────────
 
 export type StopReason =
@@ -236,7 +243,7 @@ async function excavateFullArchive(
   cp?: ExcavationCheckpoint | null,
 ): Promise<ExcavationResult> {
   const accountCreated = new Date(user.created_at);
-  const now = new Date();
+  const now = new Date(Date.now() - END_TIME_SAFETY_MS);
   const startYear = accountCreated.getUTCFullYear();
   const endYear = now.getUTCFullYear();
 
