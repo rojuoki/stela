@@ -14,6 +14,7 @@ import { AccountHeader } from "../components/AccountHeader";
 import { JobStatus } from "../components/JobStatus";
 import { apiFetch } from "../lib/apiFetch";
 import { getDevPlan, type DevPlan } from "../dev/state";
+import { recordCacheEvent } from "../dev/cacheDebug";
 
 interface UnlockResponse {
   jobId: string | null;
@@ -124,6 +125,7 @@ export default function Home() {
 
     const cached = sessionCache.get(cleanUsername);
     if (cached) {
+      if (DEV_PANEL) recordCacheEvent({ type: "lookup", hit: true, tier: "user", username: cleanUsername });
       if ("error" in cached) {
         setAccountStatus("error");
         setAccountError(cached.error);
@@ -156,6 +158,12 @@ export default function Home() {
       }
 
       setSessionCache((prev) => new Map(prev.set(cleanUsername, data)));
+      if (DEV_PANEL) recordCacheEvent({
+        type: "lookup",
+        hit: data.source === "cache",
+        tier: data.source === "cache" ? "shared" : "none",
+        username: cleanUsername,
+      });
       setAccountStatus("found");
       setAccountData(data);
     } catch {
@@ -363,6 +371,16 @@ export default function Home() {
       }
 
       const unlock: UnlockResponse = await res.json();
+
+      if (DEV_PANEL) recordCacheEvent({
+        type: "unlock",
+        hit: unlock.status === "cache-hit",
+        tier: unlock.status === "cache-hit"
+          ? (unlock.freeReUnlock ? "user" : "shared")
+          : "none",
+        username: raw,
+        cachedCount: unlock.cachedCount,
+      });
 
       if (!force && unlock.status === "cache-hit" && unlock.accountId) {
         setJobInfo("Unlocking…");

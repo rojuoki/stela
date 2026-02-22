@@ -20,6 +20,13 @@ import {
   dispatchDevChanged,
 } from "./state";
 import { apiFetch } from "@/lib/apiFetch";
+import {
+  getLastByType,
+  getCacheTotals,
+  resetCacheDebug,
+  DEV_CACHE_CHANGED_EVENT,
+  type CacheEvent,
+} from "./cacheDebug";
 
 // ── Stats types (mirrors devStats.ts — client-side copy) ──────────────────────
 type ScopeRow = {
@@ -74,6 +81,17 @@ export default function DevPanel() {
   const [stats, setStats] = useState<Stats | null>(null);
   const [statsLoading, setStatsLoading] = useState(false);
 
+  // Cache debug state
+  const [lastLookup, setLastLookup] = useState<CacheEvent | null>(null);
+  const [lastUnlock, setLastUnlock] = useState<CacheEvent | null>(null);
+  const [cacheTotals, setCacheTotals] = useState({ hits: 0, misses: 0, total: 0, hitRate: 0 });
+
+  const syncCacheState = useCallback(() => {
+    setLastLookup(getLastByType("lookup"));
+    setLastUnlock(getLastByType("unlock"));
+    setCacheTotals(getCacheTotals());
+  }, []);
+
   const fetchCredits = useCallback(async () => {
     try {
       const res = await apiFetch("/api/credits");
@@ -112,7 +130,8 @@ export default function DevPanel() {
     setPlan(getDevPlan());
     fetchCredits();
     syncErrorState();
-  }, [fetchCredits, syncErrorState]);
+    syncCacheState();
+  }, [fetchCredits, syncErrorState, syncCacheState]);
 
   useEffect(() => {
     const handler = () => {
@@ -123,6 +142,12 @@ export default function DevPanel() {
     window.addEventListener("stelaDevChanged", handler);
     return () => window.removeEventListener("stelaDevChanged", handler);
   }, [fetchCredits, syncErrorState]);
+
+  // Listen for cache events from page.tsx
+  useEffect(() => {
+    window.addEventListener(DEV_CACHE_CHANGED_EVENT, syncCacheState);
+    return () => window.removeEventListener(DEV_CACHE_CHANGED_EVENT, syncCacheState);
+  }, [syncCacheState]);
 
   // Auto-refresh stats whenever the section is open and something changes
   useEffect(() => {
@@ -319,6 +344,70 @@ export default function DevPanel() {
         <input type="checkbox" checked={errorOnce} onChange={handleErrorOnceChange} className="accent-orange-500" />
         <span className="text-zinc-400 text-[10px]">Next request only</span>
       </label>
+
+      {/* Divider */}
+      <div className="border-t border-zinc-700 mt-2 mb-2" />
+
+      {/* Cache — inline summary */}
+      <div className="flex items-center justify-between mb-1">
+        <p className="text-zinc-500 text-[10px] font-mono uppercase tracking-widest">Cache</p>
+        <button
+          onClick={() => { resetCacheDebug(); syncCacheState(); }}
+          className="text-zinc-600 hover:text-zinc-400 text-[10px] transition-colors px-1"
+          title="Reset cache debug counters"
+        >⌫</button>
+      </div>
+      <div className="font-mono text-[10px] space-y-1 mb-2">
+        {/* Last Lookup row */}
+        <div className="flex items-center gap-1 leading-4">
+          <span className="text-zinc-600 w-11 shrink-0">lookup</span>
+          {lastLookup ? (
+            <>
+              <span className={lastLookup.hit ? "text-green-400" : "text-red-400"}>
+                {lastLookup.hit ? "✓" : "✗"}
+              </span>
+              <span className="text-zinc-500">{lastLookup.tier}</span>
+              {lastLookup.username && (
+                <span className="text-zinc-400 truncate">@{lastLookup.username.slice(0, 10)}</span>
+              )}
+              <span className="text-zinc-600 ml-auto shrink-0">{ago(lastLookup.ts)}</span>
+            </>
+          ) : (
+            <span className="text-zinc-700">—</span>
+          )}
+        </div>
+        {/* Last Unlock row */}
+        <div className="flex items-center gap-1 leading-4">
+          <span className="text-zinc-600 w-11 shrink-0">unlock</span>
+          {lastUnlock ? (
+            <>
+              <span className={lastUnlock.hit ? "text-green-400" : "text-red-400"}>
+                {lastUnlock.hit ? "✓" : "✗"}
+              </span>
+              <span className="text-zinc-500">{lastUnlock.tier}</span>
+              {lastUnlock.username && (
+                <span className="text-zinc-400 truncate">@{lastUnlock.username.slice(0, 10)}</span>
+              )}
+              {lastUnlock.cachedCount != null && (
+                <span className="text-zinc-600 shrink-0">{lastUnlock.cachedCount}t</span>
+              )}
+              <span className="text-zinc-600 ml-auto shrink-0">{ago(lastUnlock.ts)}</span>
+            </>
+          ) : (
+            <span className="text-zinc-700">—</span>
+          )}
+        </div>
+        {/* Totals */}
+        {cacheTotals.total > 0 && (
+          <div className="text-zinc-600 leading-4">
+            <span className="text-green-700">hits:{cacheTotals.hits}</span>
+            {" "}
+            <span className={cacheTotals.misses > 0 ? "text-red-700" : ""}>miss:{cacheTotals.misses}</span>
+            {" "}
+            <span className="text-zinc-500">{cacheTotals.hitRate}%</span>
+          </div>
+        )}
+      </div>
 
       {/* Divider */}
       <div className="border-t border-zinc-700 mt-2 mb-2" />
