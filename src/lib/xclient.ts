@@ -7,6 +7,7 @@
  */
 
 import { tokenPool } from "./tokenPool";
+import { incXApiCalls, incXApi429 } from "./devStats";
 
 const API_BASE = process.env.X_API_BASE || "https://api.x.com/2";
 const BEARER = () => {
@@ -152,6 +153,7 @@ async function xfetch(
       const reset = res.headers.get("x-rate-limit-reset");
       const now = Math.floor(Date.now() / 1000);
       xCallCount++;
+      incXApiCalls();
       console.log(`[rate] remaining=${remaining} reset=${reset} now=${now} x_calls=${xCallCount}`);
       if (res.status === 429) {
         console.log(`[rate][429] remaining=${remaining} reset=${reset} now=${now} x_calls=${xCallCount}`);
@@ -176,6 +178,7 @@ async function xfetch(
     stats.errors.push({ status: res.status, body: body.slice(0, 500), endpoint });
 
     if (res.status === 429) {
+      incXApi429();
       const resetHeader = res.headers.get("x-rate-limit-reset");
       const resetEpochSec = resetHeader
         ? parseInt(resetHeader, 10)

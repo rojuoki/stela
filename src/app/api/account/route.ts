@@ -3,8 +3,12 @@ import { normalizeUsername, checkRateLimit } from "@/lib/validation";
 import { getAccountByUsername } from "@/lib/repository";
 import { getUserByUsername, createStats, XApiStop } from "@/lib/xclient";
 import { getDb } from "@/lib/db";
+import { withDevMeasure, type MeasureCtx } from "@/lib/devMeasure";
 
 export async function GET(req: NextRequest) {
+  const rawUsername = new URL(req.url).searchParams.get("username");
+  const mCtx: MeasureCtx = { route: "/api/account", username: rawUsername ?? undefined };
+  return withDevMeasure("lookup", async () => {
   try {
     // Rate limiting
     const clientIp = req.headers.get("x-forwarded-for") || 
@@ -127,4 +131,5 @@ export async function GET(req: NextRequest) {
       message: error instanceof Error ? error.message : "Unknown error"
     }, { status: 500 });
   }
+  }, mCtx); // withDevMeasure
 }
