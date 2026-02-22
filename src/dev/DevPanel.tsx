@@ -1,11 +1,21 @@
 "use client";
 
 import { useState, useEffect, useCallback } from "react";
-import { DEV_USERS, getDevUserId, setDevUserId } from "./state";
+import {
+  DEV_USERS,
+  DEV_PLANS,
+  type DevPlan,
+  getDevUserId,
+  setDevUserId,
+  getDevPlan,
+  setDevPlan,
+  dispatchDevChanged,
+} from "./state";
 import { apiFetch } from "@/lib/apiFetch";
 
 export default function DevPanel() {
   const [userId, setUserId] = useState("guest");
+  const [plan, setPlan] = useState<DevPlan>("basic");
   const [credits, setCredits] = useState<number | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -22,15 +32,18 @@ export default function DevPanel() {
   }, []);
 
   useEffect(() => {
-    const id = getDevUserId();
-    setUserId(id);
+    setUserId(getDevUserId());
+    setPlan(getDevPlan());
     fetchCredits();
   }, [fetchCredits]);
 
-  // Refresh when main page triggers devUserChanged
   useEffect(() => {
-    window.addEventListener("devUserChanged", fetchCredits);
-    return () => window.removeEventListener("devUserChanged", fetchCredits);
+    const handler = () => {
+      setCredits(null);
+      fetchCredits();
+    };
+    window.addEventListener("stelaDevChanged", handler);
+    return () => window.removeEventListener("stelaDevChanged", handler);
   }, [fetchCredits]);
 
   const handleUserChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
@@ -38,7 +51,14 @@ export default function DevPanel() {
     setUserId(newId);
     setDevUserId(newId);
     setCredits(null);
-    window.dispatchEvent(new Event("devUserChanged"));
+    dispatchDevChanged();
+  };
+
+  const handlePlanChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
+    const newPlan = e.target.value as DevPlan;
+    setPlan(newPlan);
+    setDevPlan(newPlan);
+    dispatchDevChanged();
   };
 
   const setBalance = async (target: number) => {
@@ -53,8 +73,7 @@ export default function DevPanel() {
       if (res.ok) {
         const data = await res.json();
         setCredits(data.balance);
-        // Tell the main page to refresh its credit display too
-        window.dispatchEvent(new Event("devUserChanged"));
+        dispatchDevChanged();
       }
     } finally {
       setBusy(false);
@@ -76,11 +95,25 @@ export default function DevPanel() {
       <select
         value={userId}
         onChange={handleUserChange}
-        className="w-full bg-zinc-800 border border-zinc-600 rounded px-2 py-1 text-sm text-white focus:outline-none focus:border-zinc-500 mb-3"
+        className="w-full bg-zinc-800 border border-zinc-600 rounded px-2 py-1 text-sm text-white focus:outline-none focus:border-zinc-500 mb-2"
       >
         {DEV_USERS.map((u) => (
           <option key={u} value={u}>
             {u}
+          </option>
+        ))}
+      </select>
+
+      {/* Plan */}
+      <label className="text-zinc-400 text-xs block mb-1">Plan</label>
+      <select
+        value={plan}
+        onChange={handlePlanChange}
+        className="w-full bg-zinc-800 border border-zinc-600 rounded px-2 py-1 text-sm text-white focus:outline-none focus:border-zinc-500 mb-3"
+      >
+        {DEV_PLANS.map((p) => (
+          <option key={p} value={p}>
+            {p}
           </option>
         ))}
       </select>
