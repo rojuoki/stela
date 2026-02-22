@@ -1,5 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { excavateEarliest } from "@/lib/excavate";
+import { getUserId } from "@/lib/getUserId";
+
+const DEV_PANEL = process.env.NEXT_PUBLIC_DEV_PANEL === "1";
 
 export async function POST(req: NextRequest) {
   let body: { username?: string; limit?: number };
@@ -20,6 +23,9 @@ export async function POST(req: NextRequest) {
   }
 
   const limit = Math.min(Math.max(body.limit ?? 100, 1), 100);
+
+  const userId = getUserId(req);
+  if (DEV_PANEL) console.log(`[dev] user_id=${userId} POST /api/excavate/earliest username=${raw}`);
 
   try {
     const result = await excavateEarliest(raw, limit);

@@ -39,4 +39,29 @@ function runMigrations(db: Database.Database): void {
     db.prepare("ALTER TABLE jobs ADD COLUMN resume_state TEXT").run();
     console.log("[db] Migration M-002: added jobs.resume_state");
   }
+
+  // M-003: make unlocks.job_id nullable (drop FK + NOT NULL).
+  // Fixes cache-hit unlock recording which passed sentinel strings, not real job IDs.
+  const unlockCols = db.prepare("PRAGMA table_info(unlocks)").all() as Array<{
+    name: string; notnull: number;
+  }>;
+  const jobIdCol = unlockCols.find((c) => c.name === "job_id");
+  if (jobIdCol && jobIdCol.notnull === 1) {
+    db.transaction(() => {
+      db.exec(`
+        CREATE TABLE unlocks_new (
+          id          INTEGER PRIMARY KEY AUTOINCREMENT,
+          user_id     TEXT NOT NULL DEFAULT 'anonymous',
+          account_id  TEXT NOT NULL,
+          job_id      TEXT,
+          unlocked_at TEXT NOT NULL,
+          UNIQUE(user_id, account_id)
+        );
+        INSERT INTO unlocks_new SELECT * FROM unlocks;
+        DROP TABLE unlocks;
+        ALTER TABLE unlocks_new RENAME TO unlocks;
+      `);
+    })();
+    console.log("[db] Migration M-003: made unlocks.job_id nullable");
+  }
 }

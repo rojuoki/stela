@@ -19,6 +19,11 @@ export default function DevPanel() {
   const [credits, setCredits] = useState<number | null>(null);
   const [busy, setBusy] = useState(false);
 
+  // Unlock tools state
+  const [targetUsername, setTargetUsername] = useState("");
+  const [cap, setCap] = useState<50 | 75 | 100>(100);
+  const [unlockStatus, setUnlockStatus] = useState<string | null>(null);
+
   const fetchCredits = useCallback(async () => {
     try {
       const res = await apiFetch("/api/credits");
@@ -51,6 +56,7 @@ export default function DevPanel() {
     setUserId(newId);
     setDevUserId(newId);
     setCredits(null);
+    setUnlockStatus(null);
     dispatchDevChanged();
   };
 
@@ -84,8 +90,51 @@ export default function DevPanel() {
     setBalance(Math.max(0, (credits ?? 0) + delta));
   };
 
+  // ── Unlock tools ──────────────────────────────────────────────────────────
+
+  const callDevApi = async (path: string, body: object) => {
+    try {
+      const res = await fetch(path, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const data = await res.json();
+      if (res.ok) {
+        const detail =
+          "deleted" in data
+            ? `deleted ${data.deleted}`
+            : "cap" in data
+              ? `cap=${data.cap}`
+              : "ok";
+        setUnlockStatus(`✓ ${detail}`);
+        dispatchDevChanged();
+      } else {
+        setUnlockStatus(`✗ ${data.error ?? res.status}`);
+      }
+    } catch {
+      setUnlockStatus("✗ network error");
+    }
+  };
+
+  const normalizedTarget = targetUsername.replace(/^@/, "").trim();
+
+  const handleResetUser = () => {
+    callDevApi("/api/dev/resetUser", { userId });
+  };
+
+  const handleResetAccount = () => {
+    if (!normalizedTarget) return setUnlockStatus("✗ enter a username");
+    callDevApi("/api/dev/resetAccount", { userId, username: normalizedTarget });
+  };
+
+  const handleForceUnlock = () => {
+    if (!normalizedTarget) return setUnlockStatus("✗ enter a username");
+    callDevApi("/api/dev/forceUnlock", { userId, username: normalizedTarget, cap });
+  };
+
   return (
-    <div className="fixed top-4 right-4 z-50 bg-zinc-900 border border-zinc-700 rounded-lg p-3 shadow-lg min-w-[188px]">
+    <div className="fixed top-4 right-4 z-50 bg-zinc-900 border border-zinc-700 rounded-lg p-3 shadow-lg min-w-[200px]">
       <p className="text-zinc-500 text-[10px] font-mono uppercase tracking-widest mb-2">
         Dev Panel
       </p>
@@ -98,9 +147,7 @@ export default function DevPanel() {
         className="w-full bg-zinc-800 border border-zinc-600 rounded px-2 py-1 text-sm text-white focus:outline-none focus:border-zinc-500 mb-2"
       >
         {DEV_USERS.map((u) => (
-          <option key={u} value={u}>
-            {u}
-          </option>
+          <option key={u} value={u}>{u}</option>
         ))}
       </select>
 
@@ -112,9 +159,7 @@ export default function DevPanel() {
         className="w-full bg-zinc-800 border border-zinc-600 rounded px-2 py-1 text-sm text-white focus:outline-none focus:border-zinc-500 mb-3"
       >
         {DEV_PLANS.map((p) => (
-          <option key={p} value={p}>
-            {p}
-          </option>
+          <option key={p} value={p}>{p}</option>
         ))}
       </select>
 
@@ -125,38 +170,81 @@ export default function DevPanel() {
           {credits === null ? "…" : credits}
         </span>
       </div>
-
-      {/* +1 / -1 */}
       <div className="flex gap-1 mb-1">
-        <button
-          onClick={() => adjustBalance(1)}
-          disabled={busy}
-          className="flex-1 bg-zinc-700 hover:bg-zinc-600 disabled:opacity-40 text-white text-xs rounded py-1 transition-colors"
-        >
+        <button onClick={() => adjustBalance(1)} disabled={busy}
+          className="flex-1 bg-zinc-700 hover:bg-zinc-600 disabled:opacity-40 text-white text-xs rounded py-1 transition-colors">
           +1
         </button>
-        <button
-          onClick={() => adjustBalance(-1)}
-          disabled={busy || (credits ?? 0) <= 0}
-          className="flex-1 bg-zinc-700 hover:bg-zinc-600 disabled:opacity-40 text-white text-xs rounded py-1 transition-colors"
-        >
+        <button onClick={() => adjustBalance(-1)} disabled={busy || (credits ?? 0) <= 0}
+          className="flex-1 bg-zinc-700 hover:bg-zinc-600 disabled:opacity-40 text-white text-xs rounded py-1 transition-colors">
           −1
         </button>
       </div>
-
-      {/* Set presets */}
-      <div className="flex gap-1">
+      <div className="flex gap-1 mb-3">
         {[0, 3, 10].map((n) => (
-          <button
-            key={n}
-            onClick={() => setBalance(n)}
-            disabled={busy}
-            className="flex-1 bg-zinc-800 hover:bg-zinc-700 disabled:opacity-40 text-zinc-300 text-xs rounded py-1 transition-colors"
-          >
+          <button key={n} onClick={() => setBalance(n)} disabled={busy}
+            className="flex-1 bg-zinc-800 hover:bg-zinc-700 disabled:opacity-40 text-zinc-300 text-xs rounded py-1 transition-colors">
             ={n}
           </button>
         ))}
       </div>
+
+      {/* Divider */}
+      <div className="border-t border-zinc-700 mb-2" />
+
+      {/* Unlock tools */}
+      <p className="text-zinc-500 text-[10px] font-mono uppercase tracking-widest mb-2">
+        Unlock tools
+      </p>
+
+      {/* Target username + cap */}
+      <div className="flex gap-1 mb-1">
+        <input
+          type="text"
+          value={targetUsername}
+          onChange={(e) => setTargetUsername(e.target.value)}
+          placeholder="@username"
+          className="flex-1 min-w-0 bg-zinc-800 border border-zinc-600 rounded px-2 py-1 text-xs text-white placeholder-zinc-600 focus:outline-none focus:border-zinc-500"
+        />
+        <select
+          value={cap}
+          onChange={(e) => setCap(Number(e.target.value) as 50 | 75 | 100)}
+          className="bg-zinc-800 border border-zinc-600 rounded px-1 py-1 text-xs text-white focus:outline-none"
+        >
+          <option value={50}>50</option>
+          <option value={75}>75</option>
+          <option value={100}>100</option>
+        </select>
+      </div>
+
+      {/* Buttons */}
+      <button
+        onClick={handleResetUser}
+        className="w-full bg-zinc-800 hover:bg-red-900/50 text-zinc-400 hover:text-red-300 text-xs rounded py-1 mb-1 transition-colors text-left px-2"
+      >
+        Reset ALL unlocks (this user)
+      </button>
+      <div className="flex gap-1 mb-2">
+        <button
+          onClick={handleResetAccount}
+          className="flex-1 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-xs rounded py-1 transition-colors"
+        >
+          Reset account
+        </button>
+        <button
+          onClick={handleForceUnlock}
+          className="flex-1 bg-zinc-800 hover:bg-green-900/50 text-zinc-300 hover:text-green-300 text-xs rounded py-1 transition-colors"
+        >
+          Force unlock
+        </button>
+      </div>
+
+      {/* Status */}
+      {unlockStatus && (
+        <p className={`text-[10px] font-mono truncate ${unlockStatus.startsWith("✓") ? "text-green-500" : "text-red-400"}`}>
+          {unlockStatus}
+        </p>
+      )}
     </div>
   );
 }

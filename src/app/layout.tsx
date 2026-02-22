@@ -6,6 +6,11 @@ export const metadata: Metadata = {
   description: "Instantly view the earliest 100 posts of any public X account.",
 };
 
+const DevPanel =
+  process.env.NEXT_PUBLIC_DEV_PANEL === "1"
+    ? (await import("@/dev/DevPanel")).default
+    : null;
+
 export default function RootLayout({
   children,
 }: {
@@ -15,6 +20,7 @@ export default function RootLayout({
     <html lang="en">
       <body className="bg-black text-white min-h-screen antialiased">
         {children}
+        {DevPanel && <DevPanel />}
       </body>
     </html>
   );
