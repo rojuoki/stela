@@ -15,10 +15,14 @@ import {
 } from "@/lib/repository";
 import { normalizeUsername, checkRateLimit } from "@/lib/validation";
 import { getUserId } from "@/lib/getUserId";
+import { maybeInjectDevError } from "@/lib/devError";
 
 const DEV_PANEL = process.env.NEXT_PUBLIC_DEV_PANEL === "1";
 
 export async function POST(req: NextRequest) {
+  const injected = await maybeInjectDevError(req);
+  if (injected) return injected;
+
   try {
     // Rate limiting
     const clientIp = req.headers.get("x-forwarded-for") || 

@@ -1,10 +1,14 @@
 import { NextRequest, NextResponse } from "next/server";
 import { excavateEarliest } from "@/lib/excavate";
 import { getUserId } from "@/lib/getUserId";
+import { maybeInjectDevError } from "@/lib/devError";
 
 const DEV_PANEL = process.env.NEXT_PUBLIC_DEV_PANEL === "1";
 
 export async function POST(req: NextRequest) {
+  const injected = await maybeInjectDevError(req);
+  if (injected) return injected;
+
   let body: { username?: string; limit?: number };
   try {
     body = await req.json();

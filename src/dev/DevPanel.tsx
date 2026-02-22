@@ -5,10 +5,18 @@ import {
   DEV_USERS,
   DEV_PLANS,
   type DevPlan,
+  DEV_ERROR_MODES,
+  type DevErrorMode,
   getDevUserId,
   setDevUserId,
   getDevPlan,
   setDevPlan,
+  getDevErrorMode,
+  setDevErrorMode,
+  getDevDelayMs,
+  setDevDelayMs,
+  getDevErrorOnce,
+  setDevErrorOnce,
   dispatchDevChanged,
 } from "./state";
 import { apiFetch } from "@/lib/apiFetch";
@@ -24,6 +32,11 @@ export default function DevPanel() {
   const [cap, setCap] = useState<50 | 75 | 100>(100);
   const [unlockStatus, setUnlockStatus] = useState<string | null>(null);
 
+  // Error injection state
+  const [errorMode, setErrorModeState] = useState<DevErrorMode>("none");
+  const [delayMs, setDelayMsState] = useState(2000);
+  const [errorOnce, setErrorOnceState] = useState(true);
+
   const fetchCredits = useCallback(async () => {
     try {
       const res = await apiFetch("/api/credits");
@@ -36,20 +49,30 @@ export default function DevPanel() {
     }
   }, []);
 
+  // Sync error injection state from localStorage (also refreshed by stelaDevChanged
+  // so the "once" auto-clear in apiFetch is reflected in the UI).
+  const syncErrorState = useCallback(() => {
+    setErrorModeState(getDevErrorMode());
+    setDelayMsState(getDevDelayMs());
+    setErrorOnceState(getDevErrorOnce());
+  }, []);
+
   useEffect(() => {
     setUserId(getDevUserId());
     setPlan(getDevPlan());
     fetchCredits();
-  }, [fetchCredits]);
+    syncErrorState();
+  }, [fetchCredits, syncErrorState]);
 
   useEffect(() => {
     const handler = () => {
       setCredits(null);
       fetchCredits();
+      syncErrorState(); // picks up auto-clear from apiFetch "once" logic
     };
     window.addEventListener("stelaDevChanged", handler);
     return () => window.removeEventListener("stelaDevChanged", handler);
-  }, [fetchCredits]);
+  }, [fetchCredits, syncErrorState]);
 
   const handleUserChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
     const newId = e.target.value;
@@ -116,6 +139,35 @@ export default function DevPanel() {
       setUnlockStatus("✗ network error");
     }
   };
+
+  // ── Error injection ───────────────────────────────────────────────────────
+
+  const handleErrorModeChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
+    const m = e.target.value as DevErrorMode;
+    setErrorModeState(m);
+    setDevErrorMode(m);
+    // no dispatchDevChanged – changing mode alone doesn't affect credits/plan UI
+  };
+
+  const handleDelayMsChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const v = parseInt(e.target.value, 10);
+    const clamped = isNaN(v) ? 2000 : Math.max(100, Math.min(30_000, v));
+    setDelayMsState(clamped);
+    setDevDelayMs(clamped);
+  };
+
+  const handleErrorOnceChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const v = e.target.checked;
+    setErrorOnceState(v);
+    setDevErrorOnce(v);
+  };
+
+  const handleClearErrorMode = () => {
+    setErrorModeState("none");
+    setDevErrorMode("none");
+  };
+
+  // ── Unlock tools ──────────────────────────────────────────────────────────
 
   const normalizedTarget = targetUsername.replace(/^@/, "").trim();
 
@@ -245,6 +297,66 @@ export default function DevPanel() {
           {unlockStatus}
         </p>
       )}
+
+      {/* Divider */}
+      <div className="border-t border-zinc-700 mt-2 mb-2" />
+
+      {/* Error injection */}
+      <p className="text-zinc-500 text-[10px] font-mono uppercase tracking-widest mb-2">
+        Error injection
+      </p>
+
+      {/* Mode dropdown + Clear */}
+      <div className="flex gap-1 mb-1">
+        <select
+          value={errorMode}
+          onChange={handleErrorModeChange}
+          className={`flex-1 bg-zinc-800 border rounded px-2 py-1 text-xs focus:outline-none ${
+            errorMode !== "none"
+              ? "border-orange-500 text-orange-300"
+              : "border-zinc-600 text-white"
+          }`}
+        >
+          {DEV_ERROR_MODES.map((m) => (
+            <option key={m} value={m}>{m}</option>
+          ))}
+        </select>
+        {errorMode !== "none" && (
+          <button
+            onClick={handleClearErrorMode}
+            className="bg-zinc-800 hover:bg-zinc-700 border border-zinc-600 text-zinc-400 hover:text-white text-xs rounded px-2 py-1 transition-colors"
+          >
+            ✕
+          </button>
+        )}
+      </div>
+
+      {/* Delay ms input — only when mode=delay */}
+      {errorMode === "delay" && (
+        <div className="flex items-center gap-1 mb-1">
+          <label className="text-zinc-500 text-[10px] whitespace-nowrap">ms</label>
+          <input
+            type="number"
+            min={100}
+            max={30000}
+            step={500}
+            value={delayMs}
+            onChange={handleDelayMsChange}
+            className="flex-1 bg-zinc-800 border border-zinc-600 rounded px-2 py-1 text-xs text-white focus:outline-none focus:border-zinc-500"
+          />
+        </div>
+      )}
+
+      {/* Next request only toggle */}
+      <label className="flex items-center gap-2 cursor-pointer select-none">
+        <input
+          type="checkbox"
+          checked={errorOnce}
+          onChange={handleErrorOnceChange}
+          className="accent-orange-500"
+        />
+        <span className="text-zinc-400 text-[10px]">Next request only</span>
+      </label>
     </div>
   );
 }
