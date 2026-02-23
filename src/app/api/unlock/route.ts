@@ -12,6 +12,7 @@ import {
   spendCredits,
   giveCredits,
   cleanupExpiredHolds,
+  recordApiCall,
 } from "@/lib/repository";
 import { normalizeUsername, checkRateLimit } from "@/lib/validation";
 
@@ -79,6 +80,7 @@ export async function POST(req: NextRequest) {
           if (alreadyUnlocked) {
             // Free re-unlock for same user
             recordUnlock(userId, account.account_id, "cache-hit-free");
+            recordApiCall("cache/unlock", true); // saved: no excavation needed
             console.log(`[unlock] Free cache hit for @${username}: ${cachedCount} tweets, user already unlocked`);
             
             return NextResponse.json({
@@ -110,7 +112,8 @@ export async function POST(req: NextRequest) {
               }, { status: 500 });
             }
             recordUnlock(userId, account.account_id, "cache-hit-paid");
-            
+            recordApiCall("cache/unlock", true); // saved: tweets already in DB
+
             console.log(`[unlock] Paid cache hit for @${username}: ${cachedCount} tweets, 1 credit consumed`);
             
             return NextResponse.json({

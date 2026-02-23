@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { normalizeUsername, checkRateLimit } from "@/lib/validation";
-import { getAccountByUsername } from "@/lib/repository";
+import { getAccountByUsername, recordApiCall } from "@/lib/repository";
 import { getUserByUsername, createStats, XApiStop } from "@/lib/xclient";
 import { getDb } from "@/lib/db";
 
@@ -48,6 +48,7 @@ export async function GET(req: NextRequest) {
     // ── Check DB cache first ──
     const cachedAccount = getAccountByUsername(username);
     if (cachedAccount) {
+      recordApiCall("cache/account", true); // saved: user lookup from DB
       console.log(`[account] Cache hit for @${username}`);
       return NextResponse.json({
         account_id: cachedAccount.account_id,

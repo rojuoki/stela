@@ -307,6 +307,130 @@ export function giveCredits(userId: string, amount: number, reason: string = 'Ma
   })();
 }
 
+// ─── API call telemetry ────────────────────────────────
+
+/**
+ * Cost per real X API call — single configurable constant.
+ * Adjust to match your actual plan's per-call pricing.
+ */
+export const COST_PER_CALL_USD = 0.01; // $0.01 / real API call (dev estimate)
+
+/**
+ * Record one API interaction.
+ * cached=false → real HTTP call to X API (counts toward totals).
+ * cached=true  → request served from local cache (counts toward saved).
+ * Fire-and-forget: never throws so callers are never interrupted.
+ */
+export function recordApiCall(endpoint: string, cached: boolean): void {
+  try {
+    const db = getDb();
+    db.prepare(
+      "INSERT INTO api_call_log (endpoint, cached, ts) VALUES (?, ?, ?)"
+    ).run(endpoint, cached ? 1 : 0, new Date().toISOString());
+  } catch {
+    // Non-fatal — telemetry must never break the hot path
+  }
+}
+
+export interface ApiCostStats {
+  calls_total: number;
+  calls_last_24h: number;
+  calls_by_endpoint: Record<string, number>;
+  cache_saved_calls: number;
+  estimated_cost_usd: number;
+  cache_saved_cost_usd: number;
+}
+
+/** Aggregate API call stats from the log table. */
+export function getApiCostStats(): ApiCostStats {
+  const db = getDb();
+  const since24h = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+
+  const totals = db
+    .prepare(
+      `SELECT
+         SUM(CASE WHEN cached = 0 THEN 1 ELSE 0 END) AS calls_total,
+         SUM(CASE WHEN cached = 1 THEN 1 ELSE 0 END) AS cache_saved_calls
+       FROM api_call_log`
+    )
+    .get() as { calls_total: number | null; cache_saved_calls: number | null };
+
+  const last24h = db
+    .prepare(
+      "SELECT COUNT(*) AS cnt FROM api_call_log WHERE cached = 0 AND ts >= ?"
+    )
+    .get(since24h) as { cnt: number };
+
+  const byEndpoint = db
+    .prepare(
+      "SELECT endpoint, COUNT(*) AS cnt FROM api_call_log WHERE cached = 0 GROUP BY endpoint ORDER BY cnt DESC"
+    )
+    .all() as Array<{ endpoint: string; cnt: number }>;
+
+  const calls_total = totals.calls_total ?? 0;
+  const cache_saved_calls = totals.cache_saved_calls ?? 0;
+
+  return {
+    calls_total,
+    calls_last_24h: last24h.cnt,
+    calls_by_endpoint: Object.fromEntries(
+      byEndpoint.map((r) => [r.endpoint, r.cnt])
+    ),
+    cache_saved_calls,
+    estimated_cost_usd: calls_total * COST_PER_CALL_USD,
+    cache_saved_cost_usd: cache_saved_calls * COST_PER_CALL_USD,
+  };
+}
+
+// ─── Dev Panel helpers ─────────────────────────────────
+
+export interface DevUnlockEntry {
+  account_id: string;
+  job_id: string;
+  unlocked_at: string;
+  username: string | null;
+  account_created_at: string | null;
+  cap: number | null;
+  unlocked_count: number;
+}
+
+/** List all unlocks for a given user, joined with account + job metadata. */
+export function getDevUnlocks(userId: string): DevUnlockEntry[] {
+  const db = getDb();
+  return db
+    .prepare(
+      `SELECT
+         u.account_id,
+         u.job_id,
+         u.unlocked_at,
+         a.username,
+         a.created_at          AS account_created_at,
+         j.requested_limit     AS cap,
+         (SELECT COUNT(*) FROM tweets t WHERE t.account_id = u.account_id)
+                               AS unlocked_count
+       FROM unlocks u
+       LEFT JOIN accounts a ON a.account_id = u.account_id
+       LEFT JOIN jobs     j ON j.id          = u.job_id
+       WHERE u.user_id = ?
+       ORDER BY u.unlocked_at DESC`
+    )
+    .all(userId) as DevUnlockEntry[];
+}
+
+/** Delete one unlock record for a user+account pair. */
+export function deleteDevUnlock(userId: string, accountId: string): void {
+  const db = getDb();
+  db.prepare(
+    "DELETE FROM unlocks WHERE user_id = ? AND account_id = ?"
+  ).run(userId, accountId);
+}
+
+/** Delete ALL unlock records for a user. */
+export function deleteAllDevUnlocks(userId: string): void {
+  const db = getDb();
+  db.prepare("DELETE FROM unlocks WHERE user_id = ?").run(userId);
+}
+
 /** Clean up expired holds */
 export function cleanupExpiredHolds(): number {
   const db = getDb();

@@ -12,6 +12,9 @@ import { EngagementChart } from "../components/EngagementChart";
 import { TweetCard } from "../components/TweetCard";
 import { AccountHeader } from "../components/AccountHeader";
 import { JobStatus } from "../components/JobStatus";
+import { DevPanel } from "../components/DevPanel";
+
+const DEV = process.env.NEXT_PUBLIC_DEV_PANEL === "1";
 
 interface UnlockResponse {
   jobId: string | null;
@@ -366,6 +369,14 @@ export default function Home() {
     }
   };
 
+  // ── DevPanel: load a username into the main UI ────────────────────────────
+  const handleViewUsername = (usernameToView: string) => {
+    const clean = usernameToView.replace(/^@/, "").trim().toLowerCase();
+    setUsername(clean);
+    manualLookup(clean);
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  };
+
   const hasResults = tweets.length > 0;
 
   return (
@@ -478,6 +489,8 @@ export default function Home() {
           </p>
         </div>
       )}
+      {/* Dev Panel — only when NEXT_PUBLIC_DEV_PANEL=1 */}
+      {DEV && <DevPanel onView={handleViewUsername} />}
     </main>
   );
 }

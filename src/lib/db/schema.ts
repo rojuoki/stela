@@ -119,4 +119,15 @@ CREATE TABLE IF NOT EXISTS credit_events (
   created_at    TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_credit_events_user ON credit_events(user_id, created_at DESC);
+
+-- API call telemetry (dev only; populated by xclient + cache routes)
+-- cached=0 → real HTTP call to X API
+-- cached=1 → request served from local cache (call saved)
+CREATE TABLE IF NOT EXISTS api_call_log (
+  id        INTEGER PRIMARY KEY AUTOINCREMENT,
+  endpoint  TEXT    NOT NULL,
+  cached    INTEGER NOT NULL DEFAULT 0,
+  ts        TEXT    NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_api_call_log_ts ON api_call_log(ts DESC);
 `;

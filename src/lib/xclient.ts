@@ -7,6 +7,7 @@
  */
 
 import { tokenPool } from "./tokenPool";
+import { recordApiCall } from "./repository";
 
 const API_BASE = process.env.X_API_BASE || "https://api.x.com/2";
 const BEARER = () => {
@@ -100,6 +101,20 @@ export class XApiStop extends Error {
   }
 }
 
+// ─── Telemetry helpers ─────────────────────────────────
+
+/**
+ * Normalize an X API endpoint path to a stable label for grouping in the log.
+ * Strips variable segments (usernames, numeric IDs) so the log stays clean.
+ */
+function normalizeEndpoint(endpoint: string): string {
+  if (endpoint === "/tweets/search/all") return "tweets/search/all";
+  if (endpoint.startsWith("/users/by/username/")) return "users/by/username";
+  if (/^\/users\/\d+\/tweets/.test(endpoint)) return "users/:id/tweets";
+  // fallback: strip leading slash
+  return endpoint.replace(/^\//, "");
+}
+
 // ─── Single HTTP gateway ──────────────────────────────
 
 /**
@@ -152,6 +167,8 @@ async function xfetch(
       const reset = res.headers.get("x-rate-limit-reset");
       const now = Math.floor(Date.now() / 1000);
       xCallCount++;
+      // Persist telemetry — fire-and-forget, never throws
+      recordApiCall(normalizeEndpoint(endpoint), false);
       console.log(`[rate] remaining=${remaining} reset=${reset} now=${now} x_calls=${xCallCount}`);
       if (res.status === 429) {
         console.log(`[rate][429] remaining=${remaining} reset=${reset} now=${now} x_calls=${xCallCount}`);
