@@ -15,8 +15,19 @@ import {
   recordApiCall,
 } from "@/lib/repository";
 import { normalizeUsername, checkRateLimit } from "@/lib/validation";
+import { getUserId } from "@/lib/getUserId";
+import { maybeInjectDevError } from "@/lib/devError";
+import { withDevMeasure, type MeasureCtx } from "@/lib/devMeasure";
+
+const DEV_PANEL = process.env.NEXT_PUBLIC_DEV_PANEL === "1";
 
 export async function POST(req: NextRequest) {
+  const userId = getUserId(req);
+  const mCtx: MeasureCtx = { userId, route: "/api/unlock" };
+  return withDevMeasure("unlock", async () => {
+  const injected = await maybeInjectDevError(req);
+  if (injected) return injected;
+
   try {
     // Rate limiting
     const clientIp = req.headers.get("x-forwarded-for") || 
@@ -50,6 +61,7 @@ export async function POST(req: NextRequest) {
 
     // Input validation and normalization
     const username = normalizeUsername(body.username ?? "");
+    mCtx.username = username || undefined; // propagate to stats entry
     if (!username) {
       return NextResponse.json({ 
         error: "Invalid username format. Must be 1-15 characters, letters/numbers/underscore only." 
@@ -59,7 +71,7 @@ export async function POST(req: NextRequest) {
     // force=true bypasses cache and idempotency, always creates a new excavation job.
     // Credit rule: force=true always holds 1 credit (same as a fresh first-time unlock).
     const force = body.force === true;
-    const userId = "anonymous"; // For MVP, single anonymous user
+    if (DEV_PANEL) console.log(`[dev] user_id=${userId} POST /api/unlock username=${body.username}`);
 
     // Clean up expired holds and ensure user has starting credits
     cleanupExpiredHolds();
@@ -185,4 +197,5 @@ export async function POST(req: NextRequest) {
       message: error instanceof Error ? error.message : "Unknown error"
     }, { status: 500 });
   }
+  }, mCtx); // withDevMeasure
 }

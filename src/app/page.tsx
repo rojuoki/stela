@@ -12,9 +12,10 @@ import { EngagementChart } from "../components/EngagementChart";
 import { TweetCard } from "../components/TweetCard";
 import { AccountHeader } from "../components/AccountHeader";
 import { JobStatus } from "../components/JobStatus";
+import { apiFetch } from "../lib/apiFetch";
+import { getDevPlan, type DevPlan } from "../dev/state";
+import { recordCacheEvent } from "../dev/cacheDebug";
 import { DevPanel } from "../components/DevPanel";
-
-const DEV = process.env.NEXT_PUBLIC_DEV_PANEL === "1";
 
 interface UnlockResponse {
   jobId: string | null;
@@ -49,6 +50,9 @@ const ARTIFICIAL_DELAY_MS = 750;
 /** Fixed polling interval — does NOT change based on job status. */
 const POLL_INTERVAL_MS = 2500;
 
+/** True only when the dev panel is enabled at build time. */
+const DEV_PANEL = process.env.NEXT_PUBLIC_DEV_PANEL === "1";
+
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
@@ -71,6 +75,10 @@ export default function Home() {
   const [jobPhase, setJobPhase] = useState<JobPhase>(null);
   const [resumeAt, setResumeAt] = useState<string | null>(null);
 
+  // Dev-only plan gating. In prod (DEV_PANEL=false) this stays "basic" forever.
+  const [devPlan, setDevPlanState] = useState<DevPlan>("basic");
+  const isFree = DEV_PANEL && devPlan === "free";
+
   const [sessionCache, setSessionCache] = useState<
     Map<string, AccountData | { error: string }>
   >(new Map());
@@ -80,6 +88,32 @@ export default function Home() {
   const cleanup = () => {
     if (lookupTimeoutRef.current) clearTimeout(lookupTimeoutRef.current);
   };
+
+  const fetchCredits = async () => {
+    try {
+      const res = await apiFetch("/api/credits");
+      if (res.ok) {
+        const data = await res.json();
+        setCredits(data.balance);
+      }
+    } catch (e) {
+      console.error("Failed to fetch credits:", e);
+    }
+  };
+
+  useEffect(() => {
+    fetchCredits();
+
+    if (DEV_PANEL) {
+      setDevPlanState(getDevPlan());
+      const handler = () => {
+        fetchCredits();
+        setDevPlanState(getDevPlan());
+      };
+      window.addEventListener("stelaDevChanged", handler);
+      return () => window.removeEventListener("stelaDevChanged", handler);
+    }
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const manualLookup = async (usernameToLookup: string) => {
     const cleanUsername = usernameToLookup.trim().toLowerCase();
@@ -92,6 +126,7 @@ export default function Home() {
 
     const cached = sessionCache.get(cleanUsername);
     if (cached) {
+      if (DEV_PANEL) recordCacheEvent({ type: "lookup", hit: true, tier: "user", username: cleanUsername });
       if ("error" in cached) {
         setAccountStatus("error");
         setAccountError(cached.error);
@@ -124,6 +159,12 @@ export default function Home() {
       }
 
       setSessionCache((prev) => new Map(prev.set(cleanUsername, data)));
+      if (DEV_PANEL) recordCacheEvent({
+        type: "lookup",
+        hit: data.source === "cache",
+        tier: data.source === "cache" ? "shared" : "none",
+        username: cleanUsername,
+      });
       setAccountStatus("found");
       setAccountData(data);
     } catch {
@@ -145,29 +186,13 @@ export default function Home() {
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === "Enter") {
       e.preventDefault();
-      if (accountData && !accountData.protected && username.trim()) {
+      if (accountData && !accountData.protected && username.trim() && !isFree) {
         handleUnlock();
       } else if (username.trim()) {
         manualLookup(username.trim());
       }
     }
   };
-
-  const fetchCredits = async () => {
-    try {
-      const res = await fetch("/api/credits");
-      if (res.ok) {
-        const data = await res.json();
-        setCredits(data.balance);
-      }
-    } catch (e) {
-      console.error("Failed to fetch credits:", e);
-    }
-  };
-
-  useEffect(() => {
-    fetchCredits();
-  }, []);
 
   const loadTweets = async (accountId: string): Promise<TweetData[]> => {
     const res = await fetch(`/api/tweets/${accountId}`);
@@ -311,6 +336,9 @@ export default function Home() {
   }, [activeJobId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleUnlock = async (force = false) => {
+    // Blocked on free plan
+    if (isFree) return;
+
     const raw = username.trim().replace(/^@/, "");
     if (!raw) return;
 
@@ -329,7 +357,7 @@ export default function Home() {
     setAccountError(null);
 
     try {
-      const res = await fetch("/api/unlock", {
+      const res = await apiFetch("/api/unlock", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ username: raw, force }),
@@ -344,6 +372,16 @@ export default function Home() {
       }
 
       const unlock: UnlockResponse = await res.json();
+
+      if (DEV_PANEL) recordCacheEvent({
+        type: "unlock",
+        hit: unlock.status === "cache-hit",
+        tier: unlock.status === "cache-hit"
+          ? (unlock.freeReUnlock ? "user" : "shared")
+          : "none",
+        username: raw,
+        cachedCount: unlock.cachedCount,
+      });
 
       if (!force && unlock.status === "cache-hit" && unlock.accountId) {
         setJobInfo("Unlocking…");
@@ -378,6 +416,8 @@ export default function Home() {
   };
 
   const hasResults = tweets.length > 0;
+  // Show locked placeholder when free plan + account found (no unlock allowed)
+  const showLocked = isFree && accountStatus === "found";
 
   return (
     <main className="max-w-2xl mx-auto px-4 py-12">
@@ -424,15 +464,19 @@ export default function Home() {
         <button
           onClick={() => handleUnlock(false)}
           disabled={
-            !accountData || accountData.protected || status === "running"
+            isFree ||
+            !accountData ||
+            accountData.protected ||
+            status === "running"
           }
+          title={isFree ? "Upgrade to unlock earliest posts" : undefined}
           className="bg-white text-black font-semibold text-sm px-4 py-2 rounded-lg hover:bg-zinc-200 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
         >
-          Unlock earliest 100
+          {isFree ? "Upgrade to unlock" : "Unlock earliest 100"}
         </button>
         <button
           onClick={() => handleUnlock(true)}
-          disabled={!username.trim() || status === "running"}
+          disabled={isFree || !username.trim() || status === "running"}
           title="Bypass cache and re-run excavation"
           className="bg-zinc-700 text-zinc-200 font-semibold text-sm px-3 py-2 rounded-lg hover:bg-zinc-600 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
         >
@@ -469,10 +513,54 @@ export default function Home() {
       />
 
       {/* Engagement Chart */}
-      {hasResults && <EngagementChart tweets={tweets} />}
+      {showLocked ? (
+        <div className="relative rounded-xl overflow-hidden border border-zinc-800 h-28 mb-4">
+          <div className="flex items-end gap-1 h-full px-4 pb-4 pt-6 opacity-20">
+            {[40, 65, 30, 80, 50, 70, 45, 90, 35, 60].map((h, i) => (
+              <div
+                key={i}
+                className="flex-1 bg-zinc-500 rounded-t"
+                style={{ height: `${h}%` }}
+              />
+            ))}
+          </div>
+          <div className="absolute inset-0 backdrop-blur-[3px] bg-black/60 flex items-center justify-center">
+            <p className="text-zinc-400 text-xs">Chart locked — Free plan</p>
+          </div>
+        </div>
+      ) : (
+        hasResults && <EngagementChart tweets={tweets} />
+      )}
 
       {/* Tweet list */}
-      {hasResults ? (
+      {showLocked ? (
+        <div className="relative border border-zinc-800 rounded-xl overflow-hidden">
+          {/* Skeleton rows */}
+          <div className="divide-y divide-zinc-800">
+            {[...Array(4)].map((_, i) => (
+              <div key={i} className="p-4 flex gap-3 opacity-30">
+                <div className="w-10 h-10 rounded-full bg-zinc-700 shrink-0" />
+                <div className="flex-1 space-y-2 pt-1">
+                  <div className="h-3 bg-zinc-700 rounded w-1/4" />
+                  <div className="h-3 bg-zinc-700 rounded w-full" />
+                  <div className="h-3 bg-zinc-700 rounded w-3/5" />
+                </div>
+              </div>
+            ))}
+          </div>
+          {/* Blur + label */}
+          <div className="absolute inset-0 backdrop-blur-[3px] bg-black/55 flex items-center justify-center">
+            <div className="text-center">
+              <p className="text-zinc-200 text-sm font-semibold">
+                Locked — Free plan
+              </p>
+              <p className="text-zinc-500 text-xs mt-1">
+                Upgrade to unlock earliest posts
+              </p>
+            </div>
+          </div>
+        </div>
+      ) : hasResults ? (
         <div className="border border-zinc-800 rounded-xl overflow-hidden">
           {tweets.map((t) => (
             <TweetCard key={t.post_id} tweet={t} />
@@ -490,7 +578,7 @@ export default function Home() {
         </div>
       )}
       {/* Dev Panel — only when NEXT_PUBLIC_DEV_PANEL=1 */}
-      {DEV && <DevPanel onView={handleViewUsername} />}
+      {DEV_PANEL && <DevPanel onView={handleViewUsername} />}
     </main>
   );
 }

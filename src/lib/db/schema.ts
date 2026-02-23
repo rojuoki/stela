@@ -61,7 +61,7 @@ CREATE TABLE IF NOT EXISTS unlocks (
   id            INTEGER PRIMARY KEY AUTOINCREMENT,
   user_id       TEXT NOT NULL DEFAULT 'anonymous',
   account_id    TEXT NOT NULL,
-  job_id        TEXT NOT NULL REFERENCES jobs(id),
+  job_id        TEXT,
   unlocked_at   TEXT NOT NULL,
   UNIQUE(user_id, account_id)
 );
