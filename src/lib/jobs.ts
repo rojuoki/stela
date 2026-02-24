@@ -100,6 +100,55 @@ class GlobalJobQueue {
     return idx === -1 ? null : idx + 1;
   }
 
+  /** Snapshot of current in-memory queue state for DevPanel display. */
+  queueSnapshot(): { running: string[]; pending: string[]; waiting: string[] } {
+    return {
+      running: [...this._runningJobIds],
+      pending: [...this._pendingIds],
+      waiting: [...this._waitingIds.keys()],
+    };
+  }
+
+  /**
+   * Cancel a job by ID. Safe to call for any state.
+   * - pending  : removed from queue immediately, DB → canceled, credit hold released.
+   * - waiting  : removed from in-memory set, DB → canceled. The resume timer will
+   *              see the non-"queued" status and skip without doing anything.
+   * - running  : DB → canceled. runJobAsync checks before writing "succeeded" and
+   *              will skip success processing, releasing the hold itself.
+   * - terminal : returns false (already done).
+   */
+  cancelJob(jobId: string): boolean {
+    const db = getDb();
+    const row = db
+      .prepare("SELECT status, hold_id FROM jobs WHERE id = ?")
+      .get(jobId) as { status: string; hold_id: string | null } | undefined;
+
+    if (!row) return false;
+    if (["canceled", "succeeded", "failed"].includes(row.status)) return false;
+
+    const isRunning = this._runningJobIds.has(jobId);
+
+    // Release credit hold for non-running jobs (running jobs release in runJobAsync).
+    if (!isRunning && row.hold_id) {
+      releaseHeld(row.hold_id, "Job canceled by user");
+    }
+
+    // Mark canceled in DB immediately.
+    db.prepare(
+      "UPDATE jobs SET status = 'canceled', finished_at = ?, resume_at = NULL, resume_state = NULL WHERE id = ?",
+    ).run(new Date().toISOString(), jobId);
+
+    // Remove from in-memory structures.
+    this._pendingIds = this._pendingIds.filter((id) => id !== jobId);
+    this._waitingIds.delete(jobId);
+    // _runningJobIds is NOT removed here: runJobAsync still holds the slot and
+    // will call complete() via finally when excavateEarliest finishes naturally.
+
+    console.log(`[queue] Job ${jobId} CANCELED (was ${row.status})`);
+    return true;
+  }
+
   // ── Lifecycle ─────────────────────────────────────────────────────────────
 
   /**
@@ -156,9 +205,9 @@ class GlobalJobQueue {
       const now = new Date().toISOString();
       getDb()
         .prepare(
-          "UPDATE jobs SET status = 'running', started_at = COALESCE(started_at, ?), resume_at = NULL WHERE id = ?",
+          "UPDATE jobs SET status = 'running', started_at = COALESCE(started_at, ?), resume_at = NULL, node_pid = ? WHERE id = ?",
         )
-        .run(now, jobId);
+        .run(now, process.pid, jobId);
       console.log(
         `[queue] Job ${jobId} → RUNNING (${this._runningJobIds.size}/${tokenPool.M})`,
       );
@@ -223,30 +272,42 @@ class GlobalJobQueue {
     const db = getDb();
     const nowMs = Date.now();
 
-    // Re-queue any RUNNING jobs rather than marking them FAILED.
+    // Handle RUNNING jobs found in DB on startup.
     //
-    // WHY: In Next.js dev mode, Fast Refresh / Turbopack reloads server modules
-    // on every code change. Without the globalThis singleton guard (below), each
-    // reload would call _init() and find jobs still marked RUNNING in the DB,
-    // incorrectly marking them FAILED(SERVER_RESTART) even though excavation was
-    // happily running in the same Node process.
+    // Two scenarios:
+    //   A) True process restart (crash / manual kill): node_pid differs from
+    //      process.pid → re-queue so the job resumes from its last checkpoint.
     //
-    // In production (true crash), re-queuing is also strictly better than failing:
-    // the checkpoint persists in resume_state, so the job continues from where it
-    // left off instead of starting over or appearing as a failure to the user.
+    //   B) Turbopack HMR / lazy route compilation: a new module bundle evaluates
+    //      jobs.ts in a separate context (different globalThis), constructing a
+    //      second GlobalJobQueue. The job is still running in the ORIGINAL
+    //      context. node_pid matches process.pid → don't re-queue; just add the
+    //      job to _runningJobIds so this instance knows the slot is occupied.
     //
-    // Credit holds are intentionally kept: we intend to retry, not to abort.
+    // Credit holds are intentionally kept in both cases: we intend to retry or
+    // continue, not to abort.
     const interrupted = db
-      .prepare("SELECT id FROM jobs WHERE status = 'running'")
-      .all() as { id: string }[];
+      .prepare("SELECT id, node_pid FROM jobs WHERE status = 'running'")
+      .all() as { id: string; node_pid: number | null }[];
 
     for (const job of interrupted) {
+      if (job.node_pid === process.pid) {
+        // Same process → HMR false alarm. Job is still running; just track it.
+        this._runningJobIds.add(job.id);
+        console.log(
+          `[queue] Job ${job.id} still running in PID ${process.pid} (HMR guard) — not re-queuing`,
+        );
+        continue;
+      }
+
+      // Different PID (or null) → true restart. Re-queue from checkpoint.
       db.prepare(`
         UPDATE jobs
         SET status = 'queued',
             error_code = NULL,
             error_message = NULL,
-            resume_at = NULL
+            resume_at = NULL,
+            node_pid = NULL
         WHERE id = ?
       `).run(job.id);
       console.log(`[queue] Job ${job.id} → RE-QUEUED (was running at init; will resume from checkpoint)`);
@@ -517,6 +578,20 @@ async function runJobAsync(jobId: string): Promise<void> {
     if (hardFailReasons.includes(result.stopReason) && result.fetchedCount === 0) {
       failJobInDb(jobId, result.stopReason, `Stop reason: ${result.stopReason}`, result, holdId);
       return; // finally handles cleanup
+    }
+
+    // ── Guard: skip success if job was canceled while running ────────────────
+    {
+      const currentRow = db
+        .prepare("SELECT status FROM jobs WHERE id = ?")
+        .get(jobId) as { status: string } | undefined;
+      if (currentRow?.status === "canceled") {
+        console.log(
+          `[jobs] Job ${jobId} was canceled while running — skipping success write, releasing hold`,
+        );
+        if (holdId) releaseHeld(holdId, "Job canceled while running");
+        return; // finally handles token release and complete()
+      }
     }
 
     // ── Success path ─────────────────────────────────────────────────────────

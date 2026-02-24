@@ -4,9 +4,10 @@
  * DevPanel — visible only when NEXT_PUBLIC_DEV_PANEL=1.
  * Feature #3: Unlock scope browser.
  * Feature #4: Cost / API usage rollups.
+ * Feature #5: Queue viewer with per-job cancel.
  */
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 
 // ─── Types ─────────────────────────────────────────────
 
@@ -67,6 +68,128 @@ function SectionHeader({
         )}
       </span>
       {children}
+    </div>
+  );
+}
+
+interface DevJobEntry {
+  id: string;
+  username: string;
+  status: "running" | "queued" | "waiting_rate_limit";
+  queuePosition: number | null;
+  apiCalls: number;
+  fetchedCount: number;
+  requestedLimit: number;
+  createdAt: string | null;
+  startedAt: string | null;
+  resumeAt: string | null;
+}
+
+// ─── Queue section ──────────────────────────────────────
+
+function QueueSection() {
+  const [jobs, setJobs] = useState<DevJobEntry[]>([]);
+  const [busy, setBusy] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  const fetchJobs = useCallback(async () => {
+    try {
+      const res = await fetch("/api/dev/jobs");
+      if (!res.ok) return;
+      const data = await res.json();
+      setJobs(data.jobs ?? []);
+    } catch {
+      // silent — polling, don't flash errors
+    }
+  }, []);
+
+  // Initial fetch on mount.
+  useEffect(() => { fetchJobs(); }, [fetchJobs]);
+
+  // 2 s while jobs are active; 30 s when idle (avoid spamming the server).
+  useEffect(() => {
+    if (pollRef.current) clearInterval(pollRef.current);
+    pollRef.current = setInterval(fetchJobs, jobs.length > 0 ? 2000 : 30_000);
+    return () => {
+      if (pollRef.current) clearInterval(pollRef.current);
+    };
+  }, [fetchJobs, jobs.length]);
+
+  const handleCancel = async (jobId: string) => {
+    setBusy(jobId);
+    setError(null);
+    try {
+      const res = await fetch(`/api/dev/jobs?id=${encodeURIComponent(jobId)}`, {
+        method: "DELETE",
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        setError(data.error ?? `HTTP ${res.status}`);
+        return;
+      }
+      await fetchJobs();
+    } catch {
+      setError("Network error");
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  if (jobs.length === 0) return null;
+
+  return (
+    <div className="mt-6 pt-5 border-t border-zinc-800">
+      <SectionHeader label="Dev · Queue" count={jobs.length} />
+
+      {error && <p className="text-[11px] text-red-400 mb-2">{error}</p>}
+
+      <div className="space-y-1">
+        {jobs.map((job) => {
+          const isBusy = busy === job.id;
+          const statusColor =
+            job.status === "running"
+              ? "text-emerald-400"
+              : job.status === "waiting_rate_limit"
+                ? "text-yellow-500"
+                : "text-zinc-500";
+          const statusLabel =
+            job.status === "running"
+              ? "running"
+              : job.status === "waiting_rate_limit"
+                ? "rate-limit"
+                : `queued #${job.queuePosition ?? "?"}`;
+
+          return (
+            <div
+              key={job.id}
+              className="grid grid-cols-[1fr_72px_64px_64px_auto] gap-x-3 items-center text-[12px] bg-zinc-900 rounded-lg px-3 py-1.5"
+            >
+              <span className="text-zinc-200 truncate">@{job.username}</span>
+
+              <span className={`text-[11px] ${statusColor}`}>{statusLabel}</span>
+
+              <span className="tabular-nums text-zinc-500 text-right text-[11px]">
+                {job.apiCalls}
+                <span className="text-zinc-700"> calls</span>
+              </span>
+
+              <span className="tabular-nums text-zinc-400 text-right">
+                {job.fetchedCount}
+                <span className="text-zinc-700">/{job.requestedLimit}</span>
+              </span>
+
+              <button
+                onClick={() => handleCancel(job.id)}
+                disabled={isBusy}
+                className="text-red-700 hover:text-red-400 transition-colors disabled:opacity-40 text-[11px]"
+              >
+                {isBusy ? "…" : "Cancel"}
+              </button>
+            </div>
+          );
+        })}
+      </div>
     </div>
   );
 }
@@ -362,6 +485,9 @@ export function DevPanel({ onView }: DevPanelProps) {
           </div>
         </>
       )}
+
+      {/* ── Queue section ── */}
+      <QueueSection />
 
       {/* ── Cost section ── */}
       <CostSection />

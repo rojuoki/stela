@@ -40,6 +40,12 @@ function runMigrations(db: Database.Database): void {
     console.log("[db] Migration M-002: added jobs.resume_state");
   }
 
+  // M-004: add node_pid column to jobs (HMR vs true-crash detection in _init())
+  if (!cols.some((c) => c.name === "node_pid")) {
+    db.prepare("ALTER TABLE jobs ADD COLUMN node_pid INTEGER").run();
+    console.log("[db] Migration M-004: added jobs.node_pid");
+  }
+
   // M-003: make unlocks.job_id nullable (drop FK + NOT NULL).
   // Fixes cache-hit unlock recording which passed sentinel strings, not real job IDs.
   const unlockCols = db.prepare("PRAGMA table_info(unlocks)").all() as Array<{

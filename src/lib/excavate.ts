@@ -939,16 +939,34 @@ async function collectWindowPass(
       `[collect][adaptive] spanDays=${collectSpanDays} uniqueNew=${uniqueNew} pages=${pagesInWindow} exhausted=${exhausted} action=${adaptAction} nextSpanDays=${nextSpanDays}`,
     );
 
+    // ── Persist window completion BEFORE stop checks ───────────────────────
+    // Advancing collectStart + saving the checkpoint here (rather than after
+    // the break conditions) ensures that an unexpected interruption between
+    // windows — e.g. a Next.js HMR reload that re-initialises the job queue
+    // while the process is still alive — never leaves the checkpoint pointing
+    // at the already-finished window. Without this, the job would re-fetch the
+    // same window on every resume and loop forever.
+    //
+    // Safe for all exit paths:
+    //   OK_LIMIT_REACHED    — checkpoint marks next window; break is clean.
+    //   MAX_API_CALLS_REACHED — budget exhausted; any further resume starts
+    //                          from the next window (tweets already stored).
+    //   Normal continue     — was already done here before; no behaviour change.
+    if (uniqueNew === 0 && collected.size > 0) {
+      console.log(
+        `[collect] @${username} window=[${collectStart.toISOString().slice(0, 10)}, ${collectEnd.toISOString().slice(0, 10)}] already processed (uniqueNew=0 have=${collected.size}) — advancing`,
+      );
+    }
+    collectStart = collectEnd;
+    collectSpanDays = nextSpanDays;
+    checkpointOpts?.saveWindowCheckpoint?.(
+      collectStart,
+      collectSpanDays,
+      [...collected.keys()],
+    );
+
     if (collected.size >= collectLimit) {
       stopReason = "OK_LIMIT_REACHED";
-      // Advance window before saving checkpoint to mark this window done.
-      collectStart = collectEnd;
-      collectSpanDays = nextSpanDays;
-      checkpointOpts?.saveWindowCheckpoint?.(
-        collectStart,
-        collectSpanDays,
-        [...collected.keys()],
-      );
       break;
     }
 
@@ -956,17 +974,6 @@ async function collectWindowPass(
       stopReason = "MAX_API_CALLS_REACHED";
       break;
     }
-
-    // Advance window using the adaptively computed span.
-    collectStart = collectEnd;
-    collectSpanDays = nextSpanDays;
-
-    // Checkpoint: this window done, next window is collectStart.
-    checkpointOpts?.saveWindowCheckpoint?.(
-      collectStart,
-      collectSpanDays,
-      [...collected.keys()],
-    );
   }
 
   if (stats.totalCalls >= callCeiling && stopReason === "ACCOUNT_HAS_LESS_THAN_LIMIT") {

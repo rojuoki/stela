@@ -39,7 +39,11 @@ CREATE TABLE IF NOT EXISTS jobs (
   -- JSON blob (ExcavationCheckpoint) persisted at each safe boundary so the
   -- job can continue from where it left off after a 429 suspend+resume.
   -- Cleared (NULL) when the job reaches a terminal state.
-  resume_state  TEXT
+  resume_state  TEXT,
+  -- OS process ID of the Node.js process that launched this job.
+  -- Used by _init() to distinguish HMR-restart (same PID → job still alive)
+  -- from a true process crash (different PID → safe to re-queue).
+  node_pid      INTEGER
 );
 
 -- Stored tweets (earliest 100 per account)
