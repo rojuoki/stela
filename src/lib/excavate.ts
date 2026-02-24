@@ -316,10 +316,9 @@ async function excavateFullArchive(
           `[explore] year=${year} window=[${yearStart.toISOString().slice(0, 10)}, ${yEndStr.slice(0, 10)}] found=${yPage.tweets.length} oldest=${yOldest?.created_at.slice(0, 10) ?? "none"}`,
         );
         onProgress?.(stats.totalCalls);
-        await sleep(EXPLORE_INTER_REQUEST_DELAY_MS);
 
         if (!yOldest) {
-          // Year has no tweets — save and move to next year.
+          // Year has no tweets — checkpoint BEFORE yielding to prevent re-queue race.
           saveCheckpoint?.({
             phase: "explore_year",
             next_year: year + 1,
@@ -331,11 +330,13 @@ async function excavateFullArchive(
             collect_window_start: null,
             collect_span_days: COLLECT_INITIAL_SPAN_DAYS,
           });
+          await sleep(EXPLORE_INTER_REQUEST_DELAY_MS);
           continue;
         }
 
         // Year has tweets — begin month scan.
         earliestHitYear = year;
+        await sleep(EXPLORE_INTER_REQUEST_DELAY_MS);
       } else {
         // Resuming mid-month-scan: we already know this year has tweets.
         earliestHitYear = year;
@@ -405,8 +406,8 @@ async function excavateFullArchive(
           `[explore] month=${year}-${String(m + 1).padStart(2, "0")} window=[${mStart.toISOString().slice(0, 10)}, ${minDate(mEnd, now).toISOString().slice(0, 10)}] found=${mPage.tweets.length} oldest=${mOldest?.created_at.slice(0, 10) ?? "none"}`,
         );
         onProgress?.(stats.totalCalls);
-        await sleep(EXPLORE_INTER_REQUEST_DELAY_MS);
 
+        // Checkpoint BEFORE yielding to prevent stale-checkpoint race on re-queue.
         if (!mOldest) {
           zeroStreak++;
           // Checkpoint: this month is done, no tweets found.
@@ -423,6 +424,7 @@ async function excavateFullArchive(
             collect_window_start: null,
             collect_span_days: COLLECT_INITIAL_SPAN_DAYS,
           });
+          await sleep(EXPLORE_INTER_REQUEST_DELAY_MS);
         } else {
           // Found tweets in this month.
           if (zeroStreak >= DEEP_TRIGGER_ZERO_STREAK) {
@@ -456,6 +458,7 @@ async function excavateFullArchive(
             collected_ids: [],
           });
 
+          await sleep(EXPLORE_INTER_REQUEST_DELAY_MS);
           break yearLoop;
         }
       }
