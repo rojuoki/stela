@@ -472,7 +472,7 @@ export default function Home() {
           title={isFree ? "Upgrade to unlock earliest posts" : undefined}
           className="bg-white text-black font-semibold text-sm px-4 py-2 rounded-lg hover:bg-zinc-200 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
         >
-          {isFree ? "Upgrade to unlock" : "Unlock earliest 100"}
+          {isFree ? "Upgrade to unlock" : "Excavate"}
         </button>
         <button
           onClick={() => handleUnlock(true)}
