@@ -76,6 +76,21 @@ const GROW_FACTOR_ZERO = 8;        // aggressive grow when window is empty
 const GROW_FACTOR_LOW  = 4;        // gentle grow when window has <TARGET_MIN_HITS tweets
 const SHRINK_FACTOR_FULL = 0.5;    // halve span when window is clogged (page cap hit)
 
+/**
+ * Number of consecutive same-window / stored_new=0 iterations before forcing
+ * a window shift. Protects against infinite loops on 429 resume when the
+ * checkpoint points to a window whose tweets are all already collected.
+ */
+const STAGNATION_THRESHOLD = 2;
+
+/**
+ * Generate normalized window key for stagnation detection.
+ * Uses consistent format to ensure checkpoint/resume compatibility.
+ */
+function makeWindowKey(start: Date, end: Date): string {
+  return `${start.toISOString()}-${end.toISOString()}`;
+}
+
 /** Fallback (timeline) constants — same behaviour as previous implementation. */
 const FALLBACK_INITIAL_SPAN_DAYS = 30;
 const FALLBACK_MAX_SPAN_DAYS = 365 * 2;
@@ -165,6 +180,12 @@ export interface ExcavationCheckpoint {
   collect_exhausted?: boolean;
   /** Number of pages already fetched in the current window (for debug logging). */
   collect_pages_fetched?: number;
+
+  // ── Stagnation detection ──────────────────────────────────────────────────
+  /** Number of consecutive windows with same key and stored_new=0. Reset on any progress. */
+  collect_stagnation_count?: number;
+  /** Window key (`ISO_start-ISO_end`) of the last processed window for stagnation detection. */
+  collect_last_window_key?: string | null;
 }
 
 // ─── Entry point ───────────────────────────────────────
@@ -543,6 +564,12 @@ async function excavateFullArchive(
       ? cp.collect_pages_fetched
       : undefined;
 
+  // Stagnation state: restored from checkpoint so 429 resume retains the counter.
+  const collectStagnationCount =
+    cp?.phase === "collect" ? (cp.collect_stagnation_count ?? 0) : 0;
+  const collectLastWindowKey =
+    cp?.phase === "collect" ? (cp.collect_last_window_key ?? null) : null;
+
   // Build a full collect-phase checkpoint for the save callback.
   // pageState is set for mid-window page checkpoints; omitted for window-level checkpoints
   // (which clears collect_next_token, preventing stale resume state).
@@ -551,6 +578,7 @@ async function excavateFullArchive(
     nextSpanDays: number,
     collectedIds: string[],
     pageState?: { windowEnd: Date; nextToken: string; pagesFetched: number },
+    stagnation?: { count: number; lastWindowKey: string | null },
   ): ExcavationCheckpoint => ({
     phase: "collect",
     next_year: earliestHitYear,
@@ -567,6 +595,8 @@ async function excavateFullArchive(
     collect_next_token: pageState?.nextToken ?? null,
     collect_exhausted: pageState ? false : undefined,
     collect_pages_fetched: pageState?.pagesFetched,
+    collect_stagnation_count: stagnation?.count ?? 0,
+    collect_last_window_key: stagnation?.lastWindowKey ?? null,
   });
 
   const standardStop = await collectWindowPass(
@@ -583,17 +613,19 @@ async function excavateFullArchive(
       userId: user.id,
       resumeFrom: collectResumeFrom,
       initialSpanDays: collectInitialSpan,
+      initialStagnationCount: collectStagnationCount,
+      initialLastWindowKey: collectLastWindowKey,
       resumeWindowEnd: collectResumeWindowEnd,
       resumeNextToken: collectResumeNextToken,
       resumePagesFetched: collectResumePagesFetched,
       // Window-level checkpoint: clears page-level fields (collect_next_token = null).
       saveWindowCheckpoint: saveCheckpoint
-        ? (ws, sd, ids) => saveCheckpoint(makeCollectCp(ws, sd, ids))
+        ? (ws, sd, ids, stag) => saveCheckpoint(makeCollectCp(ws, sd, ids, undefined, stag))
         : undefined,
       // Page-level checkpoint: saves next_token so resume skips already-fetched pages.
       savePageCheckpoint: saveCheckpoint
-        ? (ws, we, nt, pf, ids, sd) =>
-            saveCheckpoint(makeCollectCp(ws, sd, ids, { windowEnd: we, nextToken: nt, pagesFetched: pf }))
+        ? (ws, we, nt, pf, ids, sd, stag) =>
+            saveCheckpoint(makeCollectCp(ws, sd, ids, { windowEnd: we, nextToken: nt, pagesFetched: pf }, stag))
         : undefined,
     },
   );
@@ -688,14 +720,19 @@ interface CollectCheckpointOpts {
   resumeFrom?: Date | null;
   /** Override the default initial window span. */
   initialSpanDays?: number;
+  /** Stagnation counter to restore on resume (default 0). */
+  initialStagnationCount?: number;
+  /** Last window key to restore on resume (default null). */
+  initialLastWindowKey?: string | null;
   /**
    * Called after each completed window.
-   * Args: nextWindowStart, nextSpanDays, all collected IDs so far.
+   * Args: nextWindowStart, nextSpanDays, all collected IDs so far, current stagnation state.
    */
   saveWindowCheckpoint?: (
     nextWindowStart: Date,
     nextSpanDays: number,
     collectedIds: string[],
+    stag: { count: number; lastWindowKey: string | null },
   ) => void;
 
   // ── Mid-window pagination resume ─────────────────────────────────────────
@@ -708,7 +745,7 @@ interface CollectCheckpointOpts {
   /**
    * Called after each page fetch when a next_token is available (more pages remain).
    * Fires BEFORE the next API call so the state is saved if 429 hits next.
-   * Args: windowStart, windowEnd, nextToken, pagesFetched, collectedIds (all so far), currentSpanDays.
+   * Args: windowStart, windowEnd, nextToken, pagesFetched, collectedIds (all so far), currentSpanDays, stagnation state.
    */
   savePageCheckpoint?: (
     windowStart: Date,
@@ -717,6 +754,7 @@ interface CollectCheckpointOpts {
     pagesFetched: number,
     collectedIds: string[],
     currentSpanDays: number,
+    stag: { count: number; lastWindowKey: string | null },
   ) => void;
 }
 
@@ -750,6 +788,28 @@ async function collectWindowPass(
     checkpointOpts?.resumeFrom != null &&
     checkpointOpts?.resumeWindowEnd != null &&
     checkpointOpts?.resumeNextToken != null;
+
+  // Stagnation detection: track consecutive same-window / stored_new=0 iterations.
+  // Restored from checkpoint so state survives 429 suspensions.
+  let stagnationCount = checkpointOpts?.initialStagnationCount ?? 0;
+  let lastWindowKey: string | null = checkpointOpts?.initialLastWindowKey ?? null;
+  
+  if (checkpointOpts?.resumeFrom && (stagnationCount > 0 || lastWindowKey)) {
+    console.log(
+      `[collect] resuming stagnation state: count=${stagnationCount} lastKey=${lastWindowKey?.slice(0, 20)}...`,
+    );
+    
+    // Force window shift if we resume with stagnation already at threshold.
+    // Prevents infinite loops when checkpoint was saved mid-stagnation.
+    if (stagnationCount >= STAGNATION_THRESHOLD) {
+      console.log(
+        `[collect][stagnation] forcing immediate window shift on resume (count=${stagnationCount} >= ${STAGNATION_THRESHOLD})`,
+      );
+      collectStart = addDays(collectStart, -collectSpanDays);
+      stagnationCount = 0;
+      lastWindowKey = null;
+    }
+  }
 
   // If the resume point is at or past `end`, the collect phase is already done.
   if (collectStart >= end) {
@@ -845,6 +905,7 @@ async function collectWindowPass(
           pagesInWindow,
           pageCollectedIds,
           collectSpanDays,
+          { count: stagnationCount, lastWindowKey },
         );
         console.log(
           `[checkpoint] COLLECT page saved next_token=${nextToken} exhausted=false pages=${pagesInWindow}`,
@@ -900,6 +961,7 @@ async function collectWindowPass(
           pagesInWindow,
           pageCollectedIds,
           collectSpanDays,
+          { count: stagnationCount, lastWindowKey },
         );
         console.log(
           `[checkpoint] COLLECT page saved next_token=${nextToken} exhausted=false pages=${pagesInWindow}`,
@@ -962,6 +1024,41 @@ async function collectWindowPass(
       `[collect][adaptive] spanDays=${collectSpanDays} uniqueNew=${uniqueNew} pages=${pagesInWindow} exhausted=${exhausted} action=${adaptAction} nextSpanDays=${nextSpanDays}`,
     );
 
+    // ── Stagnation detection ─────────────────────────────────────────────────
+    const windowKey = makeWindowKey(collectStart, collectEnd);
+    
+    // On resume: if we have the same window key from checkpoint and stored_new=0,
+    // continue the stagnation count instead of resetting it.
+    if (windowKey === lastWindowKey && uniqueNew === 0) {
+      stagnationCount++;
+    } else if (uniqueNew > 0) {
+      // Progress made → reset stagnation
+      stagnationCount = 0;
+      lastWindowKey = windowKey;
+    } else {
+      // Different window, no progress → start fresh stagnation tracking
+      stagnationCount = uniqueNew === 0 ? 1 : 0;
+      lastWindowKey = windowKey;
+    }
+    console.log(
+      `[collect][stagnation] window=[${collectStart.toISOString().slice(0, 10)}, ${collectEnd.toISOString().slice(0, 10)}] stored_new=${uniqueNew} already_have=${sizeBeforeWindow} stagnation_count=${stagnationCount} key_match=${windowKey === lastWindowKey}`,
+    );
+    if (stagnationCount >= STAGNATION_THRESHOLD) {
+      console.log(
+        `[collect][stagnation] detected → shift window (count=${stagnationCount} window=${collectStart.toISOString().slice(0, 10)}..${collectEnd.toISOString().slice(0, 10)})`,
+      );
+      collectStart = addDays(collectStart, -collectSpanDays);
+      stagnationCount = 0;
+      lastWindowKey = null;
+      checkpointOpts?.saveWindowCheckpoint?.(
+        collectStart,
+        collectSpanDays,
+        [...collected.keys()],
+        { count: 0, lastWindowKey: null },
+      );
+      continue;
+    }
+
     // ── Persist window completion BEFORE stop checks ───────────────────────
     // Advancing collectStart + saving the checkpoint here (rather than after
     // the break conditions) ensures that an unexpected interruption between
@@ -986,6 +1083,7 @@ async function collectWindowPass(
       collectStart,
       collectSpanDays,
       [...collected.keys()],
+      { count: stagnationCount, lastWindowKey },
     );
 
     if (collected.size >= collectLimit) {
