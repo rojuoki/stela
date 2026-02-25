@@ -150,7 +150,11 @@ async function xfetch(
   let generalAttempt = 0;
   let lastError: Error | null = null;
 
-  const activeToken = stats.token ?? BEARER();
+  // Prefer the per-job token, then any pool token, then the raw env var.
+  // This ensures non-job callers (e.g. /api/account user lookup) use the same
+  // token(s) the pool was initialised with rather than a separate env var that
+  // may be unset or stale.
+  const activeToken = stats.token ?? tokenPool.peekToken() ?? BEARER();
 
   while (generalAttempt <= MAX_RETRIES) {
     stats.totalCalls++;

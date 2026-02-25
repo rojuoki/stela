@@ -5,18 +5,38 @@
  *   X_BEARER_TOKENS="t1,t2,t3"   (multiple — enables parallel excavation)
  *   X_BEARER_TOKEN="t1"           (single — backward-compat fallback)
  *
+ * Cooldown model:
+ *   hard cooldown  — set on 429; blocks token until x-rate-limit-reset.
+ *   soft cooldown  — set on job terminal exit (success/fail/cancel); gives the
+ *                    token a recovery window (TOKEN_RECOVERY_SECONDS, default 900)
+ *                    before it can be assigned to the next job. Skipped on 429
+ *                    suspend because hard cooldown already handles that case.
+ *
  * Rules:
  *   - Each job is assigned one token at start and uses it until completion.
- *   - On 429: the token enters cooldown until x-rate-limit-reset.
+ *   - A token is available only when now >= max(hardCooldownUntil, softCooldownUntil).
  *   - M = min(tokenCount, M_MAX) sets the max parallel excavation slots.
  */
 
 /** Hard cap on parallel excavations regardless of token count. */
 const M_MAX = 3;
 
+/**
+ * Recovery window after a job finishes (success / fail / cancel).
+ * Prevents immediately recycling a just-used token to the next job.
+ * Override via TOKEN_RECOVERY_SECONDS env (default 900 = 15 min).
+ */
+const TOKEN_RECOVERY_MS =
+  parseInt(process.env.TOKEN_RECOVERY_SECONDS ?? "900", 10) * 1000;
+
 export interface TokenState {
-  /** Epoch ms until which this token must not be used. Set on 429. */
+  /** Epoch ms until which this token must not be used (hard — set on 429). */
   cooldownUntil?: number;
+  /**
+   * Epoch ms until which this token should not be assigned to a new job (soft —
+   * set when a job exits in a terminal state other than 429 suspend).
+   */
+  softCooldownUntilMs?: number;
   /** Last known x-rate-limit-remaining value. */
   remaining?: number;
   /** Last known x-rate-limit-reset epoch (seconds). */
@@ -57,28 +77,79 @@ class TokenPool {
     }
   }
 
+  // ── Private helpers ───────────────────────────────────────────────────────
+
+  /**
+   * Epoch ms at which the token becomes available for assignment.
+   * Combines hard cooldown (429) and soft cooldown (post-job recovery).
+   */
+  private _availableAtMs(entry: TokenEntry): number {
+    return Math.max(
+      entry.state.cooldownUntil ?? 0,
+      entry.state.softCooldownUntilMs ?? 0,
+    );
+  }
+
   // ── Lifecycle ─────────────────────────────────────────────────────────────
 
   /**
-   * Assign a free, non-cooldown token to a job.
-   * Returns null if no token is currently available.
+   * Assign a token to a job using a two-pass strategy:
+   *
+   *   Pass 1 — prefer tokens past BOTH cooldowns (ideal).
+   *   Pass 2 — fall back to tokens past hard cooldown only (soft-cooling but
+   *             no better option — handles single-token deployments and the
+   *             case where all recovered tokens are already running).
+   *
+   * Hard cooldown (429) is always respected and never bypassed.
+   * Returns null only when every token is hard-blocked or already assigned.
    */
   acquireToken(jobId: string): string | null {
     const now = Date.now();
-    const entry = this._entries.find(
-      (e) =>
-        !e.assignedJobId &&
-        (!e.state.cooldownUntil || e.state.cooldownUntil <= now),
+
+    // Pass 1: fully available (past both hard and soft cooldowns).
+    let entry = this._entries.find(
+      (e) => !e.assignedJobId && now >= this._availableAtMs(e),
     );
+
+    // Pass 2: soft-cooling only (hard cooldown cleared) — assign as fallback.
+    if (!entry) {
+      entry = this._entries.find(
+        (e) =>
+          !e.assignedJobId &&
+          !(e.state.cooldownUntil && e.state.cooldownUntil > now) &&
+          !!(e.state.softCooldownUntilMs && e.state.softCooldownUntilMs > now),
+      );
+    }
+
     if (!entry) return null;
     entry.assignedJobId = jobId;
+    const idx = this.getTokenIndex(entry.token);
+    const avail = this._availableAtMs(entry);
+    const label = avail > now ? `soft-cooldown bypass, was ${new Date(avail).toISOString()}` : "recovered";
+    console.log(`[tokenPool] token[${idx}] acquired by job ${jobId} (${label})`);
     return entry.token;
   }
 
-  /** Release a token back to the pool when its job completes. */
+  /** Release a token back to the pool (removes job assignment only). */
   releaseToken(token: string): void {
     const entry = this._entries.find((e) => e.token === token);
     if (entry) entry.assignedJobId = undefined;
+  }
+
+  /**
+   * Mark a token as recently used, applying the soft cooldown window.
+   * Call this on every terminal job exit (success / fail / cancel).
+   * Do NOT call on 429 suspend — hard cooldown handles that path.
+   */
+  markUsed(token: string): void {
+    const entry = this._entries.find((e) => e.token === token);
+    if (!entry) return;
+    const softUntil = Date.now() + TOKEN_RECOVERY_MS;
+    entry.state.softCooldownUntilMs = softUntil;
+    const idx = this.getTokenIndex(token);
+    console.log(
+      `[tokenPool] token[${idx}] soft cooldown until ${new Date(softUntil).toISOString()} (${Math.ceil(TOKEN_RECOVERY_MS / 60_000)}m recovery)`,
+    );
   }
 
   // ── State updates from API responses ──────────────────────────────────────
@@ -97,7 +168,7 @@ class TokenPool {
   }
 
   /**
-   * Handle a 429 response: set the token's cooldown to the reset epoch.
+   * Handle a 429 response: set the token's hard cooldown to the reset epoch.
    * Returns the cooldown-end time in ms so the caller can schedule retries.
    */
   onRateLimit(token: string, resetEpochSeconds: number): number {
@@ -114,13 +185,18 @@ class TokenPool {
 
   // ── Queue helpers ─────────────────────────────────────────────────────────
 
-  /** True if at least one token is free and not in cooldown. */
+  /**
+   * True if at least one token is unassigned and not hard-blocked.
+   * Soft cooldown is intentionally ignored here: a soft-cooling token is still
+   * assignable as a fallback (see acquireToken pass 2), so it counts as
+   * "available" for queue-scheduling purposes.
+   */
   hasAvailableToken(): boolean {
     const now = Date.now();
     return this._entries.some(
       (e) =>
         !e.assignedJobId &&
-        (!e.state.cooldownUntil || e.state.cooldownUntil <= now),
+        !(e.state.cooldownUntil && e.state.cooldownUntil > now),
     );
   }
 
@@ -130,14 +206,16 @@ class TokenPool {
   }
 
   /**
-   * Earliest epoch ms at which any cooldown-bound token becomes available.
-   * Returns 0 if no tokens are currently in cooldown.
-   * Used by the queue to schedule automatic retry after global rate limit.
+   * Earliest epoch ms at which any unassigned, hard-blocked token's cooldown ends.
+   * Returns 0 if no unassigned tokens are currently hard-blocked.
+   * Used by the queue to schedule automatic retry after a rate-limit suspend.
+   * Soft cooldown is not included: soft-cooling tokens are assignable as fallback
+   * so they do not gate queue scheduling.
    */
   earliestCooldownEnd(): number {
     const now = Date.now();
     const active = this._entries
-      .filter((e) => e.state.cooldownUntil && e.state.cooldownUntil > now)
+      .filter((e) => !e.assignedJobId && e.state.cooldownUntil && e.state.cooldownUntil > now)
       .map((e) => e.state.cooldownUntil!);
     return active.length > 0 ? Math.min(...active) : 0;
   }
@@ -150,6 +228,16 @@ class TokenPool {
   /** Read token state (for debugging / status endpoints). */
   getState(token: string): TokenState | undefined {
     return this._entries.find((e) => e.token === token)?.state;
+  }
+
+  /**
+   * Return any pool token without acquiring it (no assignment, no cooldown check).
+   * Used as a fallback for non-job API calls (e.g. user lookup) so they always
+   * use a token from the pool rather than reading X_BEARER_TOKEN directly.
+   * Returns undefined when the pool has no tokens at all.
+   */
+  peekToken(): string | undefined {
+    return this._entries[0]?.token;
   }
 }
 
