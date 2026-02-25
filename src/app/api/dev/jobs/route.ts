@@ -1,5 +1,4 @@
 import { NextRequest, NextResponse } from "next/server";
-import { globalQueue } from "@/lib/jobs";
 import { getDb } from "@/lib/db";
 
 const DEV_PANEL = process.env.NEXT_PUBLIC_DEV_PANEL === "1";
@@ -18,51 +17,64 @@ interface JobRow {
 
 /**
  * GET /api/dev/jobs
- * Returns running + pending + waiting jobs from the live in-process queue.
+ * Returns active jobs from the DB directly — no import of jobs.ts so that
+ * GlobalJobQueue._init() is never triggered by a read-only poll.
  * Dev-only (requires NEXT_PUBLIC_DEV_PANEL=1).
  */
 export function GET() {
   if (!DEV_PANEL) return NextResponse.json({ error: "Not found" }, { status: 404 });
 
-  const { running, pending, waiting } = globalQueue.queueSnapshot();
-  const allIds = [...new Set([...running, ...pending, ...waiting])];
-
-  if (allIds.length === 0) {
-    return NextResponse.json({ jobs: [] });
-  }
-
   const db = getDb();
-  const placeholders = allIds.map(() => "?").join(", ");
+  const now = new Date().toISOString();
+
+  // Derive the same three slots the in-memory queue exposes, purely from DB state:
+  //   running          → status = 'running'
+  //   waiting_rate_limit → status = 'queued' AND resume_at IS NOT NULL AND resume_at > now
+  //   queued (pending) → status = 'queued' AND (resume_at IS NULL OR resume_at <= now)
+  //
+  // Order mirrors the original: running first, pending (FIFO by created_at), waiting last.
   const rows = db
     .prepare(
       `SELECT id, account_username, status, resume_at, api_calls, fetched_count,
               requested_limit, created_at, started_at
-       FROM jobs WHERE id IN (${placeholders})`,
+       FROM jobs
+       WHERE status IN ('running', 'queued')
+       ORDER BY
+         CASE
+           WHEN status = 'running'                                    THEN 0
+           WHEN status = 'queued' AND (resume_at IS NULL OR resume_at <= ?) THEN 1
+           ELSE 2
+         END,
+         created_at ASC`,
     )
-    .all(...allIds) as JobRow[];
+    .all(now) as JobRow[];
 
-  const rowMap = new Map(rows.map((r) => [r.id, r]));
+  if (rows.length === 0) {
+    return NextResponse.json({ jobs: [] });
+  }
 
-  // Build list in queue order: running first, then pending (FIFO), then waiting.
-  const ordered = [
-    ...running.map((id) => ({ id, slot: "running" as const, pos: null as number | null })),
-    ...pending.map((id, i) => ({ id, slot: "pending" as const, pos: i + 1 })),
-    ...waiting.map((id) => ({ id, slot: "waiting" as const, pos: null as number | null })),
-  ];
+  let pendingPos = 0;
+  const jobs = rows.map((row) => {
+    const isWaiting =
+      row.status === "queued" && row.resume_at != null && row.resume_at > now;
+    const isRunning = row.status === "running";
+    const slot: string = isRunning
+      ? "running"
+      : isWaiting
+        ? "waiting_rate_limit"
+        : "queued";
 
-  const jobs = ordered.map(({ id, slot, pos }) => {
-    const row = rowMap.get(id);
     return {
-      id,
-      username: row?.account_username ?? "?",
-      status: slot === "waiting" ? "waiting_rate_limit" : slot === "running" ? "running" : "queued",
-      queuePosition: pos,
-      apiCalls: row?.api_calls ?? 0,
-      fetchedCount: row?.fetched_count ?? 0,
-      requestedLimit: row?.requested_limit ?? 0,
-      createdAt: row?.created_at ?? null,
-      startedAt: row?.started_at ?? null,
-      resumeAt: row?.resume_at ?? null,
+      id: row.id,
+      username: row.account_username,
+      status: slot,
+      queuePosition: slot === "queued" ? ++pendingPos : null,
+      apiCalls: row.api_calls,
+      fetchedCount: row.fetched_count,
+      requestedLimit: row.requested_limit,
+      createdAt: row.created_at,
+      startedAt: row.started_at,
+      resumeAt: row.resume_at,
     };
   });
 
@@ -72,9 +84,11 @@ export function GET() {
 /**
  * DELETE /api/dev/jobs?id=<jobId>
  * Cancels a specific job (any state except terminal).
+ * Dynamically imports jobs.ts so that GlobalJobQueue._init() is only triggered
+ * by an actual write operation, not by GET polling.
  * Dev-only.
  */
-export function DELETE(req: NextRequest) {
+export async function DELETE(req: NextRequest) {
   if (!DEV_PANEL) return NextResponse.json({ error: "Not found" }, { status: 404 });
 
   const { searchParams } = new URL(req.url);
@@ -84,6 +98,7 @@ export function DELETE(req: NextRequest) {
     return NextResponse.json({ error: "id query parameter required" }, { status: 400 });
   }
 
+  const { globalQueue } = await import("@/lib/jobs");
   const canceled = globalQueue.cancelJob(id);
   if (!canceled) {
     return NextResponse.json(

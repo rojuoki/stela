@@ -646,6 +646,10 @@ async function runJobAsync(jobId: string): Promise<void> {
     console.log(`[worker] released job=${jobId} token_idx=${tokenIdx}`);
     tokenPool.releaseToken(token);
     if (!suspended) {
+      // Terminal exit (success / fail / cancel): apply soft cooldown so the
+      // token isn't immediately recycled to the next job.
+      // Skip on 429 suspend — hard cooldown (resume_at) handles that path.
+      tokenPool.markUsed(token);
       // globalQueue.suspend() already manages the queue slot for the 429 path.
       // For every other exit (success, failure, abort) we must call complete().
       globalQueue.complete(jobId);
