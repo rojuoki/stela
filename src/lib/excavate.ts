@@ -938,6 +938,19 @@ async function collectWindowPass(
       adaptAction = "keep";
     }
 
+    // ── Budget cap: if close to the limit, shrink the next window so we don't
+    // over-fetch and hit unnecessary 429s. Estimate required days from the
+    // observed density (tweets/day this window) with 2× headroom.
+    if (uniqueNew > 0 && collected.size < collectLimit) {
+      const remaining = collectLimit - collected.size;
+      const densityPerDay = uniqueNew / collectSpanDays;
+      const estimatedDays = Math.ceil((remaining / densityPerDay) * 2);
+      if (estimatedDays < nextSpanDays) {
+        nextSpanDays = Math.max(estimatedDays, MIN_COLLECT_SPAN_DAYS);
+        adaptAction += "+budget_cap";
+      }
+    }
+
     console.log(
       `[collect][adaptive] spanDays=${collectSpanDays} uniqueNew=${uniqueNew} pages=${pagesInWindow} exhausted=${exhausted} action=${adaptAction} nextSpanDays=${nextSpanDays}`,
     );
