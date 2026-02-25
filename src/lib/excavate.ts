@@ -380,7 +380,14 @@ async function excavateFullArchive(
         m < 12 && stats.totalCalls < MAX_API_CALLS;
         m++
       ) {
-        const mStart = new Date(Date.UTC(year, m, 1));
+        // For the first month of the account creation year, use the exact
+        // account creation timestamp rather than the start of the month.
+        // This avoids requesting dates before the account (or Twitter itself)
+        // existed — which the API rejects with 400.
+        const mStart =
+          year === startYear && m === accountCreated.getUTCMonth()
+            ? accountCreated
+            : new Date(Date.UTC(year, m, 1));
         const mEnd = new Date(Date.UTC(year, m + 1, 1));
         if (mStart >= now) break;
 
