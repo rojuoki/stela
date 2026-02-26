@@ -357,6 +357,25 @@ async function excavateFullArchive(
 
         // Year has tweets — begin month scan.
         earliestHitYear = year;
+        // Save a checkpoint IMMEDIATELY before the inter-request sleep so that
+        // an HMR restart (or any crash) during the sleep doesn't leave the
+        // checkpoint pointing at the previous empty year.  Without this, the
+        // job would resume with phase=explore_year / next_year=<this year> and
+        // re-run the same year probe, hitting a duplicate API call (and
+        // potentially wasting the 429 budget on an already-answered question).
+        saveCheckpoint?.({
+          phase: "explore_month",
+          next_year: year,
+          month_scan_year: year,
+          next_month: year === startYear ? accountCreated.getUTCMonth() : 0,
+          earliest_hit_year: year,
+          zero_streak: 0,
+          deep_triggered: deepTriggered,
+          allow_deep: allowDeep,
+          earliest_region_start: null,
+          collect_window_start: null,
+          collect_span_days: COLLECT_INITIAL_SPAN_DAYS,
+        });
         await sleep(EXPLORE_INTER_REQUEST_DELAY_MS);
       } else {
         // Resuming mid-month-scan: we already know this year has tweets.
@@ -635,7 +654,12 @@ async function excavateFullArchive(
 
   let deepAddedCount = 0;
 
-  if (deepTriggered && earliestHitYear > 0) {
+  // Don't start deep backfill when the main collect was already rate-limited:
+  // the token is in cooldown and the very first deep API call would hit 429
+  // again, burning one call from the budget for nothing.  The job will be
+  // re-queued; deep backfill will run on the next resume once the token
+  // recovers (standardStop won't be RATE_LIMIT then).
+  if (deepTriggered && earliestHitYear > 0 && standardStop !== "RATE_LIMIT") {
     const X_ARCHIVE_FLOOR = new Date("2006-03-21T00:00:00Z");
     const deepStart = maxDate(X_ARCHIVE_FLOOR, accountCreated);
     const deepEnd = earliestRegionStart;
@@ -967,6 +991,17 @@ async function collectWindowPass(
           `[checkpoint] COLLECT page saved next_token=${nextToken} exhausted=false pages=${pagesInWindow}`,
         );
       }
+    }
+
+    // If 429 (or another XApiStop) fired inside the pagination loop, the inner
+    // `break` only exited the pagination while — the outer window loop would
+    // otherwise continue, print a misleading "exhausted" line, advance
+    // collectStart past the unfinished window, and overwrite the page-level
+    // checkpoint with a window-level one.  Instead, exit the outer loop NOW so
+    // the page checkpoint (saved just before the failed next-page call) stays
+    // intact.  On resume the job will retry exactly from that next_token.
+    if (stopReason && stopReason !== "ACCOUNT_HAS_LESS_THAN_LIMIT") {
+      break;
     }
 
     const exhausted = !nextToken;

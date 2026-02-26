@@ -116,6 +116,38 @@ function normalizeEndpoint(endpoint: string): string {
   return endpoint.replace(/^\//, "");
 }
 
+// ─── Raw rate-limit header logger ─────────────────────
+
+/**
+ * Emit a single-line log of raw X API rate-limit response headers.
+ * Activated by LOG_RAW_X_RATE=1 (default OFF).
+ * Never logs Authorization, URLs, query params, or tokens.
+ */
+function logRawXRate(res: Response): void {
+  if (!process.env.LOG_RAW_X_RATE) return;
+
+  const limit      = res.headers.get("x-rate-limit-limit");
+  const remaining  = res.headers.get("x-rate-limit-remaining");
+  const resetStr   = res.headers.get("x-rate-limit-reset");
+  const retryAfter = res.headers.get("retry-after");
+  const dateHeader = res.headers.get("date") ?? new Date().toUTCString();
+
+  const now         = Math.floor(Date.now() / 1000);
+  const reset       = resetStr !== null ? parseInt(resetStr, 10) : null;
+  const until_reset = reset !== null ? reset - now : null;
+
+  console.log(
+    `[RAW_X_RATE] status=${res.status}` +
+    ` limit=${limit ?? "null"}` +
+    ` remaining=${remaining ?? "null"}` +
+    ` reset=${reset ?? "null"}` +
+    ` now=${now}` +
+    ` until_reset=${until_reset ?? "null"}` +
+    ` retry_after=${retryAfter ?? "null"}` +
+    ` date=${dateHeader}`,
+  );
+}
+
 // ─── Single HTTP gateway ──────────────────────────────
 
 /**
@@ -168,6 +200,7 @@ async function xfetch(
       if (stats.token) {
         tokenPool.updateFromHeaders(activeToken, res.headers);
       }
+      logRawXRate(res);
       const remaining = res.headers.get("x-rate-limit-remaining");
       const reset = res.headers.get("x-rate-limit-reset");
       const now = Math.floor(Date.now() / 1000);
