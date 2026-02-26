@@ -473,11 +473,9 @@ async function runJobAsync(jobId: string): Promise<void> {
         initialCheckpoint = JSON.parse(jobRow.resume_state) as ExcavationCheckpoint;
         console.log(
           `[jobs] Job ${jobId} resuming from checkpoint phase=${initialCheckpoint.phase}` +
-            (initialCheckpoint.phase === "collect"
-              ? ` window=${initialCheckpoint.collect_window_start?.slice(0, 10)} ids=${initialCheckpoint.collected_ids?.length ?? 0}`
-              : initialCheckpoint.phase === "explore_month"
-                ? ` year=${initialCheckpoint.month_scan_year} month=${initialCheckpoint.next_month}`
-                : ` next_year=${initialCheckpoint.next_year}`),
+            (initialCheckpoint.phase === "binsearch"
+              ? ` lo=${initialCheckpoint.binsearch_lo.slice(0, 10)} hi=${initialCheckpoint.binsearch_hi.slice(0, 10)}`
+              : ""),
         );
       } catch {
         console.warn(`[jobs] Job ${jobId} corrupt resume_state — starting fresh`);
