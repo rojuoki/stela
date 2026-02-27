@@ -18,6 +18,8 @@
  *   - M = min(tokenCount, M_MAX) sets the max parallel excavation slots.
  */
 
+import { logger, generateTraceId, getTokenFingerprint } from './logger';
+
 /** Hard cap on parallel excavations regardless of token count. */
 const M_MAX = 3;
 
@@ -67,13 +69,23 @@ class TokenPool {
     // M is at least 1 so a single-token deployment always works.
     this.M = Math.min(Math.max(tokens.length, 1), M_MAX);
 
+    const systemTraceId = generateTraceId();
+
     if (tokens.length === 0) {
-      console.warn(
-        "[tokenPool] No tokens in X_BEARER_TOKENS / X_BEARER_TOKEN. " +
-          "xfetch will fall back to reading X_BEARER_TOKEN directly.",
-      );
+      logger.warn({
+        trace_id: systemTraceId,
+        service: 'lib',
+        event: 'token_acquired', // Not ideal event name but closest available
+        token_count: 0,
+      }, "No tokens in X_BEARER_TOKENS / X_BEARER_TOKEN. xfetch will fall back to reading X_BEARER_TOKEN directly.");
     } else {
-      console.log(`[tokenPool] ${tokens.length} token(s), M=${this.M}`);
+      logger.info({
+        trace_id: systemTraceId,
+        service: 'lib',
+        event: 'token_acquired', // System initialization
+        token_count: tokens.length,
+        max_concurrent: this.M,
+      }, `TokenPool initialized with ${tokens.length} token(s), M=${this.M}`);
     }
   }
 
@@ -126,7 +138,18 @@ class TokenPool {
     const idx = this.getTokenIndex(entry.token);
     const avail = this._availableAtMs(entry);
     const label = avail > now ? `soft-cooldown bypass, was ${new Date(avail).toISOString()}` : "recovered";
-    console.log(`[tokenPool] token[${idx}] acquired by job ${jobId} (${label})`);
+    
+    logger.info({
+      trace_id: jobId, // Use jobId as trace_id for now
+      job_id: jobId,
+      service: 'lib',
+      event: 'token_acquired',
+      token_idx: idx,
+      token_fp: getTokenFingerprint(entry.token),
+      available_at_ms: avail,
+      bypass_soft_cooldown: avail > now,
+    }, `Token[${idx}] acquired by job ${jobId} (${label})`);
+    
     return entry.token;
   }
 
@@ -147,9 +170,17 @@ class TokenPool {
     const softUntil = Date.now() + TOKEN_RECOVERY_MS;
     entry.state.softCooldownUntilMs = softUntil;
     const idx = this.getTokenIndex(token);
-    console.log(
-      `[tokenPool] token[${idx}] soft cooldown until ${new Date(softUntil).toISOString()} (${Math.ceil(TOKEN_RECOVERY_MS / 60_000)}m recovery)`,
-    );
+    
+    logger.info({
+      trace_id: entry.assignedJobId || generateTraceId(), // Use assigned job or generate new trace
+      job_id: entry.assignedJobId || null,
+      service: 'lib',
+      event: 'token_released', // Soft cooldown starts when token is released
+      token_idx: idx,
+      token_fp: getTokenFingerprint(token),
+      soft_cooldown_until_ms: softUntil,
+      recovery_minutes: Math.ceil(TOKEN_RECOVERY_MS / 60_000),
+    }, `Token[${idx}] soft cooldown until ${new Date(softUntil).toISOString()} (${Math.ceil(TOKEN_RECOVERY_MS / 60_000)}m recovery)`);
   }
 
   // ── State updates from API responses ──────────────────────────────────────
@@ -176,9 +207,18 @@ class TokenPool {
     const cooldownUntilMs = resetEpochSeconds * 1000;
     if (entry) {
       entry.state.cooldownUntil = cooldownUntilMs;
-      console.log(
-        `[tokenPool] Cooldown set until ${new Date(cooldownUntilMs).toISOString()} for token …${token.slice(-6)}`,
-      );
+      const idx = this.getTokenIndex(token);
+      
+      logger.warn({
+        trace_id: entry.assignedJobId || generateTraceId(),
+        job_id: entry.assignedJobId || null,
+        service: 'lib',
+        event: 'x_429',
+        token_idx: idx,
+        token_fp: getTokenFingerprint(token),
+        rate_reset: resetEpochSeconds,
+        cooldown_until_ms: cooldownUntilMs,
+      }, `Token[${idx}] rate limited, cooldown until ${new Date(cooldownUntilMs).toISOString()}`);
     }
     return cooldownUntilMs;
   }

@@ -4,6 +4,7 @@
  */
 
 import { getDb } from "./db";
+import { logger, generateTraceId } from './logger';
 
 export interface Account {
   account_id: string;
@@ -166,7 +167,18 @@ export function holdCredits(userId: string, jobId: string, amount: number = 1): 
       return holdId;
     })();
   } catch (e) {
-    console.error('[credits] Hold failed:', e);
+    const error = e instanceof Error ? e : new Error(String(e));
+    logger.error({
+      trace_id: jobId || generateTraceId(), // Use jobId as trace_id fallback
+      job_id: jobId || null,
+      service: 'lib',
+      event: 'job_failed', // Credit hold failure affects job
+      user_id: userId,
+      amount,
+      error_code: 'CREDIT_HOLD_FAILED',
+      err_name: error.constructor.name,
+      err_message: error.message,
+    }, `Credit hold failed for user ${userId} job ${jobId} amount ${amount}`);
     return null;
   }
 }
@@ -195,7 +207,19 @@ export function spendCredits(userId: string, amount: number, reason: string): bo
       return true;
     }))() as boolean;
   } catch (e) {
-    console.error('[credits] spendCredits failed:', e);
+    const error = e instanceof Error ? e : new Error(String(e));
+    logger.error({
+      trace_id: generateTraceId(), // Generate trace_id for system operation
+      job_id: null, // No specific job associated
+      service: 'lib',
+      event: 'job_failed', // Credit operation failure
+      user_id: userId,
+      amount,
+      reason,
+      error_code: 'CREDIT_SPEND_FAILED',
+      err_name: error.constructor.name,
+      err_message: error.message,
+    }, `Credit spend failed for user ${userId} amount ${amount}: ${reason}`);
     return false;
   }
 }
@@ -236,7 +260,18 @@ export function captureHeld(holdId: string, reason: string = 'Unlock successful'
       return true;
     })();
   } catch (e) {
-    console.error('[credits] Capture failed:', e);
+    const error = e instanceof Error ? e : new Error(String(e));
+    logger.error({
+      trace_id: holdId, // Use holdId as trace_id
+      job_id: null, // We don't have job_id directly here, could be extracted from hold if needed
+      service: 'lib',
+      event: 'job_failed', // Credit capture failure affects job completion
+      hold_id: holdId,
+      reason,
+      error_code: 'CREDIT_CAPTURE_FAILED',
+      err_name: error.constructor.name,
+      err_message: error.message,
+    }, `Credit capture failed for hold ${holdId}: ${reason}`);
     return false;
   }
 }
@@ -277,7 +312,18 @@ export function releaseHeld(holdId: string, reason: string = 'Unlock failed'): b
       return true;
     })();
   } catch (e) {
-    console.error('[credits] Release failed:', e);
+    const error = e instanceof Error ? e : new Error(String(e));
+    logger.error({
+      trace_id: holdId, // Use holdId as trace_id
+      job_id: null, // We don't have job_id directly here, could be extracted from hold if needed
+      service: 'lib',
+      event: 'job_failed', // Credit release affects job cleanup
+      hold_id: holdId,
+      reason,
+      error_code: 'CREDIT_RELEASE_FAILED',
+      err_name: error.constructor.name,
+      err_message: error.message,
+    }, `Credit release failed for hold ${holdId}: ${reason}`);
     return false;
   }
 }

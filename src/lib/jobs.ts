@@ -30,6 +30,7 @@ import { excavateEarliest, type ExcavationCheckpoint, type ExcavationResult } fr
 import { captureHeld, releaseHeld } from "./repository";
 import { tokenPool } from "./tokenPool";
 import { XApiStop } from "./xclient";
+import { logger, generateTraceId, getTokenFingerprint } from './logger';
 
 export interface JobRecord {
   id: string;
@@ -79,10 +80,16 @@ class GlobalJobQueue {
     try {
       this._init();
     } catch (e) {
-      console.warn(
-        "[queue] Init skipped (DB not ready?):",
-        e instanceof Error ? e.message : e,
-      );
+      const error = e instanceof Error ? e : new Error(String(e));
+      logger.warn({
+        trace_id: generateTraceId(),
+        job_id: null,
+        service: 'lib',
+        event: 'job_failed', // System initialization failure
+        error_code: 'DB_INIT_FAILED',
+        err_name: error.constructor.name,
+        err_message: error.message,
+      }, "Job queue init skipped - DB not ready");
     }
   }
 
@@ -145,7 +152,14 @@ class GlobalJobQueue {
     // _runningJobIds is NOT removed here: runJobAsync still holds the slot and
     // will call complete() via finally when excavateEarliest finishes naturally.
 
-    console.log(`[queue] Job ${jobId} CANCELED (was ${row.status})`);
+    logger.info({
+      trace_id: jobId, // Use jobId as trace_id
+      job_id: jobId,
+      service: 'lib',
+      event: 'job_failed',
+      previous_status: row.status,
+      error_code: 'CANCELED_BY_USER',
+    }, `Job ${jobId} canceled by user (was ${row.status})`);
     return true;
   }
 
@@ -160,7 +174,14 @@ class GlobalJobQueue {
       this._launch(jobId);
     } else {
       this._pendingIds.push(jobId);
-      console.log(`[queue] Job ${jobId} → QUEUED (position ${this._pendingIds.length})`);
+      logger.info({
+        trace_id: jobId, // Use jobId as trace_id
+        job_id: jobId,
+        service: 'lib',
+        event: 'job_created',
+        queue_position: this._pendingIds.length,
+        queue_status: 'pending',
+      }, `Job ${jobId} queued at position ${this._pendingIds.length}`);
     }
   }
 
@@ -169,6 +190,22 @@ class GlobalJobQueue {
    * Clears the running slot and promotes the next pending job.
    */
   complete(jobId: string): void {
+    // Check job status from DB to determine success/failure
+    const row = getDb()
+      .prepare("SELECT status FROM jobs WHERE id = ?")
+      .get(jobId) as { status: string } | undefined;
+
+    if (row) {
+      const isSuccess = row.status === 'succeeded';
+      logger.info({
+        trace_id: jobId, // Use jobId as trace_id  
+        job_id: jobId,
+        service: 'lib',
+        event: isSuccess ? 'job_succeeded' : 'job_failed',
+        final_status: row.status,
+      }, `Job ${jobId} completed with status ${row.status}`);
+    }
+
     this._runningJobIds.delete(jobId);
     this._pendingIds = this._pendingIds.filter((id) => id !== jobId);
     this._startNext();
@@ -187,10 +224,17 @@ class GlobalJobQueue {
     this._waitingIds.set(jobId, resumeAtMs);
 
     const delayMs = Math.max(100, resumeAtMs - Date.now()) + RESUME_BUFFER_MS;
-    console.log(
-      `[queue] Job ${jobId} suspended. Re-scheduling in ${Math.ceil(delayMs / 1000)}s` +
-        ` (resume_at=${new Date(resumeAtMs).toISOString()})`,
-    );
+    
+    logger.warn({
+      trace_id: jobId, // Use jobId as trace_id
+      job_id: jobId,
+      service: 'lib',
+      event: 'job_suspended',
+      resume_at_ms: resumeAtMs,
+      delay_seconds: Math.ceil(delayMs / 1000),
+      error_code: 'RATE_LIMIT',
+    }, `Job ${jobId} suspended due to rate limit, resuming in ${Math.ceil(delayMs / 1000)}s`);
+    
     setTimeout(() => this._tryResume(jobId), delayMs);
 
     // Free up the slot so other pending jobs can proceed.
@@ -208,16 +252,40 @@ class GlobalJobQueue {
           "UPDATE jobs SET status = 'running', started_at = COALESCE(started_at, ?), resume_at = NULL, node_pid = ? WHERE id = ?",
         )
         .run(now, process.pid, jobId);
-      console.log(
-        `[queue] Job ${jobId} → RUNNING (${this._runningJobIds.size}/${tokenPool.M})`,
-      );
+      logger.info({
+        trace_id: jobId, // Use jobId as trace_id
+        job_id: jobId,
+        service: 'lib',
+        event: 'job_started',
+        running_jobs: this._runningJobIds.size,
+        max_concurrent: tokenPool.M,
+      }, `Job ${jobId} started running (${this._runningJobIds.size}/${tokenPool.M})`);
     } catch (e) {
-      console.error(`[queue] Failed to mark job ${jobId} RUNNING:`, e);
+      const error = e instanceof Error ? e : new Error(String(e));
+      logger.error({
+        trace_id: jobId,
+        job_id: jobId,
+        service: 'lib',
+        event: 'job_failed',
+        error_code: 'DB_UPDATE_FAILED',
+        err_name: error.constructor.name,
+        err_message: error.message,
+      }, `Failed to mark job ${jobId} as running`);
     }
 
     // runJobAsync is a hoisted function declaration.
     runJobAsync(jobId).catch((e) => {
-      console.error(`[queue] Unhandled error in job ${jobId}:`, e);
+      const error = e instanceof Error ? e : new Error(String(e));
+      logger.error({
+        trace_id: jobId,
+        job_id: jobId,
+        service: 'lib',
+        event: 'job_failed',
+        error_code: 'UNHANDLED_ERROR',
+        err_name: error.constructor.name,
+        err_message: error.message,
+        err_stack: error.stack,
+      }, `Unhandled error in job ${jobId}`);
       this.complete(jobId);
     });
   }
@@ -229,7 +297,13 @@ class GlobalJobQueue {
       tokenPool.hasAvailableToken()
     ) {
       const nextId = this._pendingIds.shift()!;
-      console.log(`[queue] Starting next: ${nextId}`);
+      logger.info({
+        trace_id: nextId,
+        job_id: nextId,
+        service: 'lib',
+        event: 'job_created', // Next job being launched
+        queue_position: 0, // Now at front
+      }, `Starting next job: ${nextId}`);
       this._launch(nextId);
     }
   }
@@ -244,15 +318,24 @@ class GlobalJobQueue {
       .get(jobId) as { status: string } | undefined;
 
     if (!row || row.status !== "queued") {
-      console.log(
-        `[queue] Resume skip: job ${jobId} status=${row?.status ?? "not found"}`,
-      );
+      logger.warn({
+        trace_id: jobId,
+        job_id: jobId,
+        service: 'lib',
+        event: 'job_failed',
+        current_status: row?.status ?? 'not_found',
+        error_code: 'RESUME_INVALID_STATUS',
+      }, `Resume skipped: job ${jobId} status=${row?.status ?? "not found"}`);
       return;
     }
 
     if (tokenPool.hasAvailableToken()) {
-      const tokenIdx = tokenPool.M; // token index resolved in runJobAsync
-      console.log(`[queue] Job ${jobId} RESUMING (re-queued)`);
+      logger.info({
+        trace_id: jobId,
+        job_id: jobId,
+        service: 'lib',
+        event: 'job_resumed',
+      }, `Job ${jobId} resumed - re-queued with priority`);
       // Push to front so a resumed job has priority over brand-new ones.
       this._pendingIds.unshift(jobId);
       this._startNext();
@@ -260,9 +343,16 @@ class GlobalJobQueue {
       // Token still in cooldown — reschedule.
       const nextEnd = tokenPool.earliestCooldownEnd();
       const delayMs = nextEnd > 0 ? Math.max(100, nextEnd - Date.now()) + RESUME_BUFFER_MS : 60_000;
-      console.log(
-        `[queue] Job ${jobId} resume delayed (token still in cooldown), retrying in ${Math.ceil(delayMs / 1000)}s`,
-      );
+      
+      logger.warn({
+        trace_id: jobId,
+        job_id: jobId,
+        service: 'lib',
+        event: 'job_suspended', // Still suspended, rescheduling
+        delay_seconds: Math.ceil(delayMs / 1000),
+        error_code: 'TOKEN_STILL_COOLING',
+      }, `Job ${jobId} resume delayed - token still in cooldown, retrying in ${Math.ceil(delayMs / 1000)}s`);
+      
       this._waitingIds.set(jobId, Date.now() + delayMs);
       setTimeout(() => this._tryResume(jobId), delayMs);
     }
@@ -294,9 +384,14 @@ class GlobalJobQueue {
       if (job.node_pid === process.pid) {
         // Same process → HMR false alarm. Job is still running; just track it.
         this._runningJobIds.add(job.id);
-        console.log(
-          `[queue] Job ${job.id} still running in PID ${process.pid} (HMR guard) — not re-queuing`,
-        );
+        logger.info({
+          trace_id: job.id,
+          job_id: job.id,
+          service: 'lib',
+          event: 'job_started', // Still running
+          pid: process.pid,
+          recovery_type: 'HMR_GUARD',
+        }, `Job ${job.id} still running in PID ${process.pid} - HMR guard, not re-queuing`);
         continue;
       }
 
@@ -310,7 +405,13 @@ class GlobalJobQueue {
             node_pid = NULL
         WHERE id = ?
       `).run(job.id);
-      console.log(`[queue] Job ${job.id} → RE-QUEUED (was running at init; will resume from checkpoint)`);
+      logger.info({
+        trace_id: job.id,
+        job_id: job.id,
+        service: 'lib',
+        event: 'job_resumed', // Re-queued to resume from checkpoint
+        recovery_type: 'RESTART_RECOVERY',
+      }, `Job ${job.id} re-queued after restart - will resume from checkpoint`);
     }
 
     // Reload QUEUED jobs. Split them into "ready" vs "waiting" based on resume_at.
@@ -327,19 +428,32 @@ class GlobalJobQueue {
         this._waitingIds.set(job.id, resumeAtMs);
         const delayMs = Math.max(100, resumeAtMs - nowMs) + RESUME_BUFFER_MS;
         setTimeout(() => this._tryResume(job.id), delayMs);
-        console.log(
-          `[queue] Job ${job.id} WAITING_RATE_LIMIT — resume timer set (${Math.ceil(delayMs / 1000)}s)`,
-        );
+        logger.info({
+          trace_id: job.id,
+          job_id: job.id,
+          service: 'lib',
+          event: 'job_suspended', // Waiting for rate limit
+          delay_seconds: Math.ceil(delayMs / 1000),
+          resume_at_ms: resumeAtMs,
+          error_code: 'RATE_LIMIT',
+        }, `Job ${job.id} waiting for rate limit - resume timer set (${Math.ceil(delayMs / 1000)}s)`);
       } else {
         this._pendingIds.push(job.id);
       }
     }
 
     if (interrupted.length > 0 || queued.length > 0) {
-      console.log(
-        `[queue] Init: ${interrupted.length} interrupted → RE-QUEUED, ` +
-          `${this._pendingIds.length} pending, ${this._waitingIds.size} waiting (rate-limit), M=${tokenPool.M}`,
-      );
+      logger.info({
+        trace_id: generateTraceId(), // System initialization
+        job_id: null,
+        service: 'lib',
+        event: 'job_created', // System startup with job recovery
+        interrupted_count: interrupted.length,
+        pending_count: this._pendingIds.length,
+        waiting_count: this._waitingIds.size,
+        max_concurrent: tokenPool.M,
+        recovery_type: 'SYSTEM_INIT',
+      }, `Job queue initialized: ${interrupted.length} interrupted → re-queued, ${this._pendingIds.length} pending, ${this._waitingIds.size} waiting`);
     }
 
     this._startNext();
@@ -396,6 +510,7 @@ export function createAndRunJob(
   username: string,
   accountCreatedAt?: string | null,
   holdId?: string,
+  traceId?: string,
 ): string {
   const db = getDb();
   const jobId = randomUUID();
@@ -403,9 +518,19 @@ export function createAndRunJob(
   const targetCount = computeTargetCount(accountCreatedAt);
 
   db.prepare(`
-    INSERT INTO jobs (id, account_username, requested_limit, hold_id, status, created_at)
-    VALUES (?, ?, ?, ?, 'queued', ?)
-  `).run(jobId, username.toLowerCase(), targetCount, holdId ?? null, now);
+    INSERT INTO jobs (id, account_username, requested_limit, hold_id, status, created_at, trace_id)
+    VALUES (?, ?, ?, ?, 'queued', ?, ?)
+  `).run(jobId, username.toLowerCase(), targetCount, holdId ?? null, now, traceId || jobId);
+
+  logger.info({
+    trace_id: traceId || jobId, // Use provided traceId or fallback to jobId
+    job_id: jobId,
+    service: 'lib',
+    event: 'job_created',
+    username: username.toLowerCase(),
+    requested_limit: targetCount,
+    hold_id: holdId || null,
+  }, `Job created: ${jobId} for @${username} (limit: ${targetCount})`);
 
   globalQueue.register(jobId);
   return jobId;
@@ -429,12 +554,32 @@ async function runJobAsync(jobId: string): Promise<void> {
   // Acquire a token — guaranteed available since queue checked before _launch().
   const token = tokenPool.acquireToken(jobId);
   if (!token) {
-    console.error(`[jobs] No token for job ${jobId} — failing (pool exhausted)`);
+    // Note: We don't have traceId at this point since the job fetch failed
+    logger.error({
+      trace_id: jobId, // Fallback to jobId
+      job_id: jobId,
+      service: 'lib',
+      event: 'job_failed',
+      error_code: 'NO_TOKEN',
+    }, `No token available for job ${jobId} - pool exhausted`);
     failJobInDb(jobId, "NO_TOKEN", "No bearer token available in pool");
     globalQueue.complete(jobId);
     return;
   }
   const tokenIdx = tokenPool.getTokenIndex(token);
+
+  // Get trace_id early for consistent logging
+  let effectiveTraceId = jobId; // Default fallback
+  try {
+    const traceQuery = db
+      .prepare("SELECT trace_id FROM jobs WHERE id = ?")
+      .get(jobId) as { trace_id: string | null } | undefined;
+    if (traceQuery?.trace_id) {
+      effectiveTraceId = traceQuery.trace_id;
+    }
+  } catch {
+    // Continue with jobId as traceId
+  }
 
   // Track whether this job handed off to the suspend path.
   // globalQueue.suspend() manages the queue slot itself, so we must NOT also
@@ -443,13 +588,19 @@ async function runJobAsync(jobId: string): Promise<void> {
 
   try {
     const jobRow = db
-      .prepare("SELECT account_username, requested_limit, hold_id, resume_state, status FROM jobs WHERE id = ?")
+      .prepare("SELECT account_username, requested_limit, hold_id, resume_state, status, trace_id FROM jobs WHERE id = ?")
       .get(jobId) as
-      | { account_username: string; requested_limit: number; hold_id: string | null; resume_state: string | null; status: string }
+      | { account_username: string; requested_limit: number; hold_id: string | null; resume_state: string | null; status: string; trace_id: string | null }
       | undefined;
 
     if (!jobRow) {
-      console.warn(`[jobs] Job ${jobId} not found — skipping`);
+      logger.warn({
+        trace_id: effectiveTraceId,
+        job_id: jobId,
+        service: 'lib',
+        event: 'job_failed',
+        error_code: 'JOB_NOT_FOUND',
+      }, `Job ${jobId} not found in database - skipping`);
       return; // finally handles cleanup
     }
 
@@ -458,27 +609,43 @@ async function runJobAsync(jobId: string): Promise<void> {
     // external changes the DB status between _launch() and here, abort cleanly
     // rather than running a duplicate excavation.
     if (jobRow.status !== "running") {
-      console.warn(
-        `[jobs] Job ${jobId} status=${jobRow.status} at launch time (expected running) — aborting`,
-      );
+      logger.warn({
+        trace_id: effectiveTraceId,
+        job_id: jobId,
+        service: 'lib',
+        event: 'job_failed',
+        error_code: 'INVALID_STATUS',
+        expected_status: 'running',
+        actual_status: jobRow.status,
+      }, `Job ${jobId} has unexpected status ${jobRow.status} at launch time - aborting`);
       return; // finally handles cleanup
     }
 
     const { account_username: username, requested_limit: limit, hold_id: holdId } = jobRow;
+    // effectiveTraceId already set from earlier query
 
     // Restore checkpoint from previous run (if any).
     let initialCheckpoint: ExcavationCheckpoint | null = null;
     if (jobRow.resume_state) {
       try {
         initialCheckpoint = JSON.parse(jobRow.resume_state) as ExcavationCheckpoint;
-        console.log(
-          `[jobs] Job ${jobId} resuming from checkpoint phase=${initialCheckpoint.phase}` +
-            (initialCheckpoint.phase === "binsearch"
-              ? ` lo=${initialCheckpoint.binsearch_lo.slice(0, 10)} hi=${initialCheckpoint.binsearch_hi.slice(0, 10)}`
-              : ""),
-        );
+        logger.info({
+          trace_id: effectiveTraceId,
+          job_id: jobId,
+          service: 'lib',
+          event: 'job_resumed',
+          checkpoint_phase: initialCheckpoint.phase,
+          binsearch_lo: initialCheckpoint.phase === "binsearch" ? initialCheckpoint.binsearch_lo.slice(0, 10) : undefined,
+          binsearch_hi: initialCheckpoint.phase === "binsearch" ? initialCheckpoint.binsearch_hi.slice(0, 10) : undefined,
+        }, `Job ${jobId} resuming from checkpoint phase=${initialCheckpoint.phase}`);
       } catch {
-        console.warn(`[jobs] Job ${jobId} corrupt resume_state — starting fresh`);
+        logger.warn({
+          trace_id: effectiveTraceId,
+          job_id: jobId,
+          service: 'lib',
+          event: 'job_started', // Starting fresh after corruption
+          error_code: 'CORRUPT_RESUME_STATE',
+        }, `Job ${jobId} corrupt resume_state - starting fresh`);
       }
     }
 
@@ -502,9 +669,17 @@ async function runJobAsync(jobId: string): Promise<void> {
     const onRateLimit = (resetEpochSec: number): void => {
       const resumeAt = new Date(resetEpochSec * 1000).toISOString();
       db.prepare("UPDATE jobs SET resume_at = ? WHERE id = ?").run(resumeAt, jobId);
-      console.log(
-        `[jobs] Job ${jobId} 429 — token_idx=${tokenIdx} reset_epoch=${resetEpochSec} resume_at=${resumeAt}`,
-      );
+      logger.warn({
+        trace_id: jobId,
+        job_id: jobId,
+        service: 'lib',
+        event: 'x_429',
+        token_idx: tokenIdx,
+        token_fp: getTokenFingerprint(token),
+        rate_reset: resetEpochSec,
+        resume_at: resumeAt,
+        error_code: 'RATE_LIMIT',
+      }, `Job ${jobId} hit 429 rate limit - will resume at ${resumeAt}`);
     };
 
     let result: ExcavationResult | null = null;
@@ -519,6 +694,8 @@ async function runJobAsync(jobId: string): Promise<void> {
         onRateLimit,
         saveCheckpoint,
         initialCheckpoint,
+        effectiveTraceId,
+        jobId,
       );
     } catch (e: unknown) {
       // If xfetch threw XApiStop("RATE_LIMIT") and it wasn't caught inside
@@ -556,9 +733,16 @@ async function runJobAsync(jobId: string): Promise<void> {
         "UPDATE jobs SET status = 'queued', resume_at = ? WHERE id = ?",
       ).run(new Date(rateLimitResumeAtMs).toISOString(), jobId);
 
-      console.log(
-        `[jobs] Job ${jobId} SUSPENDED token_idx=${tokenIdx} resume_at=${new Date(rateLimitResumeAtMs).toISOString()}`,
-      );
+      logger.warn({
+        trace_id: jobId,
+        job_id: jobId,
+        service: 'lib',
+        event: 'job_suspended',
+        token_idx: tokenIdx,
+        token_fp: getTokenFingerprint(token),
+        resume_at_ms: rateLimitResumeAtMs,
+        error_code: 'RATE_LIMIT',
+      }, `Job ${jobId} suspended due to rate limit - resume at ${new Date(rateLimitResumeAtMs).toISOString()}`);
 
       suspended = true;
       globalQueue.suspend(jobId, rateLimitResumeAtMs);
@@ -584,9 +768,14 @@ async function runJobAsync(jobId: string): Promise<void> {
         .prepare("SELECT status FROM jobs WHERE id = ?")
         .get(jobId) as { status: string } | undefined;
       if (currentRow?.status === "canceled") {
-        console.log(
-          `[jobs] Job ${jobId} was canceled while running — skipping success write, releasing hold`,
-        );
+        logger.info({
+          trace_id: jobId,
+          job_id: jobId,
+          service: 'lib',
+          event: 'job_failed',
+          error_code: 'CANCELED_DURING_RUN',
+          hold_id: holdId || null,
+        }, `Job ${jobId} was canceled while running - skipping success write, releasing hold`);
         if (holdId) releaseHeld(holdId, "Job canceled while running");
         return; // finally handles token release and complete()
       }
@@ -595,14 +784,26 @@ async function runJobAsync(jobId: string): Promise<void> {
     // ── Success path ─────────────────────────────────────────────────────────
     if (holdId && result.fetchedCount > 0) {
       const captured = captureHeld(holdId, `Excavation success: ${result.fetchedCount} posts`);
-      console.log(
-        `[jobs] Credit ${captured ? "captured" : "capture failed"} for job ${jobId}`,
-      );
+      logger.info({
+        trace_id: jobId,
+        job_id: jobId,
+        service: 'lib',
+        event: 'job_succeeded',
+        hold_id: holdId,
+        credit_captured: captured,
+        fetched_count: result.fetchedCount,
+      }, `Credit ${captured ? "captured" : "capture failed"} for job ${jobId}`);
     } else if (holdId && result.fetchedCount === 0) {
       const released = releaseHeld(holdId, "Excavation returned 0 posts");
-      console.log(
-        `[jobs] Credit ${released ? "released" : "release failed"} for job ${jobId} (0 posts)`,
-      );
+      logger.info({
+        trace_id: jobId,
+        job_id: jobId,
+        service: 'lib',
+        event: 'job_succeeded',
+        hold_id: holdId,
+        credit_released: released,
+        fetched_count: 0,
+      }, `Credit ${released ? "released" : "release failed"} for job ${jobId} (0 posts)`);
     }
 
     db.prepare(`
@@ -632,16 +833,33 @@ async function runJobAsync(jobId: string): Promise<void> {
       `).run(result.userId, jobId, new Date().toISOString());
     }
 
-    console.log(
-      `[jobs] Job ${jobId} SUCCEEDED token_idx=${tokenIdx}: ${result.fetchedCount} tweets, ${result.apiCalls} API calls`,
-    );
+    logger.info({
+      trace_id: jobId,
+      job_id: jobId,
+      service: 'lib',
+      event: 'job_succeeded',
+      token_idx: tokenIdx,
+      token_fp: getTokenFingerprint(token),
+      fetched_count: result.fetchedCount,
+      api_calls: result.apiCalls,
+      user_id: result.userId || null,
+    }, `Job ${jobId} completed successfully: ${result.fetchedCount} tweets, ${result.apiCalls} API calls`);
     // fall through to finally
 
   } finally {
     // Always release the token and free the worker slot, regardless of how the
     // job exited. This ensures the next queued job can start even if an
     // unexpected exception was thrown mid-success or mid-failure.
-    console.log(`[worker] released job=${jobId} token_idx=${tokenIdx}`);
+    logger.info({
+      trace_id: jobId,
+      job_id: jobId,
+      service: 'lib',
+      event: 'token_released',
+      token_idx: tokenIdx,
+      token_fp: getTokenFingerprint(token),
+      suspended: suspended,
+    }, `Released token for job ${jobId}`);
+    
     tokenPool.releaseToken(token);
     if (!suspended) {
       // Terminal exit (success / fail / cancel): apply soft cooldown so the
@@ -651,7 +869,13 @@ async function runJobAsync(jobId: string): Promise<void> {
       // globalQueue.suspend() already manages the queue slot for the 429 path.
       // For every other exit (success, failure, abort) we must call complete().
       globalQueue.complete(jobId);
-      console.log(`[queue] attempting to start next job`);
+      
+      logger.debug({
+        trace_id: jobId,
+        job_id: jobId,
+        service: 'lib',
+        event: 'job_succeeded', // Flow control - attempting next
+      }, `Attempting to start next queued job`);
     }
   }
 }
@@ -667,9 +891,15 @@ function failJobInDb(
 
   if (holdId) {
     const released = releaseHeld(holdId, `Job failed: ${errorCode}`);
-    console.log(
-      `[jobs] Credit ${released ? "released" : "release failed"} for failed job ${jobId}`,
-    );
+    logger.info({
+      trace_id: jobId,
+      job_id: jobId,
+      service: 'lib',
+      event: 'job_failed',
+      hold_id: holdId,
+      credit_released: released,
+      error_code: errorCode,
+    }, `Credit ${released ? "released" : "release failed"} for failed job ${jobId}`);
   }
 
   db.prepare(`
@@ -694,5 +924,14 @@ function failJobInDb(
     jobId,
   );
 
-  console.error(`[jobs] Job ${jobId} FAILED: ${errorCode} — ${errorMessage}`);
+  logger.error({
+    trace_id: jobId,
+    job_id: jobId,
+    service: 'lib',
+    event: 'job_failed',
+    error_code: errorCode,
+    error_message: errorMessage,
+    api_calls: result?.apiCalls ?? 0,
+    fetched_count: result?.fetchedCount ?? 0,
+  }, `Job ${jobId} failed: ${errorCode} - ${errorMessage}`);
 }

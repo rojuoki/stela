@@ -46,6 +46,12 @@ function runMigrations(db: Database.Database): void {
     console.log("[db] Migration M-004: added jobs.node_pid");
   }
 
+  // M-005: add trace_id column to jobs (JSON logging correlation)
+  if (!cols.some((c) => c.name === "trace_id")) {
+    db.prepare("ALTER TABLE jobs ADD COLUMN trace_id TEXT").run();
+    console.log("[db] Migration M-005: added jobs.trace_id");
+  }
+
   // M-003: make unlocks.job_id nullable (drop FK + NOT NULL).
   // Fixes cache-hit unlock recording which passed sentinel strings, not real job IDs.
   const unlockCols = db.prepare("PRAGMA table_info(unlocks)").all() as Array<{

@@ -9,6 +9,7 @@
 import { tokenPool } from "./tokenPool";
 import { recordApiCall } from "./repository";
 import { incXApiCalls, incXApi429 } from "./devStats";
+import { logger, generateRequestId, getTokenFingerprint } from "./logger";
 
 const API_BASE = process.env.X_API_BASE || "https://api.x.com/2";
 const BEARER = () => {
@@ -28,7 +29,7 @@ let xCallCount = 0;
 
 const SAFE_MARGIN_MS = 120_000;
 
-function clampEndTime(searchParams: URLSearchParams): void {
+function clampEndTime(searchParams: URLSearchParams, traceId?: string, jobId?: string): void {
   const safeNow = new Date(Date.now() - SAFE_MARGIN_MS).toISOString();
 
   const requested = searchParams.get("end_time");
@@ -38,7 +39,14 @@ function clampEndTime(searchParams: URLSearchParams): void {
   }
 
   if (new Date(requested).getTime() > Date.now() - SAFE_MARGIN_MS) {
-    console.log(`[clamp] end_time ${requested} → ${safeNow}`);
+    logger.debug({
+      trace_id: traceId || 'unknown',
+      job_id: jobId || null,
+      service: 'lib',
+      event: 'x_request', // Time parameter adjustment
+      requested_end_time: requested,
+      clamped_end_time: safeNow,
+    }, `Clamped end_time ${requested} → ${safeNow}`);
     searchParams.set("end_time", safeNow);
   }
 }
@@ -123,7 +131,7 @@ function normalizeEndpoint(endpoint: string): string {
  * Activated by LOG_RAW_X_RATE=1 (default OFF).
  * Never logs Authorization, URLs, query params, or tokens.
  */
-function logRawXRate(res: Response): void {
+function logRawXRate(res: Response, traceId?: string, jobId?: string): void {
   if (!process.env.LOG_RAW_X_RATE) return;
 
   const limit      = res.headers.get("x-rate-limit-limit");
@@ -136,16 +144,19 @@ function logRawXRate(res: Response): void {
   const reset       = resetStr !== null ? parseInt(resetStr, 10) : null;
   const until_reset = reset !== null ? reset - now : null;
 
-  console.log(
-    `[RAW_X_RATE] status=${res.status}` +
-    ` limit=${limit ?? "null"}` +
-    ` remaining=${remaining ?? "null"}` +
-    ` reset=${reset ?? "null"}` +
-    ` now=${now}` +
-    ` until_reset=${until_reset ?? "null"}` +
-    ` retry_after=${retryAfter ?? "null"}` +
-    ` date=${dateHeader}`,
-  );
+  logger.debug({
+    trace_id: traceId || 'unknown',
+    job_id: jobId || null,
+    service: 'lib',
+    event: 'x_request',
+    http_status: res.status,
+    rate_limit: limit ? parseInt(limit, 10) : undefined,
+    rate_remaining: remaining ? parseInt(remaining, 10) : undefined,
+    rate_reset: reset || undefined,
+    rate_until_reset: until_reset,
+    retry_after: retryAfter ? parseInt(retryAfter, 10) : undefined,
+    date_header: dateHeader,
+  }, `Raw X rate limit headers`);
 }
 
 // ─── Single HTTP gateway ──────────────────────────────
@@ -159,24 +170,47 @@ async function xfetch(
   endpoint: string,
   params: Record<string, string>,
   stats: ApiCallStats,
+  traceId?: string,
+  jobId?: string,
 ): Promise<unknown> {
   const url = new URL(`${API_BASE}${endpoint}`);
   for (const [k, v] of Object.entries(params)) {
     if (v !== undefined && v !== "") url.searchParams.set(k, v);
   }
 
+  const requestId = generateRequestId();
+  const resolvedTraceId = traceId || requestId; // Fallback to req_id
+  
   // ── end_time safety gate — runs on the final URLSearchParams ──
   if (url.searchParams.has("start_time")) {
-    clampEndTime(url.searchParams);
+    clampEndTime(url.searchParams, resolvedTraceId, jobId);
 
     const st = url.searchParams.get("start_time")!;
     const et = url.searchParams.get("end_time")!;
     if (st >= et) {
-      console.log(`[xfetch][skip] start_time=${st} >= end_time=${et} — returning empty`);
+      logger.info({
+        trace_id: resolvedTraceId,
+        job_id: jobId || null,
+        service: 'lib',
+        event: 'x_request',
+        req_id: requestId,
+        endpoint,
+        start_time: st,
+        end_time: et,
+        skip_reason: 'start_time >= end_time',
+      }, `Skipping request: start_time=${st} >= end_time=${et}`);
       return { data: [], meta: {} };
     }
 
-    console.log(`FINAL_SEARCH_URL ${url.toString()}`);
+    logger.debug({
+      trace_id: resolvedTraceId,
+      job_id: jobId || null,
+      service: 'lib',
+      event: 'x_request',
+      req_id: requestId,
+      endpoint,
+      final_url: url.toString(),
+    }, `Final search URL prepared`);
   }
 
   let generalAttempt = 0;
@@ -190,31 +224,81 @@ async function xfetch(
 
   while (generalAttempt <= MAX_RETRIES) {
     stats.totalCalls++;
-    const label = `[X API] ${endpoint} attempt=${generalAttempt}`;
-
+    
     let res: Response;
     try {
+      // Log the outgoing request
+      logger.info({
+        trace_id: resolvedTraceId,
+        job_id: jobId || null,
+        service: 'lib',
+        event: 'x_request',
+        req_id: requestId,
+        endpoint,
+        token_fp: getTokenFingerprint(activeToken),
+        attempt: generalAttempt,
+      }, `X API request to ${endpoint} (attempt ${generalAttempt})`);
+
       res = await fetch(url.toString(), {
         headers: { Authorization: `Bearer ${activeToken}` },
       });
       if (stats.token) {
         tokenPool.updateFromHeaders(activeToken, res.headers);
       }
-      logRawXRate(res);
+      logRawXRate(res, resolvedTraceId, jobId);
       const remaining = res.headers.get("x-rate-limit-remaining");
       const reset = res.headers.get("x-rate-limit-reset");
       const now = Math.floor(Date.now() / 1000);
       xCallCount++;
+      
       // Persist telemetry — fire-and-forget, never throws
       recordApiCall(normalizeEndpoint(endpoint), false);
       incXApiCalls();
-      console.log(`[rate] remaining=${remaining} reset=${reset} now=${now} x_calls=${xCallCount}`);
+      
+      const baseLogFields = {
+        trace_id: resolvedTraceId,
+        job_id: jobId || null,
+        service: 'lib' as const,
+        req_id: requestId,
+        endpoint,
+        token_fp: getTokenFingerprint(activeToken),
+        attempt: generalAttempt,
+        rate_remaining: remaining ? parseInt(remaining, 10) : undefined,
+        rate_reset: reset ? parseInt(reset, 10) : undefined,
+        http_status: res.status,
+        x_calls_total: xCallCount,
+      };
+
       if (res.status === 429) {
-        console.log(`[rate][429] remaining=${remaining} reset=${reset} now=${now} x_calls=${xCallCount}`);
+        logger.warn({
+          ...baseLogFields,
+          event: 'x_429',
+          error_code: 'RATE_LIMIT',
+          retry_after: reset ? parseInt(reset, 10) - now : undefined,
+        }, `Rate limited (429) on ${endpoint}`);
+      } else {
+        logger.info({
+          ...baseLogFields,
+          event: 'x_request',
+        }, `X API response ${res.status} from ${endpoint}`);
       }
     } catch (e: unknown) {
       lastError = e instanceof Error ? e : new Error(String(e));
-      console.error(`${label} network error: ${lastError.message}`);
+      
+      logger.error({
+        trace_id: resolvedTraceId,
+        job_id: jobId || null,
+        service: 'lib',
+        event: 'x_request',
+        req_id: requestId,
+        endpoint,
+        token_fp: getTokenFingerprint(activeToken),
+        attempt: generalAttempt,
+        error_code: 'NETWORK_ERROR',
+        err_name: lastError.constructor.name,
+        err_message: lastError.message,
+      }, `Network error on ${endpoint} attempt ${generalAttempt}`);
+      
       generalAttempt++;
       if (generalAttempt <= MAX_RETRIES) {
         await sleep(BACKOFF_BASE_MS * 2 ** (generalAttempt - 1));
@@ -228,7 +312,21 @@ async function xfetch(
     }
 
     const body = await res.text().catch(() => "");
-    console.error(`${label} HTTP ${res.status}: ${body.slice(0, 300)}`);
+    
+    logger.error({
+      trace_id: resolvedTraceId,
+      job_id: jobId || null,
+      service: 'lib',
+      event: 'x_request',
+      req_id: requestId,
+      endpoint,
+      token_fp: getTokenFingerprint(activeToken),
+      attempt: generalAttempt,
+      http_status: res.status,
+      error_code: res.status === 429 ? 'RATE_LIMIT' : 'HTTP_ERROR',
+      response_body: body.slice(0, 300),
+    }, `HTTP ${res.status} error from ${endpoint}`);
+    
     stats.errors.push({ status: res.status, body: body.slice(0, 500), endpoint });
 
     if (res.status === 429) {
@@ -242,10 +340,23 @@ async function xfetch(
       stats.onRateLimit?.(resetEpochSec);
 
       const resumeAt = new Date(resetEpochSec * 1000).toISOString();
-      console.warn(
-        `${label} 429 — worker stopping. Token cooldown until ${resumeAt}. ` +
-          `Job will be re-queued by scheduler after reset.`,
-      );
+      
+      logger.warn({
+        trace_id: resolvedTraceId,
+        job_id: jobId || null,
+        service: 'lib',
+        event: 'x_429',
+        req_id: requestId,
+        endpoint,
+        token_fp: getTokenFingerprint(activeToken),
+        attempt: generalAttempt,
+        http_status: 429,
+        error_code: 'RATE_LIMIT',
+        rate_reset: resetEpochSec,
+        resume_at: resumeAt,
+        retry_after: resetEpochSec - Math.floor(Date.now() / 1000),
+      }, `429 rate limit hit - worker stopping, token cooldown until ${resumeAt}`);
+      
       throw new XApiStop("RATE_LIMIT", 429, `Token reset at epoch ${resetEpochSec}`);
     }
 
@@ -274,6 +385,8 @@ function sleep(ms: number) {
 export async function getUserByUsername(
   username: string,
   stats: ApiCallStats,
+  traceId?: string,
+  jobId?: string,
 ): Promise<XUser> {
   const json = (await xfetch(
     `/users/by/username/${encodeURIComponent(username)}`,
@@ -281,6 +394,8 @@ export async function getUserByUsername(
       "user.fields": "created_at,protected,public_metrics",
     },
     stats,
+    traceId,
+    jobId,
   )) as { data?: XUser; errors?: Array<{ title: string; detail: string; type: string }> };
 
   if (!json.data) {
@@ -314,6 +429,8 @@ export async function searchAllTweets(
   maxResults: number = 10,
   nextToken?: string,
   sortOrder?: "recency" | "relevancy",
+  traceId?: string,
+  jobId?: string,
 ): Promise<TimelinePage> {
   const params: Record<string, string> = {
     query,
@@ -325,7 +442,7 @@ export async function searchAllTweets(
   if (sortOrder) params.sort_order = sortOrder;
   if (nextToken) params.next_token = nextToken;
 
-  const json = (await xfetch("/tweets/search/all", params, stats)) as {
+  const json = (await xfetch("/tweets/search/all", params, stats, traceId, jobId)) as {
     data?: XTweet[];
     meta?: { next_token?: string; result_count?: number };
   };
@@ -347,6 +464,8 @@ export async function getUserTweetsInWindow(
   stats: ApiCallStats,
   paginationToken?: string,
   maxResults: number = 100,
+  traceId?: string,
+  jobId?: string,
 ): Promise<TimelinePage> {
   const params: Record<string, string> = {
     start_time: startTime,
@@ -357,7 +476,7 @@ export async function getUserTweetsInWindow(
   };
   if (paginationToken) params.pagination_token = paginationToken;
 
-  const json = (await xfetch(`/users/${userId}/tweets`, params, stats)) as {
+  const json = (await xfetch(`/users/${userId}/tweets`, params, stats, traceId, jobId)) as {
     data?: XTweet[];
     meta?: { next_token?: string; result_count?: number };
   };

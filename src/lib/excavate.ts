@@ -38,6 +38,7 @@ import {
   type TimelinePage,
   type ApiCallStats,
 } from "./xclient";
+import { logger } from './logger';
 import { getDb } from "./db";
 
 // ─── Constants ─────────────────────────────────────────
@@ -126,13 +127,17 @@ export async function excavateEarliest(
   saveCheckpoint?: (cp: ExcavationCheckpoint) => void,
   /** Checkpoint from a previous run; when present, resume from that point. */
   initialCheckpoint?: ExcavationCheckpoint | null,
+  /** Trace ID for logging correlation */
+  traceId?: string,
+  /** Job ID for logging */
+  jobId?: string,
 ): Promise<ExcavationResult> {
   const stats = createStats(token, onRateLimit);
   const effectiveLimit = Math.min(limit, 100);
 
   let user: XUser;
   try {
-    user = await getUserByUsername(username, stats);
+    user = await getUserByUsername(username, stats, traceId, jobId);
   } catch (e) {
     if (e instanceof XApiStop) {
       return errorResult(username, effectiveLimit, stats, e.reason as StopReason, "full_archive");
@@ -162,13 +167,23 @@ export async function excavateEarliest(
       onProgress,
       saveCheckpoint,
       initialCheckpoint,
+      traceId,
+      jobId,
     );
   } catch (e) {
     if (e instanceof XApiStop && e.statusCode === 403) {
-      console.log(
-        `[excavate] Full-archive unavailable (403) for @${username} — switching to timeline fallback`,
-      );
-      return await excavateTimeline(user, effectiveLimit, stats, onProgress);
+      logger.warn({
+        trace_id: traceId || 'unknown',
+        job_id: jobId || null,
+        service: 'lib',
+        event: 'x_request',
+        username: username,
+        user_id: user.id,
+        error_code: 'FULL_ARCHIVE_FORBIDDEN',
+        http_status: 403,
+        fallback: 'timeline',
+      }, `Full-archive unavailable (403) for @${username} - switching to timeline fallback`);
+      return await excavateTimeline(user, effectiveLimit, stats, onProgress, traceId, jobId);
     }
     throw e;
   }
@@ -184,6 +199,8 @@ async function excavateFullArchive(
   onProgress?: (apiCalls: number) => void,
   saveCheckpoint?: (cp: ExcavationCheckpoint) => void,
   cp?: ExcavationCheckpoint | null,
+  traceId?: string,
+  jobId?: string,
 ): Promise<ExcavationResult> {
   const accountCreated = new Date(user.created_at);
   const now = new Date(Date.now() - END_TIME_SAFETY_MS);
@@ -197,10 +214,18 @@ async function excavateFullArchive(
   let lo: Date = cp?.phase === "binsearch" ? new Date(cp.binsearch_lo) : accountCreated;
   let hi: Date = cp?.phase === "binsearch" ? new Date(cp.binsearch_hi) : now;
 
-  console.log(
-    `[binsearch] @${user.username} account_created=${user.created_at}` +
-      (cp ? ` (resuming lo=${lo.toISOString().slice(0, 10)} hi=${hi.toISOString().slice(0, 10)})` : ""),
-  );
+  logger.info({
+    trace_id: traceId || 'unknown',
+    job_id: jobId || null,
+    service: 'lib',
+    event: cp ? 'job_resumed' : 'job_started',
+    username: user.username,
+    user_id: user.id,
+    account_created: user.created_at,
+    binsearch_lo: lo.toISOString().slice(0, 10),
+    binsearch_hi: hi.toISOString().slice(0, 10),
+    is_resume: !!cp,
+  }, `Binary search for @${user.username}${cp ? ' (resuming)' : ' (starting)'}`);
 
   let resultTweets: XTweet[] | null = null;
   let stopReason: StopReason = "ACCOUNT_HAS_LESS_THAN_LIMIT";
@@ -212,9 +237,18 @@ async function excavateFullArchive(
   while (stats.totalCalls < MAX_API_CALLS) {
     // Convergence: window too narrow to subdivide — account has < 51 tweets total.
     if (hi.getTime() - lo.getTime() < BINSEARCH_MIN_WINDOW_MS) {
-      console.log(
-        `[binsearch] @${user.username} converged without 51–99 window — account has < ${BINSEARCH_TARGET_MIN} tweets`,
-      );
+      logger.info({
+        trace_id: traceId || 'unknown',
+        job_id: jobId || null,
+        service: 'lib',
+        event: 'job_succeeded', // Binary search converged
+        username: user.username,
+        user_id: user.id,
+        window_size_ms: hi.getTime() - lo.getTime(),
+        min_window_threshold: BINSEARCH_MIN_WINDOW_MS,
+        target_min_tweets: BINSEARCH_TARGET_MIN,
+        stop_reason: 'ACCOUNT_HAS_LESS_THAN_LIMIT',
+      }, `Binary search for @${user.username} converged - account has < ${BINSEARCH_TARGET_MIN} tweets`);
       resultTweets = bestFallback;
       stopReason = "ACCOUNT_HAS_LESS_THAN_LIMIT";
       break;
@@ -233,6 +267,8 @@ async function excavateFullArchive(
         100,
         undefined,
         "recency",
+        traceId,
+        jobId,
       );
     } catch (e) {
       if (e instanceof XApiStop && e.statusCode === 403) throw e;
@@ -247,15 +283,32 @@ async function excavateFullArchive(
 
     const count = page.tweets.length;
     onProgress?.(stats.totalCalls);
-    console.log(
-      `[binsearch] @${user.username} mid=${mid.toISOString().slice(0, 10)} count=${count} next_token=${page.nextToken ?? "none"}`,
-    );
+    logger.debug({
+      trace_id: traceId || 'unknown',
+      job_id: jobId || null,
+      service: 'lib',
+      event: 'x_request',
+      username: user.username,
+      user_id: user.id,
+      binsearch_mid: mid.toISOString().slice(0, 10),
+      tweet_count: count,
+      has_next_token: !!page.nextToken,
+      api_calls_total: stats.totalCalls,
+    }, `Binary search probe: mid=${mid.toISOString().slice(0, 10)} count=${count}`);
 
     if (count >= BINSEARCH_TARGET_MIN && !page.nextToken) {
       // 51–99 tweets, no next_token → we have all of them. Success.
-      console.log(
-        `[binsearch] @${user.username} success: end=${mid.toISOString().slice(0, 10)} count=${count}`,
-      );
+      logger.info({
+        trace_id: traceId || 'unknown',
+        job_id: jobId || null,
+        service: 'lib',
+        event: 'job_succeeded',
+        username: user.username,
+        user_id: user.id,
+        end_time: mid.toISOString().slice(0, 10),
+        tweet_count: count,
+        acquisition_mode: 'full_archive',
+      }, `Binary search success: @${user.username} end=${mid.toISOString().slice(0, 10)} count=${count}`);
       resultTweets = page.tweets;
       stopReason = "OK_LIMIT_REACHED";
       break;
@@ -281,7 +334,17 @@ async function excavateFullArchive(
   }
 
   if (!resultTweets) {
-    console.log(`[binsearch] @${user.username} no result — stop=${stopReason}`);
+    logger.warn({
+      trace_id: traceId || 'unknown',
+      job_id: jobId || null,
+      service: 'lib',
+      event: 'job_failed',
+      username: user.username,
+      user_id: user.id,
+      stop_reason: stopReason,
+      api_calls: stats.totalCalls,
+      acquisition_mode: 'full_archive',
+    }, `Binary search failed: @${user.username} stop_reason=${stopReason}`);
     return {
       username: user.username,
       userId: user.id,
@@ -303,9 +366,19 @@ async function excavateFullArchive(
 
   const storedNewCount = storeTweets(user.id, sorted);
 
-  console.log(
-    `[excavate] @${user.username} done: fetched=${sorted.length} stored_new=${storedNewCount} api_calls=${stats.totalCalls} mode=full_archive stop=${stopReason}`,
-  );
+  logger.info({
+    trace_id: traceId || 'unknown',
+    job_id: jobId || null,
+    service: 'lib',
+    event: 'job_succeeded',
+    username: user.username,
+    user_id: user.id,
+    fetched_count: sorted.length,
+    stored_new_count: storedNewCount,
+    api_calls: stats.totalCalls,
+    acquisition_mode: 'full_archive',
+    stop_reason: stopReason,
+  }, `Excavation complete: @${user.username} fetched=${sorted.length} stored_new=${storedNewCount}`);
 
   return {
     username: user.username,
@@ -328,10 +401,19 @@ async function excavateTimeline(
   limit: number,
   stats: ApiCallStats,
   onProgress?: (apiCalls: number) => void,
+  traceId?: string,
+  jobId?: string,
 ): Promise<ExcavationResult> {
-  console.log(
-    `[excavate] @${user.username} timeline fallback — note: limited to ~3200 most recent tweets; 'earliest' is not guaranteed`,
-  );
+  logger.warn({
+    trace_id: traceId || 'unknown',
+    job_id: jobId || null,
+    service: 'lib',
+    event: 'job_started',
+    username: user.username,
+    user_id: user.id,
+    acquisition_mode: 'timeline_fallback',
+    limitation: '~3200 most recent tweets only',
+  }, `Timeline fallback for @${user.username} - 'earliest' not guaranteed`);
 
   const accountCreated = new Date(user.created_at);
   const now = new Date();
@@ -350,6 +432,10 @@ async function excavateTimeline(
         windowStart.toISOString(),
         windowEnd.toISOString(),
         stats,
+        undefined, // paginationToken
+        100, // maxResults
+        traceId,
+        jobId,
       );
     } catch (e) {
       if (e instanceof XApiStop) {
@@ -382,6 +468,9 @@ async function excavateTimeline(
           windowEnd.toISOString(),
           stats,
           nextToken,
+          100, // maxResults
+          traceId,
+          jobId,
         );
       } catch (e) {
         if (e instanceof XApiStop) {
@@ -422,9 +511,19 @@ async function excavateTimeline(
 
   const storedNewCount = storeTweets(user.id, sorted);
 
-  console.log(
-    `[excavate] @${user.username} done (fallback): fetched=${sorted.length} stored_new=${storedNewCount} api_calls=${stats.totalCalls} stop=${stopReason}`,
-  );
+  logger.info({
+    trace_id: traceId || 'unknown',
+    job_id: jobId || null,
+    service: 'lib',
+    event: 'job_succeeded',
+    username: user.username,
+    user_id: user.id,
+    fetched_count: sorted.length,
+    stored_new_count: storedNewCount,
+    api_calls: stats.totalCalls,
+    acquisition_mode: 'timeline_fallback',
+    stop_reason: stopReason,
+  }, `Timeline fallback complete: @${user.username} fetched=${sorted.length} stored_new=${storedNewCount}`);
 
   return {
     username: user.username,

@@ -18,6 +18,7 @@ import { normalizeUsername, checkRateLimit } from "@/lib/validation";
 import { getUserId } from "@/lib/getUserId";
 import { maybeInjectDevError } from "@/lib/devError";
 import { withDevMeasure, type MeasureCtx } from "@/lib/devMeasure";
+import { logger, generateTraceId } from "@/lib/logger";
 
 const DEV_PANEL = process.env.NEXT_PUBLIC_DEV_PANEL === "1";
 
@@ -59,18 +60,46 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
     }
 
+    // Generate trace ID for this unlock request
+    const traceId = generateTraceId();
+    
     // Input validation and normalization
     const username = normalizeUsername(body.username ?? "");
+    const force = body.force === true; // Move this up before it's used
     mCtx.username = username || undefined; // propagate to stats entry
+    
     if (!username) {
+      logger.warn({
+        trace_id: traceId,
+        job_id: null,
+        service: 'api',
+        event: 'unlock_requested',
+        user_id: userId,
+        username: body.username,
+        error_code: 'INVALID_USERNAME_FORMAT',
+        client_ip: clientIp,
+      }, `Invalid username format: ${body.username}`);
+      
       return NextResponse.json({ 
         error: "Invalid username format. Must be 1-15 characters, letters/numbers/underscore only." 
       }, { status: 400 });
     }
+    
+    // Log successful unlock request
+    logger.info({
+      trace_id: traceId,
+      job_id: null,
+      service: 'api',
+      event: 'unlock_requested',
+      user_id: userId,
+      username: username,
+      requested_limit: body.limit || 100,
+      force: force,
+      client_ip: clientIp,
+    }, `Unlock requested for @${username}`);
 
     // force=true bypasses cache and idempotency, always creates a new excavation job.
     // Credit rule: force=true always holds 1 credit (same as a fresh first-time unlock).
-    const force = body.force === true;
     if (DEV_PANEL) console.log(`[dev] user_id=${userId} POST /api/unlock username=${body.username}`);
 
     // Clean up expired holds and ensure user has starting credits
@@ -170,7 +199,7 @@ export async function POST(req: NextRequest) {
     // Look up account.created_at (if already cached) to compute dynamic target count.
     // For brand-new accounts not yet in the local DB, computeTargetCount defaults to 100.
     const knownAccount = getAccountByUsername(username);
-    const jobId = createAndRunJob(username, knownAccount?.created_at);
+    const jobId = createAndRunJob(username, knownAccount?.created_at, undefined, traceId);
     const holdId = holdCredits(userId, jobId, 1);
     
     if (!holdId) {
