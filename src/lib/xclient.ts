@@ -450,8 +450,8 @@ export async function searchAllTweets(
     end_time: endTime,
     max_results: String(Math.min(Math.max(maxResults, 10), 500)),
     "tweet.fields": "created_at,public_metrics,attachments,author_id",
-    "media.fields": "url,preview_image_url,type,width,height,alt_text",
-    expansions: "attachments.media_keys",
+    // "media.fields": "url,preview_image_url,type,width,height,alt_text",
+    // expansions: "attachments.media_keys",
   };
   if (sortOrder) params.sort_order = sortOrder;
   if (nextToken) params.next_token = nextToken;
@@ -488,8 +488,8 @@ export async function getUserTweetsInWindow(
     end_time: endTime,
     max_results: String(Math.min(maxResults, 100)),
     "tweet.fields": "created_at,public_metrics,attachments,author_id",
-    "media.fields": "url,preview_image_url,type,width,height,alt_text",
-    expansions: "attachments.media_keys",
+    // "media.fields": "url,preview_image_url,type,width,height,alt_text",
+    // expansions: "attachments.media_keys",
     exclude: "retweets,replies",
   };
   if (paginationToken) params.pagination_token = paginationToken;

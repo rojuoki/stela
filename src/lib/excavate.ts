@@ -450,6 +450,24 @@ async function hybridExpandingSearch(
   const accountCreated = new Date(user.created_at);
   const now = new Date(Date.now() - END_TIME_SAFETY_MS);
   
+  // 2020年境界判定 - 2020年以降のアカウントはページング戦略
+  if (accountCreated >= new Date('2020-01-01')) {
+    logger.info({
+      trace_id: traceId || 'unknown',
+      job_id: jobId || null,
+      service: 'lib',
+      event: 'job_started',
+      username: user.username,
+      user_id: user.id,
+      account_created: user.created_at,
+      search_strategy: 'sequential_paging',
+    }, `Account created after 2020 - using sequential paging strategy for @${user.username}`);
+    
+    return await sequentialPagingSearch(
+      user, query, limit, stats, onProgress, saveCheckpoint, traceId, jobId
+    );
+  }
+  
   // Phase 1: Expanding Window Search (アカウント年齢を考慮した開始)
   const accountAge = Date.now() - accountCreated.getTime();
   const yearsOld = accountAge / (365 * 24 * 60 * 60 * 1000);
@@ -851,6 +869,209 @@ async function legacyBinarySearch(
   }
   
   return await finishExcavation(user, resultTweets, resultMedia, limit, stats, stopReason, traceId, jobId);
+}
+
+// ─── Sequential Paging Search (2020年以降アカウント用) ────
+
+async function sequentialPagingSearch(
+  user: XUser,
+  query: string,
+  limit: number,
+  stats: ApiCallStats,
+  onProgress?: (apiCalls: number) => void,
+  saveCheckpoint?: (cp: ExcavationCheckpoint) => void,
+  traceId?: string,
+  jobId?: string,
+): Promise<ExcavationResult> {
+  const accountCreated = new Date(user.created_at);
+  const now = new Date(Date.now() - END_TIME_SAFETY_MS);
+  
+  let currentStart = accountCreated;
+  let pageSizeDays = 30; // 初期期間: 30日
+  const collectedTweets: XTweet[] = [];
+  const collectedMedia: XMedia[] = [];
+  let consecutiveZeroCount = 0; // 連続0件カウンター
+  
+  logger.info({
+    trace_id: traceId || 'unknown',
+    job_id: jobId || null,
+    service: 'lib',
+    event: 'job_started',
+    username: user.username,
+    user_id: user.id,
+    initial_page_days: pageSizeDays,
+    target_count: limit,
+    account_created: user.created_at,
+  }, `Starting sequential paging for @${user.username} (target: ${limit} tweets)`);
+  
+  while (collectedTweets.length < limit && stats.totalCalls < MAX_API_CALLS && currentStart < now) {
+    const currentEnd = new Date(
+      Math.min(
+        currentStart.getTime() + pageSizeDays * 24 * 60 * 60 * 1000,
+        now.getTime()
+      )
+    );
+    
+    // 期間が現在時刻に達したら終了
+    if (currentStart >= currentEnd) break;
+    
+    // API call間隔制御 (429回避)
+    if (stats.totalCalls >= 2) {
+      await sleep(BINSEARCH_INTER_REQUEST_DELAY_MS);
+    }
+    
+    let page: TimelinePage;
+    try {
+      page = await searchAllTweets(
+        query,
+        currentStart.toISOString(),
+        currentEnd.toISOString(),
+        stats,
+        Math.min(100, limit - collectedTweets.length), // 残り必要数
+        undefined,
+        "recency", // 古い順ソート
+        traceId,
+        jobId,
+      );
+    } catch (e) {
+      if (e instanceof XApiStop && e.statusCode === 403) throw e;
+      if (e instanceof XApiStop) {
+        return errorResult(user.username, limit, stats, e.reason as StopReason, "full_archive");
+      }
+      throw e;
+    }
+    
+    const count = page.tweets.length;
+    onProgress?.(stats.totalCalls);
+    
+    logger.debug({
+      trace_id: traceId || 'unknown',
+      job_id: jobId || null,
+      service: 'lib',
+      event: 'x_request',
+      username: user.username,
+      user_id: user.id,
+      period_start: currentStart.toISOString().slice(0, 10),
+      period_end: currentEnd.toISOString().slice(0, 10),
+      page_size_days: pageSizeDays,
+      tweet_count: count,
+      total_collected: collectedTweets.length,
+      api_calls_total: stats.totalCalls,
+    }, `Paging probe: ${currentStart.toISOString().slice(0, 10)} - ${currentEnd.toISOString().slice(0, 10)} → ${count} tweets (${collectedTweets.length}/${limit})`);
+    
+    // 結果処理
+    if (count === 0) {
+      consecutiveZeroCount++;
+      
+      // 0件対策：期間を積極的に拡大
+      if (consecutiveZeroCount >= 3) {
+        // 3回連続0件なら大幅拡大
+        pageSizeDays = Math.min(pageSizeDays * 6, 365); // 最大1年
+        logger.debug({
+          trace_id: traceId || 'unknown',
+          job_id: jobId || null,
+          username: user.username,
+          consecutive_zeros: consecutiveZeroCount,
+          expansion_factor: 6,
+          new_page_size_days: pageSizeDays,
+        }, `3+ consecutive zeros, aggressive expansion to ${pageSizeDays} days`);
+      } else {
+        pageSizeDays = Math.min(pageSizeDays * 3, 180); // 通常拡大
+      }
+      
+      currentStart = currentEnd;
+      
+      // 0件時は長く待機（429回避強化）
+      await sleep(BINSEARCH_INTER_REQUEST_DELAY_MS * 1.5);
+      continue;
+    } else {
+      consecutiveZeroCount = 0; // 0件カウンターリセット
+    }
+    
+    // ツイート収集（重複排除）
+    for (const tweet of page.tweets) {
+      if (!collectedTweets.find(t => t.id === tweet.id)) {
+        collectedTweets.push(tweet);
+        if (collectedTweets.length >= limit) break;
+      }
+    }
+    
+    // メディア収集（重複排除）
+    for (const media of page.media) {
+      if (!collectedMedia.find(m => m.media_key === media.media_key)) {
+        collectedMedia.push(media);
+      }
+    }
+    
+    // 目標達成で早期終了
+    if (collectedTweets.length >= limit) {
+      logger.info({
+        trace_id: traceId || 'unknown',
+        job_id: jobId || null,
+        service: 'lib',
+        event: 'job_succeeded',
+        username: user.username,
+        user_id: user.id,
+        final_count: collectedTweets.length,
+        api_calls: stats.totalCalls,
+        stop_reason: 'target_reached',
+      }, `Sequential paging completed: @${user.username} → ${collectedTweets.length} tweets in ${stats.totalCalls} calls`);
+      break;
+    }
+    
+    // 次の期間へ進む
+    currentStart = currentEnd;
+    
+    // 成果があった場合は期間をリセット（効率化）
+    if (count > 0) {
+      pageSizeDays = 30;
+    }
+    
+    // 非効率検出：フォールバック判定
+    if (stats.totalCalls > 10 && collectedTweets.length < 10) {
+      const efficiency = collectedTweets.length / stats.totalCalls;
+      if (efficiency < 0.5) { // 0.5 tweets/call未満で非効率判定
+        logger.warn({
+          trace_id: traceId || 'unknown',
+          job_id: jobId || null,
+          service: 'lib',
+          event: 'job_started',
+          username: user.username,
+          user_id: user.id,
+          efficiency: Math.round(efficiency * 100) / 100,
+          tweets_collected: collectedTweets.length,
+          api_calls_used: stats.totalCalls,
+          fallback: 'legacy_binary_search',
+        }, `Paging inefficient (${efficiency.toFixed(1)} tweets/call), falling back to binary search for @${user.username}`);
+        
+        return await legacyBinarySearch(
+          user, query, limit, stats, onProgress, saveCheckpoint, traceId, jobId
+        );
+      }
+    }
+  }
+  
+  // 結果判定
+  const stopReason = collectedTweets.length >= limit 
+    ? "OK_LIMIT_REACHED" 
+    : (stats.totalCalls >= MAX_API_CALLS ? "MAX_API_CALLS_REACHED" : "ACCOUNT_HAS_LESS_THAN_LIMIT");
+  
+  logger.info({
+    trace_id: traceId || 'unknown',
+    job_id: jobId || null,
+    service: 'lib',
+    event: 'job_succeeded',
+    username: user.username,
+    user_id: user.id,
+    fetched_count: collectedTweets.length,
+    api_calls: stats.totalCalls,
+    stop_reason: stopReason,
+    search_strategy: 'sequential_paging',
+  }, `Sequential paging final: @${user.username} → ${collectedTweets.length} tweets, ${stats.totalCalls} API calls`);
+  
+  return await finishExcavation(
+    user, collectedTweets, collectedMedia, limit, stats, stopReason, traceId, jobId
+  );
 }
 
 // ─── Finish Excavation (結果整理・DB保存) ────
