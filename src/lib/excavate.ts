@@ -209,11 +209,26 @@ async function excavateFullArchive(
   // start_time is always fixed at account creation.
   const startTime = accountCreated;
 
-  // Restore binary-search bounds from checkpoint, or initialise.
-  // lo  = largest end_time we know has count < BINSEARCH_TARGET_MIN (starts at created = 0 tweets)
-  // hi  = smallest end_time we know has count ≥ 100 (starts at now = unconstrained)
-  let lo: Date = cp?.phase === "binsearch" ? new Date(cp.binsearch_lo) : accountCreated;
-  let hi: Date = cp?.phase === "binsearch" ? new Date(cp.binsearch_hi) : now;
+  // New: Use hybrid algorithm if no checkpoint, otherwise continue binary search
+  if (!cp) {
+    logger.info({
+      trace_id: traceId || 'unknown',
+      job_id: jobId || null,
+      service: 'lib',
+      event: 'job_started',
+      username: user.username,
+      user_id: user.id,
+      search_strategy: 'hybrid_expanding_window',
+    }, `Starting hybrid search for @${user.username}`);
+    
+    return await hybridExpandingSearch(
+      user, query, limit, stats, onProgress, saveCheckpoint, traceId, jobId
+    );
+  }
+
+  // Restore binary-search bounds from checkpoint (resuming interrupted search)
+  let lo: Date = cp.phase === "binsearch" ? new Date(cp.binsearch_lo) : accountCreated;
+  let hi: Date = cp.phase === "binsearch" ? new Date(cp.binsearch_hi) : now;
 
   logger.info({
     trace_id: traceId || 'unknown',
@@ -406,6 +421,472 @@ async function excavateFullArchive(
     stop_reason: stopReason,
   }, `Excavation complete: @${user.username} fetched=${sorted.length} stored_new=${storedNewCount}`);
 
+  return {
+    username: user.username,
+    userId: user.id,
+    createdAt: user.created_at,
+    requestedLimit: limit,
+    fetchedCount: sorted.length,
+    stopReason,
+    apiCalls: stats.totalCalls,
+    storedNewCount,
+    errors: stats.errors,
+    acquisitionMode: "full_archive",
+  };
+}
+
+// ─── New Hybrid Algorithm: Expanding Window → Binary Search ────
+
+async function hybridExpandingSearch(
+  user: XUser,
+  query: string,
+  limit: number,
+  stats: ApiCallStats,
+  onProgress?: (apiCalls: number) => void,
+  saveCheckpoint?: (cp: ExcavationCheckpoint) => void,
+  traceId?: string,
+  jobId?: string,
+): Promise<ExcavationResult> {
+  const accountCreated = new Date(user.created_at);
+  const now = new Date(Date.now() - END_TIME_SAFETY_MS);
+  
+  // Phase 1: Expanding Window Search (アカウント年齢を考慮した開始)
+  const accountAge = Date.now() - accountCreated.getTime();
+  const yearsOld = accountAge / (365 * 24 * 60 * 60 * 1000);
+  
+  // 古いアカウントは大きなウィンドウから開始
+  let windowDays = yearsOld > 3 ? 30 : 7; // 3年超 → 30日、新しい → 7日
+  const maxExpandingCalls = 6; // 最大6回の試行に拡大
+  
+  logger.info({
+    trace_id: traceId || 'unknown',
+    job_id: jobId || null,
+    service: 'lib',
+    event: 'job_started',
+    username: user.username,
+    user_id: user.id,
+    account_years_old: Math.floor(yearsOld * 10) / 10, // 小数点1桁
+    initial_window_days: windowDays,
+    max_expanding_calls: maxExpandingCalls,
+    strategy: 'aggressive_expanding_window',
+  }, `Phase 1: Aggressive expanding window search for @${user.username} (${Math.floor(yearsOld * 10) / 10}y old, ${windowDays}d start)`);
+  
+  while (stats.totalCalls < maxExpandingCalls) {
+    // ユーザー情報取得後のAPI call間隔を空ける（429エラー防止）
+    // stats.totalCalls=1はgetUserByUsername、>=2からsearchAllTweets
+    if (stats.totalCalls >= 2) {
+      await sleep(BINSEARCH_INTER_REQUEST_DELAY_MS);
+    }
+    
+    const endTime = new Date(accountCreated.getTime() + windowDays * 24 * 60 * 60 * 1000);
+    
+    // 範囲が現在時刻を超えないように制限
+    const clampedEndTime = endTime > now ? now : endTime;
+    
+    let page: TimelinePage;
+    try {
+      page = await searchAllTweets(
+        query,
+        accountCreated.toISOString(),
+        clampedEndTime.toISOString(),
+        stats,
+        100,
+        undefined,
+        undefined, // sortOrderを省略してarchive indexを活用
+        traceId,
+        jobId,
+      );
+    } catch (e) {
+      if (e instanceof XApiStop && e.statusCode === 403) throw e;
+      if (e instanceof XApiStop) {
+        return errorResult(user.username, limit, stats, e.reason as StopReason, "full_archive");
+      }
+      throw e;
+    }
+    
+    const count = page.tweets.length;
+    onProgress?.(stats.totalCalls);
+    
+    logger.debug({
+      trace_id: traceId || 'unknown',
+      job_id: jobId || null,
+      service: 'lib',
+      event: 'x_request',
+      username: user.username,
+      user_id: user.id,
+      window_days: windowDays,
+      tweet_count: count,
+      has_next_token: !!page.nextToken,
+      api_calls_total: stats.totalCalls,
+    }, `Expanding window probe: ${windowDays} days → ${count} tweets`);
+    
+    // 🎯 理想的範囲発見 → 即終了
+    if (count >= BINSEARCH_TARGET_MIN && count <= BINSEARCH_TARGET_MAX && !page.nextToken) {
+      logger.info({
+        trace_id: traceId || 'unknown',
+        job_id: jobId || null,
+        service: 'lib',
+        event: 'job_succeeded',
+        username: user.username,
+        user_id: user.id,
+        window_days: windowDays,
+        tweet_count: count,
+        api_calls: stats.totalCalls,
+      }, `Expanding window success: @${user.username} ${windowDays} days → ${count} tweets`);
+      
+      return await finishExcavation(user, page.tweets, page.media, limit, stats, "OK_LIMIT_REACHED", traceId, jobId);
+    }
+    
+    // 😱 100件超え または next_token → Binary Searchに切り替え
+    if (count >= 100 || page.nextToken) {
+      logger.info({
+        trace_id: traceId || 'unknown',
+        job_id: jobId || null,
+        service: 'lib',
+        event: 'job_started',
+        username: user.username,
+        user_id: user.id,
+        window_days: windowDays,
+        tweet_count: count,
+        has_next_token: !!page.nextToken,
+        switch_reason: count >= 100 ? 'hit_100_tweets' : 'has_next_token',
+      }, `Expanding window hit dense area (${count} tweets), switching to binary search`);
+      
+      // Phase切り替え時の遅延を追加（429エラー防止）
+      await sleep(BINSEARCH_INTER_REQUEST_DELAY_MS);
+      
+      return await binarySearchInWindow(
+        user, query, accountCreated, clampedEndTime, limit, stats, 
+        onProgress, saveCheckpoint, traceId, jobId
+      );
+    }
+    
+    // 📈 まだ少ない → ウィンドウ拡大（攻撃的戦略）
+    if (count < BINSEARCH_TARGET_MIN) {
+      // 動的拡大倍率: tweet数に応じて積極的に拡大
+      if (count === 0) {
+        windowDays *= 8;  // 0 tweet → 8倍拡大
+        logger.debug({
+          trace_id: traceId || 'unknown',
+          job_id: jobId || null,
+          service: 'lib',
+          event: 'x_request',
+          username: user.username,
+          expansion_factor: 8,
+          new_window_days: windowDays,
+          reason: 'zero_tweets',
+        }, `Zero tweets found, aggressive expansion: ${windowDays} days`);
+      } else if (count < 10) {
+        windowDays *= 4;  // 1-9 tweets → 4倍拡大
+        logger.debug({
+          trace_id: traceId || 'unknown',
+          job_id: jobId || null,
+          service: 'lib',
+          event: 'x_request',
+          username: user.username,
+          expansion_factor: 4,
+          new_window_days: windowDays,
+          reason: 'low_density',
+        }, `Low density (${count} tweets), moderate expansion: ${windowDays} days`);
+      } else {
+        windowDays *= 2;  // 10+ tweets → 通常拡大
+      }
+      
+      // 範囲上限を拡大: 5年 → 10年
+      if (windowDays > 365 * 10) { // 10年を超える場合
+        logger.info({
+          trace_id: traceId || 'unknown',
+          job_id: jobId || null,
+          service: 'lib',
+          event: 'job_started',
+          username: user.username,
+          user_id: user.id,
+          window_days: windowDays,
+        }, `Window too large (${windowDays} days > 10 years), falling back to legacy binary search`);
+        
+        // Phase切り替え時の遅延を追加（429エラー防止）
+        await sleep(BINSEARCH_INTER_REQUEST_DELAY_MS);
+        
+        return await legacyBinarySearch(
+          user, query, limit, stats, onProgress, saveCheckpoint, traceId, jobId
+        );
+      }
+      
+      continue;
+    }
+  }
+  
+  // Phase 1失敗 → 従来のBinary Searchにフォールバック
+  logger.warn({
+    trace_id: traceId || 'unknown',
+    job_id: jobId || null,
+    service: 'lib',
+    event: 'job_failed',
+    username: user.username,
+    user_id: user.id,
+    api_calls_used: stats.totalCalls,
+    max_calls_reached: maxExpandingCalls,
+  }, `Expanding window exhausted ${maxExpandingCalls} calls, falling back to legacy binary search`);
+  
+  // Phase切り替え時の遅延を追加（429エラー防止）
+  await sleep(BINSEARCH_INTER_REQUEST_DELAY_MS);
+  
+  return await legacyBinarySearch(
+    user, query, limit, stats, onProgress, saveCheckpoint, traceId, jobId
+  );
+}
+
+// ─── Binary Search in Window (狭い範囲での二分探索) ────
+
+async function binarySearchInWindow(
+  user: XUser,
+  query: string,
+  fixedStart: Date,
+  maxEnd: Date,
+  limit: number,
+  stats: ApiCallStats,
+  onProgress?: (apiCalls: number) => void,
+  saveCheckpoint?: (cp: ExcavationCheckpoint) => void,
+  traceId?: string,
+  jobId?: string,
+): Promise<ExcavationResult> {
+  
+  logger.info({
+    trace_id: traceId || 'unknown',
+    job_id: jobId || null,
+    service: 'lib',
+    event: 'job_started',
+    username: user.username,
+    user_id: user.id,
+    fixed_start: fixedStart.toISOString().slice(0, 10),
+    max_end: maxEnd.toISOString().slice(0, 10),
+    window_days: Math.floor((maxEnd.getTime() - fixedStart.getTime()) / (24 * 60 * 60 * 1000)),
+  }, `Phase 2: Binary search in window for @${user.username}`);
+  
+  let lo = fixedStart;
+  let hi = maxEnd;
+  let bestResult: { tweets: XTweet[], media: XMedia[] } | null = null;
+  let bestFallback: { tweets: XTweet[], media: XMedia[] } = { tweets: [], media: [] };
+  
+  while (stats.totalCalls < MAX_API_CALLS) {
+    // 収束チェック
+    if (hi.getTime() - lo.getTime() < BINSEARCH_MIN_WINDOW_MS) {
+      break;
+    }
+    
+    const midMs = Math.floor((lo.getTime() + hi.getTime()) / 2);
+    const mid = new Date(midMs);
+    
+    let page: TimelinePage;
+    try {
+      page = await searchAllTweets(
+        query,
+        fixedStart.toISOString(),
+        mid.toISOString(),
+        stats,
+        100,
+        undefined,
+        "recency",
+        traceId,
+        jobId,
+      );
+    } catch (e) {
+      if (e instanceof XApiStop && e.statusCode === 403) throw e;
+      if (e instanceof XApiStop) {
+        saveCheckpoint?.({ phase: "binsearch", binsearch_lo: lo.toISOString(), binsearch_hi: hi.toISOString() });
+        return errorResult(user.username, limit, stats, e.reason as StopReason, "full_archive");
+      }
+      throw e;
+    }
+    
+    const count = page.tweets.length;
+    onProgress?.(stats.totalCalls);
+    
+    logger.debug({
+      trace_id: traceId || 'unknown',
+      job_id: jobId || null,
+      service: 'lib',
+      event: 'x_request',
+      username: user.username,
+      user_id: user.id,
+      mid_time: mid.toISOString().slice(0, 10),
+      tweet_count: count,
+      has_next_token: !!page.nextToken,
+    }, `Binary window probe: ${mid.toISOString().slice(0, 10)} → ${count} tweets`);
+    
+    // 理想的範囲発見
+    if (count >= BINSEARCH_TARGET_MIN && count <= BINSEARCH_TARGET_MAX && !page.nextToken) {
+      bestResult = { tweets: page.tweets, media: page.media };
+      break;
+    }
+    
+    // 範囲調整
+    if (count >= 100 || page.nextToken) {
+      hi = mid;
+    } else {
+      if (count > bestFallback.tweets.length) {
+        bestFallback = { tweets: page.tweets, media: page.media };
+      }
+      lo = mid;
+    }
+    
+    saveCheckpoint?.({ phase: "binsearch", binsearch_lo: lo.toISOString(), binsearch_hi: hi.toISOString() });
+    await sleep(BINSEARCH_INTER_REQUEST_DELAY_MS);
+  }
+  
+  const finalResult = bestResult || bestFallback;
+  const stopReason = bestResult ? "OK_LIMIT_REACHED" : "ACCOUNT_HAS_LESS_THAN_LIMIT";
+  
+  logger.info({
+    trace_id: traceId || 'unknown',
+    job_id: jobId || null,
+    service: 'lib',
+    event: 'job_succeeded',
+    username: user.username,
+    user_id: user.id,
+    final_count: finalResult.tweets.length,
+    api_calls: stats.totalCalls,
+    stop_reason: stopReason,
+  }, `Binary window search complete: @${user.username} → ${finalResult.tweets.length} tweets`);
+  
+  return await finishExcavation(user, finalResult.tweets, finalResult.media, limit, stats, stopReason, traceId, jobId);
+}
+
+// ─── Legacy Binary Search (従来アルゴリズム) ────
+
+async function legacyBinarySearch(
+  user: XUser,
+  query: string,
+  limit: number,
+  stats: ApiCallStats,
+  onProgress?: (apiCalls: number) => void,
+  saveCheckpoint?: (cp: ExcavationCheckpoint) => void,
+  traceId?: string,
+  jobId?: string,
+): Promise<ExcavationResult> {
+  const accountCreated = new Date(user.created_at);
+  const now = new Date(Date.now() - END_TIME_SAFETY_MS);
+  
+  logger.info({
+    trace_id: traceId || 'unknown',
+    job_id: jobId || null,
+    service: 'lib',
+    event: 'job_started',
+    username: user.username,
+    user_id: user.id,
+    search_strategy: 'legacy_binary_search',
+  }, `Phase 3: Legacy binary search for @${user.username}`);
+  
+  let lo = accountCreated;
+  let hi = now;
+  let resultTweets: XTweet[] | null = null;
+  let resultMedia: XMedia[] = [];
+  let stopReason: StopReason = "ACCOUNT_HAS_LESS_THAN_LIMIT";
+  let bestFallback: XTweet[] = [];
+  let bestFallbackMedia: XMedia[] = [];
+  
+  // 従来のBinary searchロジック（元のコードをほぼそのまま使用）
+  while (stats.totalCalls < MAX_API_CALLS) {
+    if (hi.getTime() - lo.getTime() < BINSEARCH_MIN_WINDOW_MS) {
+      resultTweets = bestFallback;
+      resultMedia = bestFallbackMedia;
+      stopReason = "ACCOUNT_HAS_LESS_THAN_LIMIT";
+      break;
+    }
+    
+    const midMs = Math.floor((lo.getTime() + hi.getTime()) / 2);
+    const mid = new Date(midMs);
+    
+    let page: TimelinePage;
+    try {
+      page = await searchAllTweets(
+        query,
+        accountCreated.toISOString(),
+        mid.toISOString(),
+        stats,
+        100,
+        undefined,
+        "recency",
+        traceId,
+        jobId,
+      );
+    } catch (e) {
+      if (e instanceof XApiStop && e.statusCode === 403) throw e;
+      if (e instanceof XApiStop) {
+        saveCheckpoint?.({ phase: "binsearch", binsearch_lo: lo.toISOString(), binsearch_hi: hi.toISOString() });
+        return errorResult(user.username, limit, stats, e.reason as StopReason, "full_archive");
+      }
+      throw e;
+    }
+    
+    const count = page.tweets.length;
+    onProgress?.(stats.totalCalls);
+    
+    if (count >= BINSEARCH_TARGET_MIN && !page.nextToken) {
+      resultTweets = page.tweets;
+      resultMedia = page.media;
+      stopReason = "OK_LIMIT_REACHED";
+      break;
+    } else if (count >= 100 || page.nextToken) {
+      hi = mid;
+    } else {
+      if (count > bestFallback.length) {
+        bestFallback = page.tweets;
+        bestFallbackMedia = page.media;
+      }
+      lo = mid;
+    }
+    
+    saveCheckpoint?.({ phase: "binsearch", binsearch_lo: lo.toISOString(), binsearch_hi: hi.toISOString() });
+    await sleep(BINSEARCH_INTER_REQUEST_DELAY_MS);
+  }
+  
+  if (!resultTweets && bestFallback.length > 0) {
+    resultTweets = bestFallback;
+    resultMedia = bestFallbackMedia;
+  }
+  
+  if (!resultTweets) {
+    return errorResult(user.username, limit, stats, "ACCOUNT_HAS_LESS_THAN_LIMIT", "full_archive");
+  }
+  
+  return await finishExcavation(user, resultTweets, resultMedia, limit, stats, stopReason, traceId, jobId);
+}
+
+// ─── Finish Excavation (結果整理・DB保存) ────
+
+async function finishExcavation(
+  user: XUser,
+  tweets: XTweet[],
+  media: XMedia[],
+  limit: number,
+  stats: ApiCallStats,
+  stopReason: StopReason,
+  traceId?: string,
+  jobId?: string,
+): Promise<ExcavationResult> {
+  
+  // Sort ascending (oldest first). UI takes the first 50.
+  const sorted = [...tweets].sort(
+    (a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime(),
+  );
+  
+  const storedNewCount = storeTweets(user.id, sorted, media);
+  
+  logger.info({
+    trace_id: traceId || 'unknown',
+    job_id: jobId || null,
+    service: 'lib',
+    event: 'job_succeeded',
+    username: user.username,
+    user_id: user.id,
+    fetched_count: sorted.length,
+    stored_new_count: storedNewCount,
+    api_calls: stats.totalCalls,
+    acquisition_mode: 'full_archive',
+    stop_reason: stopReason,
+  }, `Excavation complete: @${user.username} fetched=${sorted.length} stored_new=${storedNewCount}`);
+  
   return {
     username: user.username,
     userId: user.id,
