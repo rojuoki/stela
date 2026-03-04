@@ -83,14 +83,19 @@ export interface ApiCallStats {
   token?: string;
   /** Called when a 429 is received, before the in-process wait. Arg = reset epoch (seconds). */
   onRateLimit?: (resetEpochSec: number) => void;
+  /** Job ID for token switching (optional). */
+  jobId?: string;
+  /** Track token switch attempts to prevent infinite loops. */
+  tokenSwitchAttempts?: number;
 }
 
 /** Create a stats object, optionally pre-bound to a token and rate-limit callback. */
 export function createStats(
   token?: string,
   onRateLimit?: (resetEpochSec: number) => void,
+  jobId?: string,
 ): ApiCallStats {
-  return { totalCalls: 0, errors: [], token, onRateLimit };
+  return { totalCalls: 0, errors: [], token, onRateLimit, jobId, tokenSwitchAttempts: 0 };
 }
 
 type StopSignal = "RATE_LIMIT" | "API_ERROR" | "PROTECTED_OR_SUSPENDED_OR_NOT_FOUND";
@@ -242,6 +247,43 @@ async function xfetch(
       stats.onRateLimit?.(resetEpochSec);
 
       const resumeAt = new Date(resetEpochSec * 1000).toISOString();
+      
+      // 🚀 MAGIC TOKEN SWITCH: Try alternative token before giving up
+      const maxTokenSwitches = 2; // Prevent infinite loops
+      const switchAttempts = stats.tokenSwitchAttempts || 0;
+      
+      if (switchAttempts < maxTokenSwitches && stats.jobId) {
+        console.log(`[token-switch] 429 detected, trying alternative token (attempt ${switchAttempts + 1}/${maxTokenSwitches})...`);
+        
+        // Release current failed token
+        if (stats.token) {
+          tokenPool.releaseToken(stats.token);
+        }
+        
+        // Try to acquire a different token
+        const retryJobId = `${stats.jobId}-retry-${switchAttempts}`;
+        const alternativeToken = tokenPool.acquireToken(retryJobId);
+        
+        if (alternativeToken && alternativeToken !== activeToken) {
+          const altTokenIdx = tokenPool.getTokenIndex(alternativeToken);
+          console.log(`[token-switch] SUCCESS! Switching to token[${altTokenIdx}] for immediate retry`);
+          
+          // Update stats with new token
+          stats.token = alternativeToken;
+          stats.tokenSwitchAttempts = switchAttempts + 1;
+          
+          // Immediate retry with new token - no delay!
+          return xfetch(endpoint, params, stats);
+        } else {
+          console.log(`[token-switch] FAILED: No alternative token available (current: ...${activeToken.slice(-6)})`);
+        }
+      } else if (switchAttempts >= maxTokenSwitches) {
+        console.log(`[token-switch] EXHAUSTED: Already tried ${switchAttempts} token switches, giving up`);
+      } else {
+        console.log(`[token-switch] SKIP: No jobId provided for token switching`);
+      }
+
+      // Fallback to original behavior: fail with 429
       console.warn(
         `${label} 429 — worker stopping. Token cooldown until ${resumeAt}. ` +
           `Job will be re-queued by scheduler after reset.`,

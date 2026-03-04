@@ -203,8 +203,10 @@ export async function excavateEarliest(
   saveCheckpoint?: (cp: ExcavationCheckpoint) => void,
   /** Checkpoint from a previous run; when present, resume from that point. */
   initialCheckpoint?: ExcavationCheckpoint | null,
+  /** Job ID for token switching (optional). */
+  jobId?: string,
 ): Promise<ExcavationResult> {
-  const stats = createStats(token, onRateLimit);
+  const stats = createStats(token, onRateLimit, jobId);
   const effectiveLimit = Math.min(limit, 100);
 
   let user: XUser;

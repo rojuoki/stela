@@ -521,6 +521,7 @@ async function runJobAsync(jobId: string): Promise<void> {
         onRateLimit,
         saveCheckpoint,
         initialCheckpoint,
+        jobId,
       );
     } catch (e: unknown) {
       // If xfetch threw XApiStop("RATE_LIMIT") and it wasn't caught inside
