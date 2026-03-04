@@ -316,6 +316,11 @@ class TokenPool {
   acquireEmergencyToken(jobId: string, excludeToken: string): string | null {
     const now = Date.now();
     
+    // Debug: log all token states before emergency acquisition
+    const diagnostic = this.getDiagnosticInfo();
+    console.log(`[tokenPool][emergency] Attempt for job ${jobId}, excluding ...${excludeToken.slice(-6)}`);
+    console.log(`[tokenPool][emergency] All tokens: ${diagnostic.map(d => `t${d.index}=${d.assigned ? 'ASSIGNED' : 'FREE'}${d.hardCooldownUntil ? `(cool:${d.hardCooldownUntil.slice(11, 19)})` : ''}`).join(' ')}`);
+    
     // Phase 1: Try to get a completely free token (ideal)
     let entry = this._entries.find(
       (e) => !e.assignedJobId && 
