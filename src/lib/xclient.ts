@@ -262,7 +262,10 @@ async function xfetch(
         
         // Check if token switching is strategically viable
         if (!tokenPool.canSwitchToken(activeToken)) {
-          console.log(`[token-switch] STRATEGIC BLOCK: canSwitchToken() prevents switching from token[${tokenPool.getTokenIndex(activeToken)}] (preserving safety reserves)`);
+          // Debug: show token states to understand why switching is blocked
+          const diagnostic = tokenPool.getDiagnosticInfo();
+          console.log(`[token-switch] STRATEGIC BLOCK: canSwitchToken() prevents switching from token[${tokenPool.getTokenIndex(activeToken)}]`);
+          console.log(`[token-switch] DEBUG: ${diagnostic.map(d => `t${d.index}=${d.assigned ? 'ASSIGNED' : 'FREE'}${d.hardCooldownUntil ? `(cool:${d.hardCooldownUntil.slice(11, 19)})` : ''}`).join(' ')}`);
         } else {
           // Try emergency token acquisition (can override soft cooldown if needed)
           const retryJobId = `${stats.jobId}-retry-${switchAttempts}`;

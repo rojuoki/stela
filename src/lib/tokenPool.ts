@@ -288,6 +288,27 @@ class TokenPool {
   }
 
   /**
+   * Get diagnostic information for all tokens (for debugging STRATEGIC BLOCK issues).
+   * Returns array of token states with assignment and cooldown status.
+   */
+  getDiagnosticInfo(): Array<{
+    index: number;
+    assigned: boolean;
+    assignedJobId?: string;
+    hardCooldownUntil?: string;
+    softCooldownUntil?: string;
+  }> {
+    const now = Date.now();
+    return this._entries.map((entry, index) => ({
+      index,
+      assigned: !!entry.assignedJobId,
+      assignedJobId: entry.assignedJobId,
+      hardCooldownUntil: entry.state.cooldownUntil ? new Date(entry.state.cooldownUntil).toISOString() : undefined,
+      softCooldownUntil: entry.state.softCooldownUntilMs ? new Date(entry.state.softCooldownUntilMs).toISOString() : undefined,
+    }));
+  }
+
+  /**
    * Emergency token acquisition for 429 recovery.
    * Unlike acquireToken(), this can bypass soft cooldown if necessary.
    * Only use for critical token switching scenarios.
