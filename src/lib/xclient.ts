@@ -267,13 +267,13 @@ async function xfetch(
           console.log(`[token-switch] STRATEGIC BLOCK: canSwitchToken() prevents switching from token[${tokenPool.getTokenIndex(activeToken)}]`);
           console.log(`[token-switch] DEBUG: ${diagnostic.map(d => `t${d.index}=${d.assigned ? 'ASSIGNED' : 'FREE'}${d.hardCooldownUntil ? `(cool:${d.hardCooldownUntil.slice(11, 19)})` : ''}`).join(' ')}`);
         } else {
-          // Try emergency token acquisition (can override soft cooldown if needed)
-          const retryJobId = `${stats.jobId}-retry-${switchAttempts}`;
-          const alternativeToken = tokenPool.acquireEmergencyToken(retryJobId, activeToken);
+          // Try emergency token acquisition using the SAME jobId (unified job ID strategy)
+          // This prevents orphaned tokens by keeping all tokens under one job tracking
+          const alternativeToken = tokenPool.acquireEmergencyToken(stats.jobId!, activeToken);
           
           if (alternativeToken && alternativeToken !== activeToken) {
             const altTokenIdx = tokenPool.getTokenIndex(alternativeToken);
-            console.log(`[token-switch] SUCCESS! Switching to token[${altTokenIdx}] for immediate retry`);
+            console.log(`[token-switch] SUCCESS! Switching to token[${altTokenIdx}] for job ${stats.jobId} (unified jobId)`);
             
             // Update stats with new token
             stats.token = alternativeToken;

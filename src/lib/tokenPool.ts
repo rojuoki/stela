@@ -52,6 +52,9 @@ interface TokenEntry {
 
 class TokenPool {
   private readonly _entries: TokenEntry[];
+  
+  /** Track all tokens assigned to each job (jobId -> Set<token>) */
+  private readonly _jobTokens = new Map<string, Set<string>>();
 
   /** Max parallel excavations = min(tokenCount, M_MAX). At least 1. */
   readonly M: number;
@@ -123,6 +126,13 @@ class TokenPool {
 
     if (!entry) return null;
     entry.assignedJobId = jobId;
+    
+    // Track this token assignment for the job
+    if (!this._jobTokens.has(jobId)) {
+      this._jobTokens.set(jobId, new Set());
+    }
+    this._jobTokens.get(jobId)!.add(entry.token);
+    
     const idx = this.getTokenIndex(entry.token);
     const avail = this._availableAtMs(entry);
     const label = avail > now ? `soft-cooldown bypass, was ${new Date(avail).toISOString()}` : "recovered";
@@ -309,6 +319,30 @@ class TokenPool {
   }
 
   /**
+   * Release all tokens assigned to a specific job.
+   * This is the main method to prevent orphaned ASSIGNED tokens.
+   * Should be called once per job in the finally block.
+   */
+  releaseTokensForJob(jobId: string): void {
+    const tokens = this._jobTokens.get(jobId);
+    if (!tokens || tokens.size === 0) return;
+    
+    let released = 0;
+    for (const token of tokens) {
+      const entry = this._entries.find(e => e.token === token);
+      if (entry && entry.assignedJobId === jobId) {
+        entry.assignedJobId = undefined;
+        released++;
+        const idx = this.getTokenIndex(token);
+        console.log(`[tokenPool] Released token[${idx}] for job ${jobId}`);
+      }
+    }
+    
+    this._jobTokens.delete(jobId);
+    console.log(`[tokenPool] releaseTokensForJob(${jobId}): ${released} tokens released`);
+  }
+
+  /**
    * Emergency token acquisition for 429 recovery.
    * Unlike acquireToken(), this can bypass soft cooldown if necessary.
    * Only use for critical token switching scenarios.
@@ -330,6 +364,13 @@ class TokenPool {
     
     if (entry) {
       entry.assignedJobId = jobId;
+      
+      // Track this emergency token assignment
+      if (!this._jobTokens.has(jobId)) {
+        this._jobTokens.set(jobId, new Set());
+      }
+      this._jobTokens.get(jobId)!.add(entry.token);
+      
       const idx = this.getTokenIndex(entry.token);
       console.log(`[tokenPool][emergency] token[${idx}] acquired cleanly for job ${jobId}`);
       return entry.token;
@@ -344,6 +385,13 @@ class TokenPool {
     
     if (entry) {
       entry.assignedJobId = jobId;
+      
+      // Track this emergency override token assignment
+      if (!this._jobTokens.has(jobId)) {
+        this._jobTokens.set(jobId, new Set());
+      }
+      this._jobTokens.get(jobId)!.add(entry.token);
+      
       const idx = this.getTokenIndex(entry.token);
       console.log(`[tokenPool][emergency] token[${idx}] emergency override for job ${jobId}`);
       return entry.token;
@@ -351,6 +399,37 @@ class TokenPool {
     
     console.log(`[tokenPool][emergency] FAILED: No emergency token available (excluding ...${excludeToken.slice(-6)})`);
     return null;
+  }
+
+  /**
+   * Debug: Detect and optionally clean orphaned ASSIGNED tokens.
+   * Orphans = tokens with assignedJobId but no active tracking in _jobTokens.
+   */
+  cleanupOrphanedTokens(dryRun: boolean = true): number {
+    const orphans: { token: string; jobId: string; index: number }[] = [];
+    
+    for (let i = 0; i < this._entries.length; i++) {
+      const entry = this._entries[i];
+      if (!entry.assignedJobId) continue;
+      
+      const isTracked = this._jobTokens.get(entry.assignedJobId)?.has(entry.token);
+      if (!isTracked) {
+        orphans.push({ token: entry.token, jobId: entry.assignedJobId, index: i });
+      }
+    }
+    
+    console.log(`[tokenPool][cleanup] Found ${orphans.length} orphaned tokens${dryRun ? ' (DRY RUN)' : ''}`);
+    
+    if (!dryRun && orphans.length > 0) {
+      for (const orphan of orphans) {
+        this._entries[orphan.index].assignedJobId = undefined;
+        console.log(`[tokenPool][cleanup] Cleared orphan token[${orphan.index}] (was assigned to ${orphan.jobId})`);
+      }
+    } else if (orphans.length > 0) {
+      console.log(`[tokenPool][cleanup] Orphans: ${orphans.map(o => `t${o.index}→${o.jobId}`).join(', ')}`);
+    }
+    
+    return orphans.length;
   }
 }
 
