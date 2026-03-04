@@ -239,6 +239,93 @@ class TokenPool {
   peekToken(): string | undefined {
     return this._entries[0]?.token;
   }
+
+  // ── Safety Strategy (3-token conditional switching) ──────────────────────
+
+  /**
+   * Check if the last token (safety token) is available as insurance.
+   * For 3-token strategy: ensure t3 can be preserved when switching t1→t2.
+   * Returns true if the last token is not in use and not hard-blocked.
+   */
+  hasSafetyTokenAvailable(): boolean {
+    if (this._entries.length < 2) return false; // Need at least 2 tokens
+    
+    const safetyToken = this._entries[this._entries.length - 1];
+    const now = Date.now();
+    
+    // Safety token must be unassigned and not hard-blocked
+    return !safetyToken.assignedJobId && 
+           !(safetyToken.state.cooldownUntil && safetyToken.state.cooldownUntil > now);
+  }
+
+  /**
+   * Check if conditional token switching is allowed for the given token.
+   * Strategy: Only switch to next token if safety token can be preserved.
+   * 
+   * @param currentToken - The token that hit 429
+   * @returns true if switching is safe (preserves last token as insurance)
+   */
+  canSwitchToken(currentToken: string): boolean {
+    const currentIndex = this.getTokenIndex(currentToken);
+    
+    // Must have at least 3 tokens for this strategy
+    if (this._entries.length < 3) return false;
+    
+    // Don't switch if already on the last or second-to-last token
+    if (currentIndex >= this._entries.length - 2) {
+      return false; // Preserve safety token
+    }
+
+    const nextToken = this._entries[currentIndex + 1];
+    const now = Date.now();
+    
+    // Next token must be available (not assigned and not hard-blocked)
+    const nextTokenAvailable = !nextToken.assignedJobId && 
+                              !(nextToken.state.cooldownUntil && nextToken.state.cooldownUntil > now);
+
+    // Can only switch if next token is available AND safety token can be preserved
+    return nextTokenAvailable && this.hasSafetyTokenAvailable();
+  }
+
+  /**
+   * Emergency token acquisition for 429 recovery.
+   * Unlike acquireToken(), this can bypass soft cooldown if necessary.
+   * Only use for critical token switching scenarios.
+   */
+  acquireEmergencyToken(jobId: string, excludeToken: string): string | null {
+    const now = Date.now();
+    
+    // Phase 1: Try to get a completely free token (ideal)
+    let entry = this._entries.find(
+      (e) => !e.assignedJobId && 
+             e.token !== excludeToken &&
+             now >= this._availableAtMs(e)
+    );
+    
+    if (entry) {
+      entry.assignedJobId = jobId;
+      const idx = this.getTokenIndex(entry.token);
+      console.log(`[tokenPool][emergency] token[${idx}] acquired cleanly for job ${jobId}`);
+      return entry.token;
+    }
+    
+    // Phase 2: Override soft cooldown if necessary (but respect hard cooldown)
+    entry = this._entries.find(
+      (e) => !e.assignedJobId && 
+             e.token !== excludeToken &&
+             !(e.state.cooldownUntil && e.state.cooldownUntil > now)
+    );
+    
+    if (entry) {
+      entry.assignedJobId = jobId;
+      const idx = this.getTokenIndex(entry.token);
+      console.log(`[tokenPool][emergency] token[${idx}] emergency override for job ${jobId}`);
+      return entry.token;
+    }
+    
+    console.log(`[tokenPool][emergency] FAILED: No emergency token available (excluding ...${excludeToken.slice(-6)})`);
+    return null;
+  }
 }
 
 export const tokenPool = new TokenPool();

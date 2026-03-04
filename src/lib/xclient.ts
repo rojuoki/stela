@@ -260,22 +260,27 @@ async function xfetch(
           tokenPool.releaseToken(stats.token);
         }
         
-        // Try to acquire a different token
-        const retryJobId = `${stats.jobId}-retry-${switchAttempts}`;
-        const alternativeToken = tokenPool.acquireToken(retryJobId);
-        
-        if (alternativeToken && alternativeToken !== activeToken) {
-          const altTokenIdx = tokenPool.getTokenIndex(alternativeToken);
-          console.log(`[token-switch] SUCCESS! Switching to token[${altTokenIdx}] for immediate retry`);
-          
-          // Update stats with new token
-          stats.token = alternativeToken;
-          stats.tokenSwitchAttempts = switchAttempts + 1;
-          
-          // Immediate retry with new token - no delay!
-          return xfetch(endpoint, params, stats);
+        // Check if token switching is strategically viable
+        if (!tokenPool.canSwitchToken(activeToken)) {
+          console.log(`[token-switch] STRATEGIC BLOCK: canSwitchToken() prevents switching from token[${tokenPool.getTokenIndex(activeToken)}] (preserving safety reserves)`);
         } else {
-          console.log(`[token-switch] FAILED: No alternative token available (current: ...${activeToken.slice(-6)})`);
+          // Try emergency token acquisition (can override soft cooldown if needed)
+          const retryJobId = `${stats.jobId}-retry-${switchAttempts}`;
+          const alternativeToken = tokenPool.acquireEmergencyToken(retryJobId, activeToken);
+          
+          if (alternativeToken && alternativeToken !== activeToken) {
+            const altTokenIdx = tokenPool.getTokenIndex(alternativeToken);
+            console.log(`[token-switch] SUCCESS! Switching to token[${altTokenIdx}] for immediate retry`);
+            
+            // Update stats with new token
+            stats.token = alternativeToken;
+            stats.tokenSwitchAttempts = switchAttempts + 1;
+            
+            // Immediate retry with new token - no delay!
+            return xfetch(endpoint, params, stats);
+          } else {
+            console.log(`[token-switch] FAILED: No alternative token available (current: ...${activeToken.slice(-6)})`);
+          }
         }
       } else if (switchAttempts >= maxTokenSwitches) {
         console.log(`[token-switch] EXHAUSTED: Already tried ${switchAttempts} token switches, giving up`);
