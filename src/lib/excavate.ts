@@ -58,6 +58,12 @@ const MAX_API_CALLS_DEEP = 30;
  */
 const DEEP_TRIGGER_ZERO_STREAK = 4;
 
+/**
+ * Number of consecutive zero-year results before switching to 2-year steps.
+ * This optimizes year scanning for accounts with long "initial sparse" periods.
+ */
+const YEAR_STEP_ZERO_STREAK_THRESHOLD = 3;
+
 /** Delay between consecutive explore probes to avoid hammering the rate limit. */
 const EXPLORE_INTER_REQUEST_DELAY_MS = 1300;
 
@@ -155,6 +161,10 @@ export interface ExcavationCheckpoint {
   zero_streak: number;
   deep_triggered: boolean;
   allow_deep: boolean;
+  /** Consecutive zero-year count for step optimization. */
+  zero_year_streak: number;
+  /** Current year step size (1 or 2). */
+  step_years: number;
 
   // ── Region / collect state ──────────────────────────
   /** ISO string — set once the earliest region is found. */
@@ -310,10 +320,14 @@ async function excavateFullArchive(
     const skipYearProbeFor =
       cp?.phase === "explore_month" ? cp.month_scan_year : undefined;
 
+    // Year-scan optimization state.
+    let zeroYearStreak = cp?.zero_year_streak ?? 0;
+    let stepYears = cp?.step_years ?? 1;
+
     yearLoop: for (
       let year = resumeFromYear;
       year <= endYear && stats.totalCalls < MAX_API_CALLS;
-      year++
+      year += stepYears
     ) {
       const yearStart =
         year === startYear ? accountCreated : new Date(Date.UTC(year, 0, 1));
@@ -341,10 +355,19 @@ async function excavateFullArchive(
         onProgress?.(stats.totalCalls);
 
         if (!yOldest) {
-          // Year has no tweets — checkpoint BEFORE yielding to prevent re-queue race.
+          // Year has no tweets — optimize year stepping.
+          zeroYearStreak++;
+          if (zeroYearStreak >= YEAR_STEP_ZERO_STREAK_THRESHOLD && stepYears === 1) {
+            stepYears = 2;
+            console.log(
+              `[explore] year-scan mode: step=2, zeroStreak=${zeroYearStreak} (switching to 2-year steps)`,
+            );
+          }
+
+          // Checkpoint BEFORE yielding to prevent re-queue race.
           saveCheckpoint?.({
             phase: "explore_year",
-            next_year: year + 1,
+            next_year: year + stepYears,
             earliest_hit_year: -1,
             zero_streak: 0,
             deep_triggered: false,
@@ -352,13 +375,56 @@ async function excavateFullArchive(
             earliest_region_start: null,
             collect_window_start: null,
             collect_span_days: COLLECT_INITIAL_SPAN_DAYS,
+            zero_year_streak: zeroYearStreak,
+            step_years: stepYears,
           });
           await sleep(EXPLORE_INTER_REQUEST_DELAY_MS);
           continue;
         }
 
-        // Year has tweets — begin month scan.
-        earliestHitYear = year;
+        // Year has tweets — may need to refine if we were using 2-year steps.
+        let actualHitYear = year;
+        
+        // If we hit with 2-year steps, check the skipped year to find exact hit year.
+        if (stepYears === 2 && year > startYear) {
+          const prevYear = year - 1;
+          if (prevYear >= startYear) {
+            const prevYearStart = new Date(Date.UTC(prevYear, 0, 1));
+            const prevYearEnd = new Date(Date.UTC(prevYear + 1, 0, 1));
+            const prevYEndStr = minDate(prevYearEnd, now).toISOString();
+
+            console.log(
+              `[explore] 2-year step hit at ${year} — checking skipped year ${prevYear} for refinement`,
+            );
+
+            try {
+              const prevPage = await searchAllTweets(query, prevYearStart.toISOString(), prevYEndStr, stats, 5);
+              const prevOldest = oldestInPage(prevPage.tweets);
+              
+              if (prevOldest) {
+                actualHitYear = prevYear;
+                console.log(
+                  `[explore] refinement: year=${prevYear} found=${prevPage.tweets.length} (actual hit year confirmed)`,
+                );
+              } else {
+                console.log(
+                  `[explore] refinement: year=${prevYear} found=0 (${year} is correct hit year)`,
+                );
+              }
+            } catch (e) {
+              if (e instanceof XApiStop && e.statusCode === 403) throw e;
+              if (e instanceof XApiStop) {
+                return errorResult(user.username, limit, stats, e.reason as StopReason, "full_archive");
+              }
+              throw e;
+            }
+          }
+        }
+
+        earliestHitYear = actualHitYear;
+        zeroYearStreak = 0;
+        stepYears = 1;
+
         // Save a checkpoint IMMEDIATELY before the inter-request sleep so that
         // an HMR restart (or any crash) during the sleep doesn't leave the
         // checkpoint pointing at the previous empty year.  Without this, the
@@ -367,37 +433,43 @@ async function excavateFullArchive(
         // potentially wasting the 429 budget on an already-answered question).
         saveCheckpoint?.({
           phase: "explore_month",
-          next_year: year,
-          month_scan_year: year,
-          next_month: year === startYear ? accountCreated.getUTCMonth() : 0,
-          earliest_hit_year: year,
+          next_year: actualHitYear,
+          month_scan_year: actualHitYear,
+          next_month: actualHitYear === startYear ? accountCreated.getUTCMonth() : 0,
+          earliest_hit_year: actualHitYear,
           zero_streak: 0,
           deep_triggered: deepTriggered,
           allow_deep: allowDeep,
           earliest_region_start: null,
           collect_window_start: null,
           collect_span_days: COLLECT_INITIAL_SPAN_DAYS,
+          zero_year_streak: 0,
+          step_years: 1,
         });
         await sleep(EXPLORE_INTER_REQUEST_DELAY_MS);
       } else {
         // Resuming mid-month-scan: we already know this year has tweets.
         earliestHitYear = year;
+        zeroYearStreak = 0;
+        stepYears = 1;
         console.log(
           `[explore] year=${year} — skipping year probe (resuming mid-month-scan)`,
         );
       }
 
       // ── Month scan ──────────────────────────────────
+      // Use the correct year for month scanning.
+      const scanYear = year;
 
       const monthFrom =
-        year === skipYearProbeFor && cp?.next_month !== undefined
+        scanYear === skipYearProbeFor && cp?.next_month !== undefined
           ? cp.next_month
-          : year === startYear
+          : scanYear === startYear
             ? accountCreated.getUTCMonth()
             : 0;
 
       let zeroStreak =
-        year === skipYearProbeFor ? (cp?.zero_streak ?? 0) : 0;
+        scanYear === skipYearProbeFor ? (cp?.zero_streak ?? 0) : 0;
 
       // deepTriggered may already be restored; don't reset it for this year's scan.
       if (year !== skipYearProbeFor) deepTriggered = false;
@@ -405,16 +477,18 @@ async function excavateFullArchive(
       // Checkpoint: entering month scan for this year.
       saveCheckpoint?.({
         phase: "explore_month",
-        next_year: year,
-        month_scan_year: year,
+        next_year: scanYear,
+        month_scan_year: scanYear,
         next_month: monthFrom,
-        earliest_hit_year: year,
+        earliest_hit_year: scanYear,
         zero_streak: zeroStreak,
         deep_triggered: deepTriggered,
         allow_deep: allowDeep,
         earliest_region_start: null,
         collect_window_start: null,
         collect_span_days: COLLECT_INITIAL_SPAN_DAYS,
+        zero_year_streak: 0,
+        step_years: 1,
       });
 
       for (
@@ -427,10 +501,10 @@ async function excavateFullArchive(
         // This avoids requesting dates before the account (or Twitter itself)
         // existed — which the API rejects with 400.
         const mStart =
-          year === startYear && m === accountCreated.getUTCMonth()
+          scanYear === startYear && m === accountCreated.getUTCMonth()
             ? accountCreated
-            : new Date(Date.UTC(year, m, 1));
-        const mEnd = new Date(Date.UTC(year, m + 1, 1));
+            : new Date(Date.UTC(scanYear, m, 1));
+        const mEnd = new Date(Date.UTC(scanYear, m + 1, 1));
         if (mStart >= now) break;
 
         let mPage: TimelinePage;
@@ -452,7 +526,7 @@ async function excavateFullArchive(
 
         const mOldest = oldestInPage(mPage.tweets);
         console.log(
-          `[explore] month=${year}-${String(m + 1).padStart(2, "0")} window=[${mStart.toISOString().slice(0, 10)}, ${minDate(mEnd, now).toISOString().slice(0, 10)}] found=${mPage.tweets.length} oldest=${mOldest?.created_at.slice(0, 10) ?? "none"}`,
+          `[explore] month=${scanYear}-${String(m + 1).padStart(2, "0")} window=[${mStart.toISOString().slice(0, 10)}, ${minDate(mEnd, now).toISOString().slice(0, 10)}] found=${mPage.tweets.length} oldest=${mOldest?.created_at.slice(0, 10) ?? "none"}`,
         );
         onProgress?.(stats.totalCalls);
 
@@ -462,16 +536,18 @@ async function excavateFullArchive(
           // Checkpoint: this month is done, no tweets found.
           saveCheckpoint?.({
             phase: "explore_month",
-            next_year: year,
-            month_scan_year: year,
+            next_year: scanYear,
+            month_scan_year: scanYear,
             next_month: m + 1,
-            earliest_hit_year: year,
+            earliest_hit_year: scanYear,
             zero_streak: zeroStreak,
             deep_triggered: deepTriggered,
             allow_deep: allowDeep,
             earliest_region_start: null,
             collect_window_start: null,
             collect_span_days: COLLECT_INITIAL_SPAN_DAYS,
+            zero_year_streak: 0,
+            step_years: 1,
           });
           await sleep(EXPLORE_INTER_REQUEST_DELAY_MS);
         } else {
@@ -480,7 +556,7 @@ async function excavateFullArchive(
             if (allowDeep) {
               deepTriggered = true;
               console.log(
-                `[deep] trigger: year=${year} zeroStreak=${zeroStreak} firstHitMonth=${m + 1} reason=MISSING_EARLY_MONTHS`,
+                `[deep] trigger: year=${scanYear} zeroStreak=${zeroStreak} firstHitMonth=${m + 1} reason=MISSING_EARLY_MONTHS`,
               );
             } else {
               console.log(
@@ -494,10 +570,10 @@ async function excavateFullArchive(
           // Checkpoint: found the earliest region, about to enter collect.
           saveCheckpoint?.({
             phase: "collect",
-            next_year: year,
-            month_scan_year: year,
+            next_year: scanYear,
+            month_scan_year: scanYear,
             next_month: m,
-            earliest_hit_year: year,
+            earliest_hit_year: scanYear,
             zero_streak: zeroStreak,
             deep_triggered: deepTriggered,
             allow_deep: allowDeep,
@@ -505,6 +581,8 @@ async function excavateFullArchive(
             collect_window_start: earliestRegionStart.toISOString(),
             collect_span_days: COLLECT_INITIAL_SPAN_DAYS,
             collected_ids: [],
+            zero_year_streak: 0,
+            step_years: 1,
           });
 
           await sleep(EXPLORE_INTER_REQUEST_DELAY_MS);
@@ -515,16 +593,17 @@ async function excavateFullArchive(
       // Month scan exhausted but year had tweets (unlikely API inconsistency).
       // Use year start as a safe collect origin so we don't miss anything.
       if (!earliestRegionStart) {
-        earliestRegionStart = yearStart;
+        const scanYearStart = new Date(Date.UTC(scanYear, 0, 1));
+        earliestRegionStart = scanYearStart;
         console.log(
-          `[explore] month scan yielded nothing despite year hit — using year start ${yearStart.toISOString().slice(0, 10)} as region`,
+          `[explore] month scan yielded nothing despite year hit — using year start ${scanYearStart.toISOString().slice(0, 10)} as region`,
         );
         saveCheckpoint?.({
           phase: "collect",
-          next_year: year,
-          month_scan_year: year,
+          next_year: scanYear,
+          month_scan_year: scanYear,
           next_month: 0,
-          earliest_hit_year: year,
+          earliest_hit_year: scanYear,
           zero_streak: zeroStreak,
           deep_triggered: deepTriggered,
           allow_deep: allowDeep,
@@ -532,6 +611,8 @@ async function excavateFullArchive(
           collect_window_start: earliestRegionStart.toISOString(),
           collect_span_days: COLLECT_INITIAL_SPAN_DAYS,
           collected_ids: [],
+          zero_year_streak: 0,
+          step_years: 1,
         });
         break;
       }
@@ -618,6 +699,8 @@ async function excavateFullArchive(
     collect_pages_fetched: pageState?.pagesFetched,
     collect_stagnation_count: stagnation?.count ?? 0,
     collect_last_window_key: stagnation?.lastWindowKey ?? null,
+    zero_year_streak: 0,
+    step_years: 1,
   });
 
   const standardStop = await collectWindowPass(
