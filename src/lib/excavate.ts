@@ -73,6 +73,12 @@ const COLLECT_MAX_SPAN_DAYS = 365 * 2;
 /** Max pages to paginate within a single collect window (100/page = 500 tweets max). */
 const MAX_COLLECT_PAGES_PER_WINDOW = 5;
 
+/**
+ * Minimum window span for split operation. Windows smaller than this
+ * will not be split even if they return next_token on page 1.
+ */
+const MIN_SPLIT_SPAN_DAYS = 7;
+
 // ── Adaptive window sizing constants ──────────────────────────────────────────
 // Controls how collectSpanDays grows/shrinks based on hit density per window.
 const TARGET_MIN_HITS = 10;        // below this → window is "low density"
@@ -117,6 +123,15 @@ export type StopReason =
   | "RATE_LIMIT"
   | "API_ERROR"
   | "MAX_API_CALLS_REACHED";
+
+/**
+ * Represents a split child window waiting to be processed.
+ */
+interface SplitWindow {
+  start: string; // ISO string
+  end: string;   // ISO string  
+  spanDays: number;
+}
 
 export interface ExcavationResult {
   username: string;
@@ -196,6 +211,13 @@ export interface ExcavationCheckpoint {
   collect_stagnation_count?: number;
   /** Window key (`ISO_start-ISO_end`) of the last processed window for stagnation detection. */
   collect_last_window_key?: string | null;
+
+  // ── Split window queue state ──────────────────────────────────────────────
+  /** 
+   * Pending split child windows to process (empty = no splits pending).
+   * Processed in chronological order (earliest first).
+   */
+  split_window_queue?: SplitWindow[];
 }
 
 // ─── Entry point ───────────────────────────────────────
@@ -681,6 +703,7 @@ async function excavateFullArchive(
     collectedIds: string[],
     pageState?: { windowEnd: Date; nextToken: string; pagesFetched: number },
     stagnation?: { count: number; lastWindowKey: string | null },
+    splitQueue?: SplitWindow[],
   ): ExcavationCheckpoint => ({
     phase: "collect",
     next_year: earliestHitYear,
@@ -699,6 +722,7 @@ async function excavateFullArchive(
     collect_pages_fetched: pageState?.pagesFetched,
     collect_stagnation_count: stagnation?.count ?? 0,
     collect_last_window_key: stagnation?.lastWindowKey ?? null,
+    split_window_queue: splitQueue ?? [],
     zero_year_streak: 0,
     step_years: 1,
   });
@@ -724,12 +748,12 @@ async function excavateFullArchive(
       resumePagesFetched: collectResumePagesFetched,
       // Window-level checkpoint: clears page-level fields (collect_next_token = null).
       saveWindowCheckpoint: saveCheckpoint
-        ? (ws, sd, ids, stag) => saveCheckpoint(makeCollectCp(ws, sd, ids, undefined, stag))
+        ? (ws, sd, ids, stag, splitQ) => saveCheckpoint(makeCollectCp(ws, sd, ids, undefined, stag, splitQ))
         : undefined,
       // Page-level checkpoint: saves next_token so resume skips already-fetched pages.
       savePageCheckpoint: saveCheckpoint
         ? (ws, we, nt, pf, ids, sd, stag) =>
-            saveCheckpoint(makeCollectCp(ws, sd, ids, { windowEnd: we, nextToken: nt, pagesFetched: pf }, stag))
+            saveCheckpoint(makeCollectCp(ws, sd, ids, { windowEnd: we, nextToken: nt, pagesFetched: pf }, stag, []))
         : undefined,
     },
   );
@@ -886,9 +910,21 @@ async function collectWindowPass(
   onProgress?: (apiCalls: number) => void,
   checkpointOpts?: CollectCheckpointOpts,
 ): Promise<StopReason> {
-  // Resume from saved window if provided; otherwise start from the beginning.
-  let collectStart = checkpointOpts?.resumeFrom ?? start;
-  let collectSpanDays = checkpointOpts?.initialSpanDays ?? COLLECT_INITIAL_SPAN_DAYS;
+  // ── Separated state management ──────────────────────────────────────────
+  
+  // Normal window progression (independent of splits)
+  let normalWindowStart = checkpointOpts?.resumeFrom ?? start;
+  let normalWindowSpan = checkpointOpts?.initialSpanDays ?? COLLECT_INITIAL_SPAN_DAYS;
+  
+  // Split window queue (restored from checkpoint)
+  let splitQueue: SplitWindow[] = [];
+  if (checkpointOpts?.resumeFrom && (checkpointOpts as any)?.resumeCheckpoint?.split_window_queue) {
+    splitQueue = [...(checkpointOpts as any).resumeCheckpoint.split_window_queue];
+  }
+  
+  // Dedupe-only state for parent split windows (not counted toward target)
+  const splitParentTweets = new Set<string>();
+  
   let stopReason: StopReason = "ACCOUNT_HAS_LESS_THAN_LIMIT";
 
   // True only for the very first window when a mid-window pagination token was saved.
@@ -928,14 +964,14 @@ async function collectWindowPass(
     return "ACCOUNT_HAS_LESS_THAN_LIMIT";
   }
 
-  if (checkpointOpts?.resumeFrom) {
+  if (checkpointOpts?.resumeFrom || splitQueue.length > 0) {
     if (resumingMidWindow) {
       console.log(
-        `[collect] @${username} resuming mid-window=${collectStart.toISOString().slice(0, 10)} next_token=${checkpointOpts.resumeNextToken} pages_done=${checkpointOpts.resumePagesFetched ?? "?"} already_have=${collected.size}`,
+        `[collect] @${username} resuming mid-window=${normalWindowStart.toISOString().slice(0, 10)} next_token=${checkpointOpts?.resumeNextToken} pages_done=${checkpointOpts?.resumePagesFetched ?? "?"} already_have=${collected.size}`,
       );
     } else {
       console.log(
-        `[collect] @${username} resuming from window=${collectStart.toISOString().slice(0, 10)} already_have=${collected.size}`,
+        `[collect] @${username} resuming: normal_window=${normalWindowStart.toISOString().slice(0, 10)} pending_splits=${splitQueue.length} already_have=${collected.size}`,
       );
     }
   }
@@ -943,17 +979,39 @@ async function collectWindowPass(
   while (
     collected.size < collectLimit &&
     stats.totalCalls < callCeiling &&
-    collectStart < end
+    (splitQueue.length > 0 || normalWindowStart < end)
   ) {
-    // For a mid-window resume, the window end was already computed and saved.
-    // Use it directly rather than re-computing from collectSpanDays.
-    const collectEnd = resumingMidWindow
-      ? checkpointOpts!.resumeWindowEnd!
-      : minDate(addDays(collectStart, collectSpanDays), end);
+    let currentWindowStart: Date;
+    let currentWindowEnd: Date;
+    let currentSpanDays: number;
+    let isProcessingSplit: boolean;
 
-    console.log(
-      `[collect] @${username} window=[${collectStart.toISOString().slice(0, 10)}, ${collectEnd.toISOString().slice(0, 10)}] have=${collected.size}`,
-    );
+    // ── Priority 1: Process pending split windows first ────────────────────
+    if (splitQueue.length > 0) {
+      const nextSplit = splitQueue.shift()!;
+      currentWindowStart = new Date(nextSplit.start);
+      currentWindowEnd = new Date(nextSplit.end);
+      currentSpanDays = nextSplit.spanDays;
+      isProcessingSplit = true;
+      
+      console.log(
+        `[collect] @${username} processing split window=[${currentWindowStart.toISOString().slice(0, 10)}, ${currentWindowEnd.toISOString().slice(0, 10)}] spanDays=${currentSpanDays} remaining_splits=${splitQueue.length}`,
+      );
+    } else {
+      // ── Priority 2: Normal window (independent progression) ─────────────────
+      if (normalWindowStart >= end) break;
+      
+      currentWindowStart = normalWindowStart;
+      currentWindowEnd = resumingMidWindow
+        ? checkpointOpts!.resumeWindowEnd!
+        : minDate(addDays(normalWindowStart, normalWindowSpan), end);
+      currentSpanDays = normalWindowSpan;
+      isProcessingSplit = false;
+      
+      console.log(
+        `[collect] @${username} normal window=[${currentWindowStart.toISOString().slice(0, 10)}, ${currentWindowEnd.toISOString().slice(0, 10)}] spanDays=${currentSpanDays}`,
+      );
+    }
 
     // Accumulated tweets for this window across all pages.
     const windowTweets: XTweet[] = [];
@@ -976,8 +1034,8 @@ async function collectWindowPass(
       try {
         page = await searchAllTweets(
           query,
-          collectStart.toISOString(),
-          collectEnd.toISOString(),
+          currentWindowStart.toISOString(),
+          currentWindowEnd.toISOString(),
           stats,
           100,
           undefined,
@@ -992,6 +1050,54 @@ async function collectWindowPass(
         throw e;
       }
 
+      // ── Dense-window split detection (only for normal windows) ──────────────
+      if (!isProcessingSplit && page.nextToken && currentSpanDays >= MIN_SPLIT_SPAN_DAYS) {
+        console.log(
+          `[split] window=[${currentWindowStart.toISOString().slice(0, 10)}, ${currentWindowEnd.toISOString().slice(0, 10)}] spanDays=${currentSpanDays} next_token_present=true -> splitting`,
+        );
+        
+        const mid = new Date((currentWindowStart.getTime() + currentWindowEnd.getTime()) / 2);
+        const leftSpan = Math.ceil((mid.getTime() - currentWindowStart.getTime()) / (24 * 60 * 60 * 1000));
+        const rightSpan = Math.ceil((currentWindowEnd.getTime() - mid.getTime()) / (24 * 60 * 60 * 1000));
+        
+        // Enqueue child windows (chronological order: left first)
+        splitQueue.push(
+          {
+            start: currentWindowStart.toISOString(),
+            end: mid.toISOString(), 
+            spanDays: leftSpan
+          },
+          {
+            start: mid.toISOString(),
+            end: currentWindowEnd.toISOString(),
+            spanDays: rightSpan
+          }
+        );
+        
+        console.log(
+          `[split] window=[${currentWindowStart.toISOString().slice(0, 10)}, ${currentWindowEnd.toISOString().slice(0, 10)}] -> [${currentWindowStart.toISOString().slice(0, 10)}, ${mid.toISOString().slice(0, 10)}], [${mid.toISOString().slice(0, 10)}, ${currentWindowEnd.toISOString().slice(0, 10)}]`,
+        );
+        
+        // Store parent page1 tweets for dedupe only (NOT in collected)
+        if (checkpointOpts?.userId && page.tweets.length > 0) {
+          storeTweets(checkpointOpts.userId, page.tweets);
+        }
+        for (const t of page.tweets) {
+          splitParentTweets.add(t.id);
+        }
+        
+        onProgress?.(stats.totalCalls);
+        
+        // Advance normal window pointer (split doesn't block normal progression)
+        normalWindowStart = currentWindowEnd;
+        // Use current span for next normal window (no adaptive change for split parent)
+        // Actual adaptive logic will be applied when child windows are processed
+        normalWindowSpan = currentSpanDays;
+        
+        continue; // Process split queue next
+      }
+
+      // Normal processing path
       windowTweets.push(...page.tweets);
       nextToken = page.nextToken;
       pagesInWindow = 1;
@@ -1008,12 +1114,12 @@ async function collectWindowPass(
           ...windowTweets.map((t) => t.id),
         ];
         checkpointOpts.savePageCheckpoint(
-          collectStart,
-          collectEnd,
+          currentWindowStart,
+          currentWindowEnd,
           nextToken,
           pagesInWindow,
           pageCollectedIds,
-          collectSpanDays,
+          currentSpanDays,
           { count: stagnationCount, lastWindowKey },
         );
         console.log(
@@ -1032,8 +1138,8 @@ async function collectWindowPass(
       try {
         nextPage = await searchAllTweets(
           query,
-          collectStart.toISOString(),
-          collectEnd.toISOString(),
+          currentWindowStart.toISOString(),
+          currentWindowEnd.toISOString(),
           stats,
           100,
           nextToken,
@@ -1064,12 +1170,12 @@ async function collectWindowPass(
           ...windowTweets.map((t) => t.id),
         ];
         checkpointOpts.savePageCheckpoint(
-          collectStart,
-          collectEnd,
+          currentWindowStart,
+          currentWindowEnd,
           nextToken,
           pagesInWindow,
           pageCollectedIds,
-          collectSpanDays,
+          currentSpanDays,
           { count: stagnationCount, lastWindowKey },
         );
         console.log(
@@ -1096,7 +1202,13 @@ async function collectWindowPass(
 
     const sizeBeforeWindow = collected.size;
     onProgress?.(stats.totalCalls);
-    for (const t of windowTweets) collected.set(t.id, t);
+    
+    // Apply dedupe when processing child windows
+    for (const t of windowTweets) {
+      if (!splitParentTweets.has(t.id)) { // Skip parent duplicates
+        collected.set(t.id, t);
+      }
+    }
     const uniqueNew = collected.size - sizeBeforeWindow;
 
     // ── Incremental storage — persist this window's tweets to DB so they
@@ -1114,16 +1226,16 @@ async function collectWindowPass(
     let nextSpanDays: number;
 
     if (uniqueNew === 0) {
-      nextSpanDays = Math.min(collectSpanDays * GROW_FACTOR_ZERO, COLLECT_MAX_SPAN_DAYS);
+      nextSpanDays = Math.min(currentSpanDays * GROW_FACTOR_ZERO, COLLECT_MAX_SPAN_DAYS);
       adaptAction = "grow_zero";
     } else if (uniqueNew < TARGET_MIN_HITS) {
-      nextSpanDays = Math.min(collectSpanDays * GROW_FACTOR_LOW, COLLECT_MAX_SPAN_DAYS);
+      nextSpanDays = Math.min(currentSpanDays * GROW_FACTOR_LOW, COLLECT_MAX_SPAN_DAYS);
       adaptAction = "grow_low";
     } else if (clogged) {
-      nextSpanDays = Math.max(Math.floor(collectSpanDays * SHRINK_FACTOR_FULL), MIN_COLLECT_SPAN_DAYS);
+      nextSpanDays = Math.max(Math.floor(currentSpanDays * SHRINK_FACTOR_FULL), MIN_COLLECT_SPAN_DAYS);
       adaptAction = "shrink_full";
     } else {
-      nextSpanDays = collectSpanDays;
+      nextSpanDays = currentSpanDays;
       adaptAction = "keep";
     }
 
@@ -1132,7 +1244,7 @@ async function collectWindowPass(
     // observed density (tweets/day this window) with 2× headroom.
     if (uniqueNew > 0 && collected.size < collectLimit) {
       const remaining = collectLimit - collected.size;
-      const densityPerDay = uniqueNew / collectSpanDays;
+      const densityPerDay = uniqueNew / currentSpanDays;
       const estimatedDays = Math.ceil((remaining / densityPerDay) * 2);
       if (estimatedDays < nextSpanDays) {
         nextSpanDays = Math.max(estimatedDays, MIN_COLLECT_SPAN_DAYS);
@@ -1141,11 +1253,11 @@ async function collectWindowPass(
     }
 
     console.log(
-      `[collect][adaptive] spanDays=${collectSpanDays} uniqueNew=${uniqueNew} pages=${pagesInWindow} exhausted=${exhausted} action=${adaptAction} nextSpanDays=${nextSpanDays}`,
+      `[collect][adaptive] spanDays=${currentSpanDays} uniqueNew=${uniqueNew} pages=${pagesInWindow} exhausted=${exhausted} action=${adaptAction} nextSpanDays=${nextSpanDays}`,
     );
 
     // ── Stagnation detection ─────────────────────────────────────────────────
-    const windowKey = makeWindowKey(collectStart, collectEnd);
+    const windowKey = makeWindowKey(currentWindowStart, currentWindowEnd);
     
     // On resume: if we have the same window key from checkpoint and stored_new=0,
     // continue the stagnation count instead of resetting it.
@@ -1161,21 +1273,26 @@ async function collectWindowPass(
       lastWindowKey = windowKey;
     }
     console.log(
-      `[collect][stagnation] window=[${collectStart.toISOString().slice(0, 10)}, ${collectEnd.toISOString().slice(0, 10)}] stored_new=${uniqueNew} already_have=${sizeBeforeWindow} stagnation_count=${stagnationCount} key_match=${windowKey === lastWindowKey}`,
+      `[collect][stagnation] window=[${currentWindowStart.toISOString().slice(0, 10)}, ${currentWindowEnd.toISOString().slice(0, 10)}] stored_new=${uniqueNew} already_have=${sizeBeforeWindow} stagnation_count=${stagnationCount} key_match=${windowKey === lastWindowKey}`,
     );
     if (stagnationCount >= STAGNATION_THRESHOLD) {
       console.log(
-        `[collect][stagnation] detected → shift window (count=${stagnationCount} window=${collectStart.toISOString().slice(0, 10)}..${collectEnd.toISOString().slice(0, 10)})`,
+        `[collect][stagnation] detected → shift window (count=${stagnationCount} window=${currentWindowStart.toISOString().slice(0, 10)}..${currentWindowEnd.toISOString().slice(0, 10)})`,
       );
-      collectStart = addDays(collectStart, -collectSpanDays);
+      normalWindowStart = addDays(normalWindowStart, -normalWindowSpan);
       stagnationCount = 0;
       lastWindowKey = null;
-      checkpointOpts?.saveWindowCheckpoint?.(
-        collectStart,
-        collectSpanDays,
-        [...collected.keys()],
-        { count: 0, lastWindowKey: null },
-      );
+      // Pass split queue via temporary extension
+      const saveCheckpointWithSplitQueue = checkpointOpts?.saveWindowCheckpoint as any;
+      if (saveCheckpointWithSplitQueue) {
+        saveCheckpointWithSplitQueue(
+          normalWindowStart,
+          normalWindowSpan,
+          [...collected.keys()],
+          { count: 0, lastWindowKey: null },
+          splitQueue,
+        );
+      }
       continue;
     }
 
@@ -1194,17 +1311,29 @@ async function collectWindowPass(
     //   Normal continue     — was already done here before; no behaviour change.
     if (uniqueNew === 0 && collected.size > 0) {
       console.log(
-        `[collect] @${username} window=[${collectStart.toISOString().slice(0, 10)}, ${collectEnd.toISOString().slice(0, 10)}] already processed (uniqueNew=0 have=${collected.size}) — advancing`,
+        `[collect] @${username} window=[${currentWindowStart.toISOString().slice(0, 10)}, ${currentWindowEnd.toISOString().slice(0, 10)}] already processed (uniqueNew=0 have=${collected.size}) — advancing`,
       );
     }
-    collectStart = collectEnd;
-    collectSpanDays = nextSpanDays;
-    checkpointOpts?.saveWindowCheckpoint?.(
-      collectStart,
-      collectSpanDays,
-      [...collected.keys()],
-      { count: stagnationCount, lastWindowKey },
-    );
+    
+    // Advance state appropriately
+    if (!isProcessingSplit) {
+      // Normal window completed → advance normal window pointer
+      normalWindowStart = currentWindowEnd;
+      normalWindowSpan = nextSpanDays; // from adaptive logic
+    }
+    // Split windows don't advance normal pointer (already advanced during split)
+    
+    // Pass split queue via temporary extension
+    const saveCheckpointWithSplitQueue = checkpointOpts?.saveWindowCheckpoint as any;
+    if (saveCheckpointWithSplitQueue) {
+      saveCheckpointWithSplitQueue(
+        normalWindowStart,
+        normalWindowSpan,
+        [...collected.keys()],
+        { count: stagnationCount, lastWindowKey },
+        splitQueue,
+      );
+    }
 
     if (collected.size >= collectLimit) {
       stopReason = "OK_LIMIT_REACHED";
