@@ -746,6 +746,7 @@ async function excavateFullArchive(
       resumeWindowEnd: collectResumeWindowEnd,
       resumeNextToken: collectResumeNextToken,
       resumePagesFetched: collectResumePagesFetched,
+      resumeCheckpoint: cp || undefined, // Pass full checkpoint for split queue access
       // Window-level checkpoint: clears page-level fields (collect_next_token = null).
       saveWindowCheckpoint: saveCheckpoint
         ? (ws, sd, ids, stag, splitQ) => saveCheckpoint(makeCollectCp(ws, sd, ids, undefined, stag, splitQ))
@@ -857,15 +858,18 @@ interface CollectCheckpointOpts {
   initialStagnationCount?: number;
   /** Last window key to restore on resume (default null). */
   initialLastWindowKey?: string | null;
+  /** Full checkpoint data for accessing split queue and other extended state. */
+  resumeCheckpoint?: ExcavationCheckpoint;
   /**
    * Called after each completed window.
-   * Args: nextWindowStart, nextSpanDays, all collected IDs so far, current stagnation state.
+   * Args: nextWindowStart, nextSpanDays, all collected IDs so far, current stagnation state, split queue.
    */
   saveWindowCheckpoint?: (
     nextWindowStart: Date,
     nextSpanDays: number,
     collectedIds: string[],
     stag: { count: number; lastWindowKey: string | null },
+    splitQueue?: SplitWindow[],
   ) => void;
 
   // ── Mid-window pagination resume ─────────────────────────────────────────
@@ -918,8 +922,8 @@ async function collectWindowPass(
   
   // Split window queue (restored from checkpoint)
   let splitQueue: SplitWindow[] = [];
-  if (checkpointOpts?.resumeFrom && (checkpointOpts as any)?.resumeCheckpoint?.split_window_queue) {
-    splitQueue = [...(checkpointOpts as any).resumeCheckpoint.split_window_queue];
+  if (checkpointOpts?.resumeFrom && checkpointOpts?.resumeCheckpoint?.split_window_queue) {
+    splitQueue = [...checkpointOpts.resumeCheckpoint.split_window_queue];
   }
   
   // Dedupe-only state for parent split windows (not counted toward target)
@@ -950,16 +954,16 @@ async function collectWindowPass(
       console.log(
         `[collect][stagnation] forcing immediate window shift on resume (count=${stagnationCount} >= ${STAGNATION_THRESHOLD})`,
       );
-      collectStart = addDays(collectStart, -collectSpanDays);
+      normalWindowStart = addDays(normalWindowStart, -normalWindowSpan);
       stagnationCount = 0;
       lastWindowKey = null;
     }
   }
 
   // If the resume point is at or past `end`, the collect phase is already done.
-  if (collectStart >= end) {
+  if (normalWindowStart >= end) {
     console.log(
-      `[collect] @${username} collect phase already complete (resumeFrom=${collectStart.toISOString().slice(0, 10)} >= end=${end.toISOString().slice(0, 10)})`,
+      `[collect] @${username} collect phase already complete (resumeFrom=${normalWindowStart.toISOString().slice(0, 10)} >= end=${end.toISOString().slice(0, 10)})`,
     );
     return "ACCOUNT_HAS_LESS_THAN_LIMIT";
   }
