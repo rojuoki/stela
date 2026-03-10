@@ -366,21 +366,28 @@ export const globalQueue: GlobalJobQueue = _g.__stelaQueue;
 
 // ─── Public API ───────────────────────────────────────────────────────────────
 
+/** 
+ * Cutoff date for determining old vs new account excavation targets.
+ * Accounts created before this date are considered "old" (target = 50).
+ * Accounts created on or after this date are considered "new" (target = 100).
+ */
+const ACCOUNT_AGE_CUTOFF = "2016-01-01T00:00:00.000Z";
+
 /**
- * Compute the target tweet count for a job based on the account's creation year.
+ * Compute the target tweet count for a job based on the account's creation date.
  *
- *   created_year ≤ 2012  →  50   (very old accounts: archive gaps, API limits)
- *   created_year ≤ 2018  →  75   (older accounts: moderate depth)
- *   otherwise            → 100   (recent accounts: full depth)
+ *   created before 2016-01-01  →  50   (old accounts)
+ *   created on/after 2016-01-01 → 100  (new accounts)
  *
  * Exported so callers can display the value before job creation.
  */
 export function computeTargetCount(accountCreatedAt: string | null | undefined): number {
   if (!accountCreatedAt) return 100;
-  const year = new Date(accountCreatedAt).getUTCFullYear();
-  if (year <= 2012) return 50;
-  if (year <= 2018) return 75;
-  return 100;
+  const accountDate = new Date(accountCreatedAt);
+  const cutoffDate = new Date(ACCOUNT_AGE_CUTOFF);
+  
+  // TODO: Phase 2 will implement account-level Stage 1 persistence and reuse
+  return accountDate < cutoffDate ? 50 : 100;
 }
 
 /**

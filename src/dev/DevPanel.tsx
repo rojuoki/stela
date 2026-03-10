@@ -68,7 +68,7 @@ export default function DevPanel() {
 
   // Unlock tools state
   const [targetUsername, setTargetUsername] = useState("");
-  const [cap, setCap] = useState<50 | 75 | 100>(100);
+  const [cap, setCap] = useState<50 | 100>(100);
   const [unlockStatus, setUnlockStatus] = useState<string | null>(null);
 
   // Error injection state
@@ -293,10 +293,9 @@ export default function DevPanel() {
         <input type="text" value={targetUsername} onChange={(e) => setTargetUsername(e.target.value)}
           placeholder="@username"
           className="flex-1 min-w-0 bg-zinc-800 border border-zinc-600 rounded px-2 py-1 text-xs text-white placeholder-zinc-600 focus:outline-none focus:border-zinc-500" />
-        <select value={cap} onChange={(e) => setCap(Number(e.target.value) as 50 | 75 | 100)}
+        <select value={cap} onChange={(e) => setCap(Number(e.target.value) as 50 | 100)}
           className="bg-zinc-800 border border-zinc-600 rounded px-1 py-1 text-xs text-white focus:outline-none">
           <option value={50}>50</option>
-          <option value={75}>75</option>
           <option value={100}>100</option>
         </select>
       </div>
