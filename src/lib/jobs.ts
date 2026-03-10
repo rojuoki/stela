@@ -681,8 +681,8 @@ async function runJobAsync(jobId: string): Promise<void> {
 
     if (result.userId && result.fetchedCount > 0) {
       db.prepare(`
-        INSERT OR IGNORE INTO unlocks (user_id, account_id, job_id, unlocked_at)
-        VALUES ('anonymous', ?, ?, ?)
+        INSERT OR IGNORE INTO unlocks (user_id, account_id, stage, job_id, unlocked_at)
+        VALUES ('anonymous', ?, 1, ?, ?)
       `).run(result.userId, jobId, new Date().toISOString());
     }
 

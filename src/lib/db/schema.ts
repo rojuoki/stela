@@ -60,15 +60,17 @@ CREATE TABLE IF NOT EXISTS tweets (
 );
 CREATE INDEX IF NOT EXISTS idx_tweets_account ON tweets(account_id, created_at ASC);
 
--- User unlock history (for future credit eligibility)
+-- User unlock history (Phase 3: stage-aware unlock tracking)
 CREATE TABLE IF NOT EXISTS unlocks (
   id            INTEGER PRIMARY KEY AUTOINCREMENT,
   user_id       TEXT NOT NULL DEFAULT 'anonymous',
   account_id    TEXT NOT NULL,
+  stage         INTEGER NOT NULL DEFAULT 1,  -- Stage unlocked (1, 2, 3, etc.)
   job_id        TEXT,
   unlocked_at   TEXT NOT NULL,
-  UNIQUE(user_id, account_id)
+  UNIQUE(user_id, account_id, stage)  -- One unlock per user per account per stage
 );
+CREATE INDEX IF NOT EXISTS idx_unlocks_user_account ON unlocks(user_id, account_id);
 
 -- Stage results per account (Phase 2: immutable Stage 1 results)
 -- Each account can have multiple stages, but Stage 1 is immutable once created

@@ -52,22 +52,41 @@ export function getCachedTweetCount(accountId: string): number {
   return row?.cnt ?? 0;
 }
 
-/** Check if user already unlocked this account */
-export function hasUserUnlockedAccount(userId: string, accountId: string): boolean {
+/** Check if user has unlocked a specific stage for an account */
+export function hasUserUnlockedStage(userId: string, accountId: string, stage: number): boolean {
   const db = getDb();
   const row = db
-    .prepare("SELECT 1 FROM unlocks WHERE user_id = ? AND account_id = ?")
-    .get(userId, accountId);
+    .prepare("SELECT 1 FROM unlocks WHERE user_id = ? AND account_id = ? AND stage = ?")
+    .get(userId, accountId, stage);
   return !!row;
 }
 
-/** Record unlock (idempotent via UNIQUE constraint) */
-export function recordUnlock(userId: string, accountId: string, jobId: string): void {
+/** Get the highest stage unlocked by a user for an account (returns 0 if none) */
+export function getUserHighestUnlockedStage(userId: string, accountId: string): number {
+  const db = getDb();
+  const row = db
+    .prepare("SELECT MAX(stage) as max_stage FROM unlocks WHERE user_id = ? AND account_id = ?")
+    .get(userId, accountId) as { max_stage: number | null } | undefined;
+  return row?.max_stage ?? 0;
+}
+
+/** Check if user already unlocked this account (backward compatibility - checks Stage 1) */
+export function hasUserUnlockedAccount(userId: string, accountId: string): boolean {
+  return hasUserUnlockedStage(userId, accountId, 1);
+}
+
+/** Record stage unlock (idempotent via UNIQUE constraint) */
+export function recordStageUnlock(userId: string, accountId: string, stage: number, jobId: string): void {
   const db = getDb();
   db.prepare(`
-    INSERT OR IGNORE INTO unlocks (user_id, account_id, job_id, unlocked_at)
-    VALUES (?, ?, ?, ?)
-  `).run(userId, accountId, jobId, new Date().toISOString());
+    INSERT OR IGNORE INTO unlocks (user_id, account_id, stage, job_id, unlocked_at)
+    VALUES (?, ?, ?, ?, ?)
+  `).run(userId, accountId, stage, jobId, new Date().toISOString());
+}
+
+/** Record unlock (backward compatibility - records Stage 1 unlock) */
+export function recordUnlock(userId: string, accountId: string, jobId: string): void {
+  recordStageUnlock(userId, accountId, 1, jobId);
 }
 
 /**
@@ -386,6 +405,7 @@ export function getApiCostStats(): ApiCostStats {
 
 export interface DevUnlockEntry {
   account_id: string;
+  stage: number;
   job_id: string;
   unlocked_at: string;
   username: string | null;
@@ -401,6 +421,7 @@ export function getDevUnlocks(userId: string): DevUnlockEntry[] {
     .prepare(
       `SELECT
          u.account_id,
+         u.stage,
          u.job_id,
          u.unlocked_at,
          a.username,
@@ -412,7 +433,7 @@ export function getDevUnlocks(userId: string): DevUnlockEntry[] {
        LEFT JOIN accounts a ON a.account_id = u.account_id
        LEFT JOIN jobs     j ON j.id          = u.job_id
        WHERE u.user_id = ?
-       ORDER BY u.unlocked_at DESC`
+       ORDER BY u.unlocked_at DESC, u.stage ASC`
     )
     .all(userId) as DevUnlockEntry[];
 }

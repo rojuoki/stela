@@ -5,7 +5,9 @@ import {
   getCachedTweetCount,
   findActiveJobForUsername,
   hasUserUnlockedAccount,
+  hasUserUnlockedStage,
   recordUnlock,
+  recordStageUnlock,
   getCreditBalance,
   holdCredits,
   captureHeld,
@@ -87,11 +89,11 @@ export async function POST(req: NextRequest) {
       if (account) {
         const cachedCount = getCachedTweetCount(account.account_id);
         if (cachedCount > 0) {
-          const alreadyUnlocked = hasUserUnlockedAccount(userId, account.account_id);
+          const alreadyUnlockedStage1 = hasUserUnlockedStage(userId, account.account_id, 1);
           
-          if (alreadyUnlocked) {
-            // Free re-unlock for same user
-            recordUnlock(userId, account.account_id, "cache-hit-free");
+          if (alreadyUnlockedStage1) {
+            // Free re-unlock for same user (Stage 1 already unlocked)
+            recordStageUnlock(userId, account.account_id, 1, "cache-hit-free");
             recordApiCall("cache/unlock", true); // saved: no excavation needed
             console.log(`[unlock] Free cache hit for @${username}: ${cachedCount} tweets, user already unlocked`);
             
@@ -123,7 +125,7 @@ export async function POST(req: NextRequest) {
                 balance: currentBalance.balance,
               }, { status: 500 });
             }
-            recordUnlock(userId, account.account_id, "cache-hit-paid");
+            recordStageUnlock(userId, account.account_id, 1, "cache-hit-paid");
             recordApiCall("cache/unlock", true); // saved: tweets already in DB
 
             console.log(`[unlock] Paid cache hit for @${username}: ${cachedCount} tweets, 1 credit consumed`);
