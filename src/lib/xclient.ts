@@ -59,6 +59,15 @@ export interface XUser {
   };
 }
 
+export interface XMedia {
+  media_key: string;
+  type: "photo" | "video" | "animated_gif";
+  url?: string; // photo URLs
+  preview_image_url?: string; // video/gif preview
+  width?: number;
+  height?: number;
+}
+
 export interface XTweet {
   id: string;
   text: string;
@@ -344,6 +353,7 @@ export async function getUserByUsername(
 export interface TimelinePage {
   tweets: XTweet[];
   nextToken?: string;
+  media?: XMedia[]; // expanded media objects
 }
 
 /**
@@ -371,6 +381,8 @@ export async function searchAllTweets(
     end_time: endTime,
     max_results: String(Math.min(Math.max(maxResults, 10), 500)),
     "tweet.fields": "created_at,public_metrics,attachments,author_id",
+    "expansions": "attachments.media_keys",
+    "media.fields": "type,url,preview_image_url,media_key,width,height",
   };
   if (sortOrder) params.sort_order = sortOrder;
   if (nextToken) params.next_token = nextToken;
@@ -378,11 +390,13 @@ export async function searchAllTweets(
   const json = (await xfetch("/tweets/search/all", params, stats)) as {
     data?: XTweet[];
     meta?: { next_token?: string; result_count?: number };
+    includes?: { media?: XMedia[] };
   };
 
   return {
     tweets: json.data || [],
     nextToken: json.meta?.next_token,
+    media: json.includes?.media || [],
   };
 }
 
@@ -403,6 +417,8 @@ export async function getUserTweetsInWindow(
     end_time: endTime,
     max_results: String(Math.min(maxResults, 100)),
     "tweet.fields": "created_at,public_metrics,attachments,author_id",
+    "expansions": "attachments.media_keys",
+    "media.fields": "type,url,preview_image_url,media_key,width,height",
     exclude: "retweets,replies",
   };
   if (paginationToken) params.pagination_token = paginationToken;
@@ -410,10 +426,12 @@ export async function getUserTweetsInWindow(
   const json = (await xfetch(`/users/${userId}/tweets`, params, stats)) as {
     data?: XTweet[];
     meta?: { next_token?: string; result_count?: number };
+    includes?: { media?: XMedia[] };
   };
 
   return {
     tweets: json.data || [],
     nextToken: json.meta?.next_token,
+    media: json.includes?.media || [],
   };
 }

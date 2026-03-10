@@ -342,12 +342,6 @@ export default function Home() {
     const raw = username.trim().replace(/^@/, "");
     if (!raw) return;
 
-    console.log("[DEBUG] handleUnlock started:", { 
-      username: raw, 
-      currentAccountStatus: accountStatus,
-      hasAccountData: !!accountData 
-    });
-
     cleanup();
     setActiveJobId(null);
     setStatus("running");
@@ -362,7 +356,6 @@ export default function Home() {
     // setAccountStatus("idle");
     // setAccountData(null);
     // setAccountError(null);
-    console.log("[DEBUG] handleUnlock: account state NOT reset");
 
     try {
       const res = await apiFetch("/api/unlock", {
@@ -446,17 +439,9 @@ export default function Home() {
             value={username}
             onChange={(e) => {
               const cleanValue = e.target.value.replace(/^@/, "");
-              console.log("[DEBUG] onChange triggered:", { 
-                cleanValue, 
-                currentUsername: username, 
-                different: cleanValue !== username,
-                status,
-                accountStatus 
-              });
               setUsername(cleanValue);
               // Don't reset account state during excavation
               if (cleanValue !== username && status !== "running") {
-                console.log("[DEBUG] Resetting account state due to username change");
                 setAccountStatus("idle");
                 setAccountData(null);
                 setAccountError(null);

@@ -36,6 +36,7 @@ import {
   XApiStop,
   type XUser,
   type XTweet,
+  type XMedia,
   type TimelinePage,
   type ApiCallStats,
 } from "./xclient";
@@ -823,7 +824,7 @@ async function excavateFullArchive(
     .sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime())
     .slice(0, limit);
 
-  const storedNewCount = storeTweets(user.id, sorted);
+  const storedNewCount = storeTweets(user.id, sorted, []); // Media already stored during incremental saves
 
   console.log(
     `[excavate] @${user.username} done: fetched=${sorted.length} stored_new=${storedNewCount} api_calls=${stats.totalCalls} mode=full_archive stop=${stopReason}${deepTriggered ? ` deep_added=${deepAddedCount}` : ""}`,
@@ -1084,7 +1085,7 @@ async function collectWindowPass(
         
         // Store parent page1 tweets for dedupe only (NOT in collected)
         if (checkpointOpts?.userId && page.tweets.length > 0) {
-          storeTweets(checkpointOpts.userId, page.tweets);
+          storeTweets(checkpointOpts.userId, page.tweets, page.media);
         }
         for (const t of page.tweets) {
           splitParentTweets.add(t.id);
@@ -1108,7 +1109,7 @@ async function collectWindowPass(
 
       // Store page 1 tweets immediately so they survive a 429 on the next call.
       if (checkpointOpts?.userId && page.tweets.length > 0) {
-        storeTweets(checkpointOpts.userId, page.tweets);
+        storeTweets(checkpointOpts.userId, page.tweets, page.media);
       }
 
       // Save page checkpoint BEFORE making the next API call (if more pages remain).
@@ -1169,7 +1170,7 @@ async function collectWindowPass(
 
       // Store this page's tweets immediately for the same reason.
       if (checkpointOpts?.userId && nextPage.tweets.length > 0) {
-        storeTweets(checkpointOpts.userId, nextPage.tweets);
+        storeTweets(checkpointOpts.userId, nextPage.tweets, nextPage.media);
       }
 
       // Save page checkpoint when more pages remain.
@@ -1227,8 +1228,9 @@ async function collectWindowPass(
 
     // ── Incremental storage — persist this window's tweets to DB so they
     //    survive a 429 suspend and can be reloaded on resume.
+    // Note: Individual pages already stored with media, this is a safety net.
     if (checkpointOpts?.userId && windowTweets.length > 0) {
-      storeTweets(checkpointOpts.userId, windowTweets);
+      storeTweets(checkpointOpts.userId, windowTweets, []); // Media already stored per-page
     }
 
     // ── Adaptive window sizing ─────────────────────────────────────────────
@@ -1417,6 +1419,11 @@ async function excavateTimeline(
       continue;
     }
 
+    // Store tweets with media immediately
+    if (page.tweets.length > 0) {
+      storeTweets(user.id, page.tweets, page.media);
+    }
+
     for (const t of page.tweets) collected.set(t.id, t);
 
     let nextToken = page.nextToken;
@@ -1437,6 +1444,12 @@ async function excavateTimeline(
         }
         throw e;
       }
+      
+      // Store paginated tweets with media immediately  
+      if (page.tweets.length > 0) {
+        storeTweets(user.id, page.tweets, page.media);
+      }
+      
       for (const t of page.tweets) collected.set(t.id, t);
       nextToken = page.nextToken;
     }
@@ -1466,7 +1479,7 @@ async function excavateTimeline(
     .sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime())
     .slice(0, limit);
 
-  const storedNewCount = storeTweets(user.id, sorted);
+  const storedNewCount = storeTweets(user.id, sorted, []); // Media already stored during incremental saves
 
   console.log(
     `[excavate] @${user.username} done (fallback): fetched=${sorted.length} stored_new=${storedNewCount} api_calls=${stats.totalCalls} stop=${stopReason}`,
@@ -1509,7 +1522,42 @@ function upsertAccount(user: XUser) {
   );
 }
 
-function storeTweets(userId: string, tweets: XTweet[]): number {
+/**
+ * Create media JSON for storage by matching tweet attachments with expanded media objects.
+ * Returns simplified format for efficient UI rendering.
+ */
+function createMediaJson(tweet: XTweet, mediaObjects: XMedia[]): string | null {
+  if (!tweet.attachments?.media_keys || !mediaObjects.length) {
+    return null;
+  }
+
+  const tweetMedia: Array<{
+    type: string;
+    url?: string;
+    preview_image_url?: string;
+    media_url_https?: string; // backwards compatibility with existing parseMedia
+    width?: number;
+    height?: number;
+  }> = [];
+
+  for (const mediaKey of tweet.attachments.media_keys) {
+    const mediaObj = mediaObjects.find(m => m.media_key === mediaKey);
+    if (mediaObj) {
+      tweetMedia.push({
+        type: mediaObj.type,
+        url: mediaObj.url,
+        preview_image_url: mediaObj.preview_image_url,
+        media_url_https: mediaObj.url || mediaObj.preview_image_url, // fallback for compatibility
+        width: mediaObj.width,
+        height: mediaObj.height,
+      });
+    }
+  }
+
+  return tweetMedia.length > 0 ? JSON.stringify(tweetMedia) : null;
+}
+
+function storeTweets(userId: string, tweets: XTweet[], mediaObjects: XMedia[] = []): number {
   if (!tweets.length) return 0;
   const db = getDb();
   const insert = db.prepare(`
@@ -1520,12 +1568,13 @@ function storeTweets(userId: string, tweets: XTweet[]): number {
   let newCount = 0;
   const tx = db.transaction(() => {
     for (const t of tweets) {
+      const mediaJson = createMediaJson(t, mediaObjects);
       const r = insert.run(
         t.id,
         userId,
         t.created_at,
         t.text,
-        t.attachments ? JSON.stringify(t.attachments) : null,
+        mediaJson,
         t.public_metrics?.like_count ?? 0,
         t.public_metrics?.retweet_count ?? 0,
         t.public_metrics?.reply_count ?? 0,
