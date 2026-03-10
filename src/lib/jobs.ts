@@ -30,6 +30,7 @@ import { excavateEarliest, type ExcavationCheckpoint, type ExcavationResult } fr
 import { captureHeld, releaseHeld } from "./repository";
 import { tokenPool } from "./tokenPool";
 import { XApiStop } from "./xclient";
+import { getStageResult, storeStageResult, createSyntheticExcavationResult } from "./stageResults";
 
 export interface JobRecord {
   id: string;
@@ -519,31 +520,62 @@ async function runJobAsync(jobId: string): Promise<void> {
     let result: ExcavationResult | null = null;
     let rateLimitResumeAtMs: number | null = null;
 
-    try {
-      result = await excavateEarliest(
-        username,
-        limit,
-        writeProgress,
-        token,
-        onRateLimit,
-        saveCheckpoint,
-        initialCheckpoint,
-        jobId,
-      );
-    } catch (e: unknown) {
-      // If xfetch threw XApiStop("RATE_LIMIT") and it wasn't caught inside
-      // excavateEarliest, handle it here as a suspend (not a failure).
-      if (e instanceof XApiStop && e.reason === "RATE_LIMIT") {
-        const row = db
-          .prepare("SELECT resume_at FROM jobs WHERE id = ?")
-          .get(jobId) as { resume_at: string | null } | undefined;
-        rateLimitResumeAtMs = row?.resume_at
-          ? new Date(row.resume_at).getTime()
-          : Date.now() + 60_000;
-      } else {
-        const msg = e instanceof Error ? e.message : String(e);
-        failJobInDb(jobId, "EXCAVATION_ERROR", msg, undefined, holdId);
-        return; // finally handles cleanup
+    // ── Phase 2: Check for existing Stage 1 result ──────────────────────────
+    // Before starting excavation, check if Stage 1 already exists for this account.
+    // If it does, reuse the immutable result instead of excavating again.
+    
+    // First, we need to get the account info to check for existing stage results.
+    // We'll do a quick lookup to get account_id and created_at if the account exists.
+    const existingAccount = db
+      .prepare("SELECT account_id, created_at FROM accounts WHERE username = ?")
+      .get(username.toLowerCase()) as { account_id: string; created_at: string } | undefined;
+
+    if (existingAccount) {
+      const existingStage1 = getStageResult(existingAccount.account_id, 1);
+      if (existingStage1) {
+        console.log(
+          `[stage] Reusing existing Stage 1 result for @${username}: ${existingStage1.collected_count}/${existingStage1.target_count} tweets (job_id=${existingStage1.job_id})`
+        );
+        
+        // Create a synthetic excavation result based on the stored stage result
+        result = createSyntheticExcavationResult(
+          existingStage1, 
+          username, 
+          existingAccount.created_at
+        );
+        
+        // Skip excavation entirely - we have our result
+      }
+    }
+
+    // Only run excavation if we don't have a cached Stage 1 result
+    if (!result) {
+      try {
+        result = await excavateEarliest(
+          username,
+          limit,
+          writeProgress,
+          token,
+          onRateLimit,
+          saveCheckpoint,
+          initialCheckpoint,
+          jobId,
+        );
+      } catch (e: unknown) {
+        // If xfetch threw XApiStop("RATE_LIMIT") and it wasn't caught inside
+        // excavateEarliest, handle it here as a suspend (not a failure).
+        if (e instanceof XApiStop && e.reason === "RATE_LIMIT") {
+          const row = db
+            .prepare("SELECT resume_at FROM jobs WHERE id = ?")
+            .get(jobId) as { resume_at: string | null } | undefined;
+          rateLimitResumeAtMs = row?.resume_at
+            ? new Date(row.resume_at).getTime()
+            : Date.now() + 60_000;
+        } else {
+          const msg = e instanceof Error ? e.message : String(e);
+          failJobInDb(jobId, "EXCAVATION_ERROR", msg, undefined, holdId);
+          return; // finally handles cleanup
+        }
       }
     }
 
@@ -599,6 +631,18 @@ async function runJobAsync(jobId: string): Promise<void> {
         );
         if (holdId) releaseHeld(holdId, "Job canceled while running");
         return; // finally handles token release and complete()
+      }
+    }
+
+    // ── Phase 2: Store Stage 1 result for successful excavations ───────────
+    // Only store Stage 1 if:
+    // 1. This was a real excavation (not a cached result reuse)
+    // 2. We have a valid userId (account was found/created)
+    // 3. We don't already have a Stage 1 for this account
+    if (result.userId && result.apiCalls > 0) {
+      const existingStage1 = getStageResult(result.userId, 1);
+      if (!existingStage1) {
+        storeStageResult(result.userId, 1, result, jobId);
       }
     }
 

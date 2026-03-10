@@ -70,6 +70,21 @@ CREATE TABLE IF NOT EXISTS unlocks (
   UNIQUE(user_id, account_id)
 );
 
+-- Stage results per account (Phase 2: immutable Stage 1 results)
+-- Each account can have multiple stages, but Stage 1 is immutable once created
+CREATE TABLE IF NOT EXISTS stage_results (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  account_id    TEXT NOT NULL REFERENCES accounts(account_id),
+  stage         INTEGER NOT NULL,
+  target_count  INTEGER NOT NULL,
+  collected_count INTEGER NOT NULL,
+  status        TEXT NOT NULL,  -- maps to ExcavationResult.stopReason
+  job_id        TEXT NOT NULL REFERENCES jobs(id),
+  created_at    TEXT NOT NULL,
+  UNIQUE(account_id, stage)  -- one result per account per stage
+);
+CREATE INDEX IF NOT EXISTS idx_stage_results_account ON stage_results(account_id, stage);
+
 -- Credit system tables (Phase 6)
 
 -- User subscriptions (plan, cycle)
