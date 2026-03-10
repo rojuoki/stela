@@ -1130,6 +1130,11 @@ async function collectWindowPass(
           `[checkpoint] COLLECT page saved next_token=${nextToken} exhausted=false pages=${pagesInWindow}`,
         );
       }
+
+      // Rate limiting: delay before the next API call when more pages remain.
+      if (nextToken) {
+        await sleep(EXPLORE_INTER_REQUEST_DELAY_MS);
+      }
     }
 
     // Paginate within window (bounded: MAX_COLLECT_PAGES_PER_WINDOW pages).
@@ -1185,6 +1190,11 @@ async function collectWindowPass(
         console.log(
           `[checkpoint] COLLECT page saved next_token=${nextToken} exhausted=false pages=${pagesInWindow}`,
         );
+      }
+
+      // Rate limiting: delay before the next API call when more pages remain.
+      if (nextToken) {
+        await sleep(EXPLORE_INTER_REQUEST_DELAY_MS);
       }
     }
 
