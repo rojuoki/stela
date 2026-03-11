@@ -1,8 +1,9 @@
 /**
- * Stage Results Management - Phase 2
+ * Stage Results Management - Phase 4
  * 
  * Account-level stage result storage and retrieval.
- * Implements immutable Stage 1 results that are reused instead of re-excavating.
+ * Supports Stage 1 (initial), Stage 2 (+100), and Stage 3 (+100) excavations.
+ * Implements immutable stage results that are reused instead of re-excavating.
  */
 
 import { getDb } from "./db";
@@ -100,6 +101,64 @@ export function createSyntheticExcavationResult(
     apiCalls: 0, // No API calls made when reusing cached result
     storedNewCount: 0, // No new tweets stored when reusing cached result
     errors: [],
-    acquisitionMode: "full_archive", // Assume full_archive (Stage 1 immutability implies successful past excavation)
+    acquisitionMode: "full_archive", // Assume full_archive (Stage immutability implies successful past excavation)
   };
+}
+
+/**
+ * Check if all prerequisite stages exist for the requested stage.
+ * Returns null if prerequisites are met, or missing stage number if not.
+ */
+export function checkStagePrerequisites(accountId: string, targetStage: number): number | null {
+  if (targetStage <= 1) return null; // Stage 1 has no prerequisites
+
+  const db = getDb();
+  
+  // Check that all stages 1 through (targetStage - 1) exist
+  for (let stage = 1; stage < targetStage; stage++) {
+    const prerequisiteStage = db
+      .prepare("SELECT 1 FROM stage_results WHERE account_id = ? AND stage = ?")
+      .get(accountId, stage);
+    
+    if (!prerequisiteStage) {
+      return stage; // Return the missing prerequisite stage number
+    }
+  }
+  
+  return null; // All prerequisites satisfied
+}
+
+/**
+ * Get the highest completed stage for an account.
+ * Returns 0 if no stages completed.
+ */
+export function getAccountHighestStage(accountId: string): number {
+  const db = getDb();
+  const result = db
+    .prepare("SELECT MAX(stage) as max_stage FROM stage_results WHERE account_id = ?")
+    .get(accountId) as { max_stage: number | null } | undefined;
+  
+  return result?.max_stage ?? 0;
+}
+
+/**
+ * Calculate the target count for a stage expansion.
+ * Stage 2 = Stage 1 + 100, Stage 3 = Stage 2 + 100, etc.
+ */
+export function calculateStageTarget(baselineCount: number, targetStage: number): number {
+  if (targetStage <= 1) return baselineCount;
+  
+  // Each stage beyond 1 adds 100 posts to the previous stage's collected count
+  return baselineCount + (100 * (targetStage - 1));
+}
+
+/**
+ * Get all stage results for an account, ordered by stage.
+ * Used for stage expansion planning and UI display.
+ */
+export function getAccountStageResults(accountId: string): StageResult[] {
+  const db = getDb();
+  return db
+    .prepare("SELECT * FROM stage_results WHERE account_id = ? ORDER BY stage ASC")
+    .all(accountId) as StageResult[];
 }

@@ -26,17 +26,25 @@
 
 import { randomUUID } from "crypto";
 import { getDb } from "./db";
-import { excavateEarliest, type ExcavationCheckpoint, type ExcavationResult } from "./excavate";
+import { excavateEarliest, excavateStageExpansion, type ExcavationCheckpoint, type ExcavationResult } from "./excavate";
 import { captureHeld, releaseHeld } from "./repository";
 import { tokenPool } from "./tokenPool";
 import { XApiStop } from "./xclient";
-import { getStageResult, storeStageResult, createSyntheticExcavationResult } from "./stageResults";
+import { 
+  getStageResult, 
+  storeStageResult, 
+  createSyntheticExcavationResult,
+  checkStagePrerequisites,
+  calculateStageTarget
+} from "./stageResults";
 
 export interface JobRecord {
   id: string;
   account_username: string;
   account_id: string | null;
   requested_limit: number;
+  /** Phase 4: Stage being excavated (1, 2, 3, etc.) - defaults to 1 for backward compatibility */
+  stage: number;
   status: "queued" | "running" | "succeeded" | "failed" | "canceled";
   error_code: string | null;
   error_message: string | null;
@@ -399,24 +407,70 @@ export function computeTargetCount(accountCreatedAt: string | null | undefined):
  * @param accountCreatedAt  ISO string from the accounts table (if already cached).
  *                          Used to compute the dynamic target count; defaults to 100
  *                          when the account is not yet in the local DB.
+ * @param stage             Stage to excavate (1, 2, 3, etc.) - defaults to 1
  */
 export function createAndRunJob(
   username: string,
   accountCreatedAt?: string | null,
   holdId?: string,
+  stage: number = 1,
 ): string {
   const db = getDb();
   const jobId = randomUUID();
   const now = new Date().toISOString();
-  const targetCount = computeTargetCount(accountCreatedAt);
+  
+  // For Stage 1, use the normal target computation
+  // For higher stages, we'll compute the target during execution based on previous stage
+  const targetCount = stage === 1 ? computeTargetCount(accountCreatedAt) : 0; // Will be computed at execution time
 
   db.prepare(`
-    INSERT INTO jobs (id, account_username, requested_limit, hold_id, status, created_at)
-    VALUES (?, ?, ?, ?, 'queued', ?)
-  `).run(jobId, username.toLowerCase(), targetCount, holdId ?? null, now);
+    INSERT INTO jobs (id, account_username, requested_limit, stage, hold_id, status, created_at)
+    VALUES (?, ?, ?, ?, ?, 'queued', ?)
+  `).run(jobId, username.toLowerCase(), targetCount, stage, holdId ?? null, now);
 
   globalQueue.register(jobId);
   return jobId;
+}
+
+/**
+ * Create a stage expansion job (Stage 2, Stage 3).
+ * Validates prerequisites before creating the job.
+ */
+export function createStageExpansionJob(
+  username: string,
+  targetStage: number,
+  holdId?: string,
+): { jobId: string; error?: never } | { error: string; jobId?: never } {
+  if (targetStage <= 1) {
+    return { error: "Use createAndRunJob for Stage 1" };
+  }
+
+  const db = getDb();
+  
+  // Check if account exists
+  const account = db
+    .prepare("SELECT account_id, created_at FROM accounts WHERE username = ?")
+    .get(username.toLowerCase()) as { account_id: string; created_at: string } | undefined;
+
+  if (!account) {
+    return { error: "Account not found - must complete Stage 1 first" };
+  }
+
+  // Check prerequisites
+  const missingPrerequisite = checkStagePrerequisites(account.account_id, targetStage);
+  if (missingPrerequisite !== null) {
+    return { error: `Stage ${missingPrerequisite} must be completed first` };
+  }
+
+  // Check if target stage already exists
+  const existingStage = getStageResult(account.account_id, targetStage);
+  if (existingStage) {
+    return { error: `Stage ${targetStage} already completed for this account` };
+  }
+
+  // All checks passed - create the expansion job
+  const jobId = createAndRunJob(username, account.created_at, holdId, targetStage);
+  return { jobId };
 }
 
 /** Read-only job lookup. Never triggers X API calls. */
@@ -451,9 +505,9 @@ async function runJobAsync(jobId: string): Promise<void> {
 
   try {
     const jobRow = db
-      .prepare("SELECT account_username, requested_limit, hold_id, resume_state, status FROM jobs WHERE id = ?")
+      .prepare("SELECT account_username, requested_limit, stage, hold_id, resume_state, status FROM jobs WHERE id = ?")
       .get(jobId) as
-      | { account_username: string; requested_limit: number; hold_id: string | null; resume_state: string | null; status: string }
+      | { account_username: string; requested_limit: number; stage: number; hold_id: string | null; resume_state: string | null; status: string }
       | undefined;
 
     if (!jobRow) {
@@ -472,7 +526,7 @@ async function runJobAsync(jobId: string): Promise<void> {
       return; // finally handles cleanup
     }
 
-    const { account_username: username, requested_limit: limit, hold_id: holdId } = jobRow;
+    const { account_username: username, requested_limit: limit, stage: jobStage, hold_id: holdId } = jobRow;
 
     // Restore checkpoint from previous run (if any).
     let initialCheckpoint: ExcavationCheckpoint | null = null;
@@ -520,26 +574,23 @@ async function runJobAsync(jobId: string): Promise<void> {
     let result: ExcavationResult | null = null;
     let rateLimitResumeAtMs: number | null = null;
 
-    // ── Phase 2: Check for existing Stage 1 result ──────────────────────────
-    // Before starting excavation, check if Stage 1 already exists for this account.
-    // If it does, reuse the immutable result instead of excavating again.
+    // ── Phase 4: Check for existing stage result and handle stage-specific excavation ──
     
     // First, we need to get the account info to check for existing stage results.
-    // We'll do a quick lookup to get account_id and created_at if the account exists.
     const existingAccount = db
       .prepare("SELECT account_id, created_at FROM accounts WHERE username = ?")
       .get(username.toLowerCase()) as { account_id: string; created_at: string } | undefined;
 
     if (existingAccount) {
-      const existingStage1 = getStageResult(existingAccount.account_id, 1);
-      if (existingStage1) {
+      const existingStageResult = getStageResult(existingAccount.account_id, jobStage);
+      if (existingStageResult) {
         console.log(
-          `[stage] Reusing existing Stage 1 result for @${username}: ${existingStage1.collected_count}/${existingStage1.target_count} tweets (job_id=${existingStage1.job_id})`
+          `[stage] Reusing existing Stage ${jobStage} result for @${username}: ${existingStageResult.collected_count}/${existingStageResult.target_count} tweets (job_id=${existingStageResult.job_id})`
         );
         
         // Create a synthetic excavation result based on the stored stage result
         result = createSyntheticExcavationResult(
-          existingStage1, 
+          existingStageResult, 
           username, 
           existingAccount.created_at
         );
@@ -548,19 +599,47 @@ async function runJobAsync(jobId: string): Promise<void> {
       }
     }
 
-    // Only run excavation if we don't have a cached Stage 1 result
+    // Only run excavation if we don't have a cached stage result
     if (!result) {
       try {
-        result = await excavateEarliest(
-          username,
-          limit,
-          writeProgress,
-          token,
-          onRateLimit,
-          saveCheckpoint,
-          initialCheckpoint,
-          jobId,
-        );
+        if (jobStage === 1) {
+          // Stage 1: Use normal excavation
+          result = await excavateEarliest(
+            username,
+            limit,
+            writeProgress,
+            token,
+            onRateLimit,
+            saveCheckpoint,
+            initialCheckpoint,
+            jobId,
+          );
+        } else {
+          // Stage 2+: Use expansion excavation
+          if (!existingAccount) {
+            throw new Error(`Account not found for Stage ${jobStage} expansion`);
+          }
+
+          // Get the previous stage result as baseline
+          const previousStageResult = getStageResult(existingAccount.account_id, jobStage - 1);
+          if (!previousStageResult) {
+            throw new Error(`Stage ${jobStage - 1} must be completed before Stage ${jobStage}`);
+          }
+
+          console.log(
+            `[stage] Starting Stage ${jobStage} expansion from Stage ${jobStage - 1} baseline: ${previousStageResult.collected_count} tweets`
+          );
+
+          result = await excavateStageExpansion(
+            username,
+            jobStage,
+            { collected_count: previousStageResult.collected_count, account_id: existingAccount.account_id },
+            writeProgress,
+            token,
+            onRateLimit,
+            jobId,
+          );
+        }
       } catch (e: unknown) {
         // If xfetch threw XApiStop("RATE_LIMIT") and it wasn't caught inside
         // excavateEarliest, handle it here as a suspend (not a failure).
@@ -634,15 +713,15 @@ async function runJobAsync(jobId: string): Promise<void> {
       }
     }
 
-    // ── Phase 2: Store Stage 1 result for successful excavations ───────────
-    // Only store Stage 1 if:
+    // ── Phase 4: Store stage result for successful excavations ──────────────
+    // Only store stage result if:
     // 1. This was a real excavation (not a cached result reuse)
     // 2. We have a valid userId (account was found/created)
-    // 3. We don't already have a Stage 1 for this account
+    // 3. We don't already have this stage for this account
     if (result.userId && result.apiCalls > 0) {
-      const existingStage1 = getStageResult(result.userId, 1);
-      if (!existingStage1) {
-        storeStageResult(result.userId, 1, result, jobId);
+      const existingStageResult = getStageResult(result.userId, jobStage);
+      if (!existingStageResult) {
+        storeStageResult(result.userId, jobStage, result, jobId);
       }
     }
 
@@ -682,8 +761,8 @@ async function runJobAsync(jobId: string): Promise<void> {
     if (result.userId && result.fetchedCount > 0) {
       db.prepare(`
         INSERT OR IGNORE INTO unlocks (user_id, account_id, stage, job_id, unlocked_at)
-        VALUES ('anonymous', ?, 1, ?, ?)
-      `).run(result.userId, jobId, new Date().toISOString());
+        VALUES ('anonymous', ?, ?, ?, ?)
+      `).run(result.userId, jobStage, jobId, new Date().toISOString());
     }
 
     console.log(

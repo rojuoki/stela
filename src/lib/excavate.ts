@@ -221,6 +221,85 @@ export interface ExcavationCheckpoint {
   split_window_queue?: SplitWindow[];
 }
 
+// ─── Stage Expansion Entry Point (Phase 4) ────────────────────────────────
+
+/**
+ * Excavate a stage expansion (Stage 2, Stage 3) for an account.
+ * Extends the previous stage's result by approximately +100 posts.
+ * 
+ * @param username - Twitter username
+ * @param targetStage - Stage to excavate (2, 3, etc.)
+ * @param baselineStageResult - Previous stage result to expand from
+ * @param onProgress - Progress callback
+ * @param token - Bearer token
+ * @param onRateLimit - Rate limit callback
+ * @param jobId - Job ID for token management
+ */
+export async function excavateStageExpansion(
+  username: string,
+  targetStage: number,
+  baselineStageResult: { collected_count: number; account_id: string },
+  onProgress?: (apiCalls: number) => void,
+  token?: string,
+  onRateLimit?: (resetEpochSec: number) => void,
+  jobId?: string,
+): Promise<ExcavationResult> {
+  const stats = createStats(token, onRateLimit, jobId);
+  
+  // Calculate target: baseline + 100 for this stage
+  const effectiveLimit = baselineStageResult.collected_count + 100;
+  
+  let user: XUser;
+  try {
+    user = await getUserByUsername(username, stats);
+  } catch (e) {
+    if (e instanceof XApiStop) {
+      return errorResult(username, effectiveLimit, stats, e.reason as StopReason, "full_archive");
+    }
+    throw e;
+  }
+
+  if (user.protected) {
+    return errorResult(
+      username,
+      effectiveLimit,
+      stats,
+      "PROTECTED_OR_SUSPENDED_OR_NOT_FOUND",
+      "full_archive",
+    );
+  }
+
+  upsertAccount(user);
+
+  console.log(
+    `[excavate-expansion] @${username} Stage ${targetStage}: expanding from ${baselineStageResult.collected_count} to target ${effectiveLimit} (+100)`
+  );
+
+  // For stage expansion, we need to excavate beyond what we already have
+  // We'll use a modified approach that starts from the baseline and tries to get more
+  const query = `from:${user.username} -is:retweet`;
+  
+  try {
+    return await excavateStageExpansionInternal(
+      user,
+      query,
+      effectiveLimit,
+      baselineStageResult.collected_count,
+      targetStage,
+      stats,
+      onProgress,
+    );
+  } catch (e) {
+    if (e instanceof XApiStop && e.statusCode === 403) {
+      console.log(
+        `[excavate-expansion] Full-archive unavailable (403) for @${username} Stage ${targetStage} — falling back to timeline`
+      );
+      return await excavateStageExpansionTimeline(user, effectiveLimit, baselineStageResult.collected_count, targetStage, stats, onProgress);
+    }
+    throw e;
+  }
+}
+
 // ─── Entry point ───────────────────────────────────────
 
 export async function excavateEarliest(
@@ -1604,6 +1683,284 @@ function loadTweetsFromDbByIds(accountId: string, ids: string[]): XTweet[] {
        WHERE account_id = ? AND post_id IN (${placeholders})`,
     )
     .all(accountId, ...ids) as Array<{
+    id: string;
+    created_at: string;
+    text: string;
+    like_count: number;
+    retweet_count: number;
+    reply_count: number;
+    media_json: string | null;
+  }>;
+
+  return rows.map((r) => ({
+    id: r.id,
+    author_id: accountId,
+    created_at: r.created_at,
+    text: r.text,
+    public_metrics: {
+      like_count: r.like_count,
+      retweet_count: r.retweet_count,
+      reply_count: r.reply_count,
+      quote_count: 0,
+      impression_count: 0,
+    },
+    attachments: r.media_json ? JSON.parse(r.media_json) : undefined,
+  }));
+}
+
+// ─── Stage Expansion Implementation (Phase 4) ─────────────────────────────
+
+async function excavateStageExpansionInternal(
+  user: XUser,
+  query: string,
+  targetLimit: number,
+  baselineCount: number,
+  targetStage: number,
+  stats: ApiCallStats,
+  onProgress?: (apiCalls: number) => void,
+): Promise<ExcavationResult> {
+  const accountCreated = new Date(user.created_at);
+  const now = new Date(Date.now() - END_TIME_SAFETY_MS);
+  
+  console.log(
+    `[excavate-expansion] @${user.username} Stage ${targetStage}: baseline=${baselineCount}, target=${targetLimit}, expanding by ${targetLimit - baselineCount}`
+  );
+
+  // Load existing tweets to avoid duplicates and build expansion from baseline
+  const collected = new Map<string, XTweet>();
+  const existingTweets = loadTweetsFromDbByAccount(user.id);
+  for (const tweet of existingTweets) {
+    collected.set(tweet.id, tweet);
+  }
+
+  console.log(
+    `[excavate-expansion] Loaded ${collected.size} existing tweets as baseline for Stage ${targetStage}`
+  );
+
+  // Calculate how many additional tweets we need
+  const additionalNeeded = targetLimit - collected.size;
+  if (additionalNeeded <= 0) {
+    console.log(
+      `[excavate-expansion] Stage ${targetStage} target already satisfied with existing tweets`
+    );
+    return createExpansionResult(user, collected, targetLimit, baselineCount, targetStage, stats);
+  }
+
+  console.log(
+    `[excavate-expansion] Need ${additionalNeeded} additional tweets for Stage ${targetStage}`
+  );
+
+  // Run expansion collection to get more tweets
+  // This uses a similar approach to the main excavation but focuses on extending the existing set
+  const expansionStop = await collectExpansionTweets(
+    query,
+    accountCreated,
+    now,
+    stats,
+    collected,
+    MAX_API_CALLS,
+    additionalNeeded,
+    user.username,
+    onProgress,
+    { userId: user.id }
+  );
+
+  console.log(
+    `[excavate-expansion] Stage ${targetStage} expansion complete: collected=${collected.size}, stop=${expansionStop}`
+  );
+
+  return createExpansionResult(user, collected, targetLimit, baselineCount, targetStage, stats, expansionStop);
+}
+
+async function excavateStageExpansionTimeline(
+  user: XUser,
+  targetLimit: number,
+  baselineCount: number,
+  targetStage: number,
+  stats: ApiCallStats,
+  onProgress?: (apiCalls: number) => void,
+): Promise<ExcavationResult> {
+  console.log(
+    `[excavate-expansion] @${user.username} Stage ${targetStage} timeline fallback — limited scope expansion`
+  );
+
+  // For timeline fallback, load existing tweets and try to extend via timeline API
+  const collected = new Map<string, XTweet>();
+  const existingTweets = loadTweetsFromDbByAccount(user.id);
+  for (const tweet of existingTweets) {
+    collected.set(tweet.id, tweet);
+  }
+
+  const additionalNeeded = targetLimit - collected.size;
+  if (additionalNeeded <= 0) {
+    return createExpansionResult(user, collected, targetLimit, baselineCount, targetStage, stats);
+  }
+
+  // Use timeline API to try to get additional tweets
+  // This is a simplified expansion that works within timeline constraints
+  try {
+    const timelinePage = await getUserTweetsInWindow(
+      user.id,
+      user.created_at,
+      new Date().toISOString(),
+      stats,
+    );
+
+    // Store timeline tweets (they may include new tweets not in our baseline)
+    if (timelinePage.tweets.length > 0) {
+      storeTweets(user.id, timelinePage.tweets, timelinePage.media);
+    }
+
+    for (const tweet of timelinePage.tweets) {
+      collected.set(tweet.id, tweet);
+    }
+  } catch (e) {
+    console.log(`[excavate-expansion] Timeline expansion failed: ${e instanceof Error ? e.message : e}`);
+  }
+
+  return createExpansionResult(user, collected, targetLimit, baselineCount, targetStage, stats, "ACCOUNT_HAS_LESS_THAN_LIMIT");
+}
+
+async function collectExpansionTweets(
+  query: string,
+  accountCreated: Date,
+  now: Date,
+  stats: ApiCallStats,
+  collected: Map<string, XTweet>,
+  callCeiling: number,
+  additionalNeeded: number,
+  username: string,
+  onProgress?: (apiCalls: number) => void,
+  checkpointOpts?: { userId: string }
+): Promise<StopReason> {
+  // Use a time-based expansion approach to find additional tweets
+  // We'll scan from account creation forward, focusing on periods we may have missed
+  
+  let stopReason: StopReason = "ACCOUNT_HAS_LESS_THAN_LIMIT";
+  const startTime = accountCreated;
+  const endTime = now;
+  
+  // Try to find additional tweets by scanning in larger time windows
+  // This is a simplified expansion that focuses on finding tweets we missed
+  let windowStart = startTime;
+  let spanDays = 365; // Start with yearly windows
+  
+  while (
+    collected.size < (collected.size + additionalNeeded) && 
+    stats.totalCalls < callCeiling &&
+    windowStart < endTime
+  ) {
+    const windowEnd = minDate(addDays(windowStart, spanDays), endTime);
+    
+    try {
+      const page = await searchAllTweets(
+        query,
+        windowStart.toISOString(),
+        windowEnd.toISOString(),
+        stats,
+        100,
+        undefined,
+        "recency",
+      );
+
+      if (page.tweets.length > 0) {
+        // Store tweets immediately for persistence
+        if (checkpointOpts?.userId) {
+          storeTweets(checkpointOpts.userId, page.tweets, page.media);
+        }
+
+        // Add new tweets to collection (Map handles duplicates)
+        for (const tweet of page.tweets) {
+          collected.set(tweet.id, tweet);
+        }
+
+        console.log(
+          `[expansion] Window [${windowStart.toISOString().slice(0, 10)}, ${windowEnd.toISOString().slice(0, 10)}]: +${page.tweets.length} tweets, total=${collected.size}`
+        );
+      }
+
+      onProgress?.(stats.totalCalls);
+      
+      // Move to next window
+      windowStart = windowEnd;
+      
+      // Break if we found enough
+      if (page.tweets.length >= additionalNeeded) {
+        stopReason = "OK_LIMIT_REACHED";
+        break;
+      }
+      
+    } catch (e) {
+      if (e instanceof XApiStop) {
+        stopReason = e.reason as StopReason;
+        break;
+      }
+      throw e;
+    }
+    
+    // Prevent tight loops
+    await sleep(EXPLORE_INTER_REQUEST_DELAY_MS);
+  }
+
+  if (stats.totalCalls >= callCeiling) {
+    stopReason = "MAX_API_CALLS_REACHED";
+  }
+
+  return stopReason;
+}
+
+function createExpansionResult(
+  user: XUser, 
+  collected: Map<string, XTweet>, 
+  targetLimit: number,
+  baselineCount: number, 
+  targetStage: number, 
+  stats: ApiCallStats,
+  stopReason: StopReason = "OK_LIMIT_REACHED"
+): ExcavationResult {
+  // Sort tweets chronologically and take the earliest ones up to target
+  const sorted = [...collected.values()]
+    .sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime())
+    .slice(0, targetLimit);
+
+  // Store the final sorted set
+  const storedNewCount = storeTweets(user.id, sorted, []); // Media already stored during collection
+
+  const actualStopReason = sorted.length >= targetLimit ? "OK_LIMIT_REACHED" : stopReason;
+
+  console.log(
+    `[excavate-expansion] @${user.username} Stage ${targetStage} complete: fetched=${sorted.length} target=${targetLimit} baseline=${baselineCount} new_stored=${storedNewCount} stop=${actualStopReason}`
+  );
+
+  return {
+    username: user.username,
+    userId: user.id,
+    createdAt: user.created_at,
+    requestedLimit: targetLimit,
+    fetchedCount: sorted.length,
+    stopReason: actualStopReason,
+    apiCalls: stats.totalCalls,
+    storedNewCount,
+    errors: stats.errors,
+    acquisitionMode: "full_archive",
+  };
+}
+
+/**
+ * Load tweets for an account from the database.
+ * Used as baseline for stage expansions.
+ */
+function loadTweetsFromDbByAccount(accountId: string): XTweet[] {
+  const db = getDb();
+  const rows = db
+    .prepare(
+      `SELECT post_id AS id, created_at, full_text AS text,
+              like_count, retweet_count, reply_count, media_json
+       FROM tweets
+       WHERE account_id = ?
+       ORDER BY created_at ASC`
+    )
+    .all(accountId) as Array<{
     id: string;
     created_at: string;
     text: string;

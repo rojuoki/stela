@@ -22,6 +22,7 @@ CREATE TABLE IF NOT EXISTS jobs (
   account_username TEXT NOT NULL,
   account_id    TEXT,
   requested_limit INTEGER NOT NULL DEFAULT 100,
+  stage         INTEGER NOT NULL DEFAULT 1, -- Phase 4: Stage being excavated
   hold_id       TEXT, -- Phase 6: credit hold reference
   status        TEXT NOT NULL DEFAULT 'queued'
                 CHECK(status IN ('queued','running','succeeded','failed','canceled')),
