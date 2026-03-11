@@ -70,4 +70,35 @@ function runMigrations(db: Database.Database): void {
     })();
     console.log("[db] Migration M-003: made unlocks.job_id nullable");
   }
+
+  // M-005: add stage column to jobs table (Phase 4: Stage-aware excavation)
+  if (!cols.some((c) => c.name === "stage")) {
+    db.prepare("ALTER TABLE jobs ADD COLUMN stage INTEGER NOT NULL DEFAULT 1").run();
+    console.log("[db] Migration M-005: added jobs.stage for stage-aware excavation");
+  }
+
+  // M-006: add stage column to unlocks table and update UNIQUE constraint (Phase 3: Stage-aware unlock tracking)
+  const unlockCols2 = db.prepare("PRAGMA table_info(unlocks)").all() as Array<{ name: string }>;
+  if (!unlockCols2.some((c) => c.name === "stage")) {
+    db.transaction(() => {
+      // Create new table with stage column and updated UNIQUE constraint
+      db.exec(`
+        CREATE TABLE unlocks_stage (
+          id          INTEGER PRIMARY KEY AUTOINCREMENT,
+          user_id     TEXT NOT NULL DEFAULT 'anonymous',
+          account_id  TEXT NOT NULL,
+          stage       INTEGER NOT NULL DEFAULT 1,
+          job_id      TEXT,
+          unlocked_at TEXT NOT NULL,
+          UNIQUE(user_id, account_id, stage)
+        );
+        INSERT INTO unlocks_stage (id, user_id, account_id, stage, job_id, unlocked_at)
+        SELECT id, user_id, account_id, 1, job_id, unlocked_at FROM unlocks;
+        DROP TABLE unlocks;
+        ALTER TABLE unlocks_stage RENAME TO unlocks;
+        CREATE INDEX IF NOT EXISTS idx_unlocks_user_account ON unlocks(user_id, account_id);
+      `);
+    })();
+    console.log("[db] Migration M-006: added unlocks.stage and updated UNIQUE constraint for stage-aware unlocks");
+  }
 }

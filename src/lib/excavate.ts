@@ -1006,6 +1006,9 @@ async function collectWindowPass(
     splitQueue = [...checkpointOpts.resumeCheckpoint.split_window_queue];
   }
   
+  // Track pending normal window advancement after split processing
+  let pendingNormalWindowAdvancement: { to: Date; span: number } | null = null;
+  
   // Dedupe-only state for parent split windows (not counted toward target)
   const splitParentTweets = new Set<string>();
   
@@ -1079,10 +1082,22 @@ async function collectWindowPass(
       isProcessingSplit = true;
       
       console.log(
-        `[collect] @${username} processing split window=[${currentWindowStart.toISOString().slice(0, 10)}, ${currentWindowEnd.toISOString().slice(0, 10)}] spanDays=${currentSpanDays} remaining_splits=${splitQueue.length}`,
+        `[collect][split] @${username} processing child window=[${currentWindowStart.toISOString()}, ${currentWindowEnd.toISOString()}] ` +
+        `spanDays=${currentSpanDays} remaining_splits=${splitQueue.length}`
       );
     } else {
       // ── Priority 2: Normal window (independent progression) ─────────────────
+      
+      // FIX: Apply pending normal window advancement after split processing completes
+      if (pendingNormalWindowAdvancement) {
+        normalWindowStart = pendingNormalWindowAdvancement.to;
+        normalWindowSpan = pendingNormalWindowAdvancement.span;
+        pendingNormalWindowAdvancement = null;
+        console.log(
+          `[collect] Applied pending normal window advancement to ${normalWindowStart.toISOString().slice(0, 10)} (post-split)`
+        );
+      }
+      
       if (normalWindowStart >= end) break;
       
       currentWindowStart = normalWindowStart;
@@ -1141,10 +1156,15 @@ async function collectWindowPass(
         );
         
         const mid = new Date((currentWindowStart.getTime() + currentWindowEnd.getTime()) / 2);
+        
+        // FIX: Prevent boundary overlap by advancing right window start by 1ms
+        const rightStart = new Date(mid.getTime() + 1);
+        
         const leftSpan = Math.ceil((mid.getTime() - currentWindowStart.getTime()) / (24 * 60 * 60 * 1000));
-        const rightSpan = Math.ceil((currentWindowEnd.getTime() - mid.getTime()) / (24 * 60 * 60 * 1000));
+        const rightSpan = Math.ceil((currentWindowEnd.getTime() - rightStart.getTime()) / (24 * 60 * 60 * 1000));
         
         // Enqueue child windows (chronological order: left first)
+        // Left: [start, mid] (inclusive), Right: [mid+1ms, end] (exclusive at boundary)
         splitQueue.push(
           {
             start: currentWindowStart.toISOString(),
@@ -1152,14 +1172,14 @@ async function collectWindowPass(
             spanDays: leftSpan
           },
           {
-            start: mid.toISOString(),
+            start: rightStart.toISOString(),
             end: currentWindowEnd.toISOString(),
             spanDays: rightSpan
           }
         );
         
         console.log(
-          `[split] window=[${currentWindowStart.toISOString().slice(0, 10)}, ${currentWindowEnd.toISOString().slice(0, 10)}] -> [${currentWindowStart.toISOString().slice(0, 10)}, ${mid.toISOString().slice(0, 10)}], [${mid.toISOString().slice(0, 10)}, ${currentWindowEnd.toISOString().slice(0, 10)}]`,
+          `[split] window=[${currentWindowStart.toISOString().slice(0, 10)}, ${currentWindowEnd.toISOString().slice(0, 10)}] -> [${currentWindowStart.toISOString().slice(0, 10)}, ${mid.toISOString().slice(0, 10)}], [${rightStart.toISOString().slice(0, 10)}, ${currentWindowEnd.toISOString().slice(0, 10)}]`,
         );
         
         // Store parent page1 tweets for dedupe only (NOT in collected)
@@ -1172,11 +1192,8 @@ async function collectWindowPass(
         
         onProgress?.(stats.totalCalls);
         
-        // Advance normal window pointer (split doesn't block normal progression)
-        normalWindowStart = currentWindowEnd;
-        // Use current span for next normal window (no adaptive change for split parent)
-        // Actual adaptive logic will be applied when child windows are processed
-        normalWindowSpan = currentSpanDays;
+        // FIX: Queue normal window advancement for after split processing completes
+        pendingNormalWindowAdvancement = { to: currentWindowEnd, span: currentSpanDays };
         
         continue; // Process split queue next
       }
@@ -1298,12 +1315,27 @@ async function collectWindowPass(
     onProgress?.(stats.totalCalls);
     
     // Apply dedupe when processing child windows
+    let dedupeFiltered = 0;
     for (const t of windowTweets) {
       if (!splitParentTweets.has(t.id)) { // Skip parent duplicates
         collected.set(t.id, t);
+      } else {
+        dedupeFiltered++;
       }
     }
     const uniqueNew = collected.size - sizeBeforeWindow;
+    
+    // Enhanced debug logging for boundary analysis
+    if (windowTweets.length > 0) {
+      const firstTweet = windowTweets[0];
+      const lastTweet = windowTweets[windowTweets.length - 1];
+      console.log(
+        `[collect][boundary] window=[${currentWindowStart.toISOString().slice(0, 10)}, ${currentWindowEnd.toISOString().slice(0, 10)}] ` +
+        `tweets=${windowTweets.length} uniqueNew=${uniqueNew} dedupeFiltered=${dedupeFiltered} ` +
+        `first=${firstTweet.created_at.slice(0, 19)} last=${lastTweet.created_at.slice(0, 19)} ` +
+        `splitChild=${isProcessingSplit}`
+      );
+    }
 
     // ── Incremental storage — persist this window's tweets to DB so they
     //    survive a 429 suspend and can be reloaded on resume.
