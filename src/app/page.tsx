@@ -183,6 +183,17 @@ export default function Home() {
     }
   };
 
+  // Handle URL parameters for direct username lookup (from preview pages)
+  useEffect(() => {
+    const urlParams = new URLSearchParams(window.location.search);
+    const urlUsername = urlParams.get('username');
+    if (urlUsername && !username) {
+      const cleanUsername = urlUsername.trim().replace(/^@/, '');
+      setUsername(cleanUsername);
+      manualLookup(cleanUsername);
+    }
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === "Enter") {
       e.preventDefault();
