@@ -440,6 +440,9 @@ export default function UserPage() {
   const joinDate = formatJoinDate(accountData.created_at);
   const hasResults = tweets.length > 0;
 
+  // Determine user state for CTA - in production, always guest; in dev, check credits
+  const isLoggedIn = credits > 0; // Simple heuristic - logged in users typically have credits
+
   return (
     <main className="max-w-2xl mx-auto px-4 py-12">
       {/* Navigation */}
@@ -469,51 +472,170 @@ export default function UserPage() {
       {/* Preview Phase */}
       {uiPhase === "preview" && (
         <>
-          {/* Description */}
-          <div className="mb-8 p-6 bg-zinc-900 rounded-xl border border-zinc-800">
-            <h2 className="text-lg font-semibold mb-3">Discover Early Posts</h2>
-            <p className="text-zinc-300 mb-4">
-              Explore the earliest posts from {displayName}'s timeline. 
-              Uncover their first thoughts, early interactions, and the origins of their presence on X.
-            </p>
-            <p className="text-zinc-400 text-sm">
-              Excavation reveals up to 100 of the earliest posts, providing unique insights into 
-              an account's history and evolution over time.
-            </p>
-          </div>
-
           {/* Protected Account Warning */}
           {accountData.protected && (
             <div className="mb-8 p-4 bg-orange-900/20 border border-orange-800/50 rounded-lg">
               <div className="flex items-center gap-2 text-orange-300 text-sm">
                 <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 20 20">
-                  <path fillRule="evenodd" d="M5 9V7a5 5 0 0110 0v2a2 2 0 012 2v5a2 2 0 01-2 2H5a2 2 0 01-2-2v-5a2 2 0 012-2zm8-2v2H7V7a3 3 0 016 0z" clipRule="evenodd" />
+                  <path fillRule="evenodd" d="M5 9V7a5 5 0 0110 0v2a2 2 0 012 2v5a2 2 0 01-2 2H5a2 2 0 01-2-2v-5a2 2 0 012-2zm8-2v2H7V7a3 3 0 616 0z" clipRule="evenodd" />
                 </svg>
                 This account is protected and cannot be excavated.
               </div>
             </div>
           )}
 
-          {/* Call to Action */}
-          <div className="text-center">
-            {accountData.protected ? (
-              <div className="inline-flex items-center gap-2 bg-zinc-800 text-zinc-400 font-semibold px-6 py-3 rounded-lg cursor-not-allowed">
-                <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 20 20">
-                  <path fillRule="evenodd" d="M5 9V7a5 5 0 0110 0v2a2 2 0 012 2v5a2 2 0 01-2 2H5a2 2 0 01-2-2v-5a2 2 0 012-2zm8-2v2H7V7a3 3 0 016 0z" clipRule="evenodd" />
-                </svg>
-                Account Protected
+          {/* Excavation Result Preview Container */}
+          <div className="relative mb-8">
+            {/* Blurred Engagement Chart */}
+            <div className="mb-6">
+              <div className="flex items-center justify-between mb-2">
+                <h2 className="text-xs font-semibold text-zinc-400 uppercase tracking-wide">
+                  Engagement across earliest posts
+                </h2>
+                <div className="flex items-center gap-3">
+                  <div className="flex items-center gap-1.5">
+                    <span className="w-2.5 h-2.5 rounded-sm inline-block bg-blue-500" />
+                    <span className="text-[10px] text-zinc-500">Likes</span>
+                  </div>
+                  <div className="flex items-center gap-1.5">
+                    <span className="w-3 h-0.5 inline-block rounded bg-emerald-500" />
+                    <span className="text-[10px] text-zinc-500">Retweets</span>
+                  </div>
+                  <div className="flex items-center gap-1.5">
+                    <span className="w-3 h-0.5 inline-block rounded bg-amber-500" />
+                    <span className="text-[10px] text-zinc-500">Replies</span>
+                  </div>
+                </div>
               </div>
-            ) : (
-              <button
-                onClick={() => handleExcavate(false)}
-                className="inline-flex items-center gap-2 bg-white text-black font-semibold px-6 py-3 rounded-lg hover:bg-zinc-200 transition-colors"
-              >
-                <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
-                </svg>
-                Excavate Earliest Posts
-              </button>
+
+              <div className="relative h-24 bg-zinc-900 rounded-lg border border-zinc-800 p-2 blur-sm">
+                <div className="flex items-end gap-px h-full">
+                  {[...Array(20)].map((_, i) => (
+                    <div
+                      key={i}
+                      className="flex-1 bg-blue-500 rounded-t-sm"
+                      style={{ height: `${Math.random() * 80 + 20}%` }}
+                    />
+                  ))}
+                </div>
+              </div>
+            </div>
+
+            {/* Blurred Tweet List */}
+            <div className="border border-zinc-800 rounded-xl overflow-hidden blur-sm">
+              {[...Array(5)].map((_, i) => (
+                <div key={i} className="px-4 py-3 border-b border-zinc-800 last:border-b-0">
+                  <div className="flex items-center gap-2 mb-1.5">
+                    <span className="text-xs text-zinc-500">Mar {i + 1}, 2009</span>
+                  </div>
+                  <p className="text-sm text-zinc-200 mb-2">
+                    {i === 0 && "This is where you'll see the earliest posts from this account's timeline..."}
+                    {i === 1 && "Discover authentic thoughts and interactions from the very beginning..."}
+                    {i === 2 && "Uncover the origins and evolution of their online presence..."}
+                    {i === 3 && "See how their voice and perspective developed over time..."}
+                    {i === 4 && "Experience the full journey from their first posts to today..."}
+                  </p>
+                  <div className="flex gap-4 text-xs text-zinc-500">
+                    <span className="flex items-center gap-1">
+                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                        <path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z" />
+                      </svg>
+                      {Math.floor(Math.random() * 100)}
+                    </span>
+                    <span className="flex items-center gap-1">
+                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                        <polyline points="17 1 21 5 17 9" />
+                        <path d="M3 11V9a4 4 0 0 1 4-4h14" />
+                        <polyline points="7 23 3 19 7 15" />
+                        <path d="M21 13v2a4 4 0 0 1-4 4H3" />
+                      </svg>
+                      {Math.floor(Math.random() * 20)}
+                    </span>
+                    <span className="flex items-center gap-1">
+                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                        <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+                      </svg>
+                      {Math.floor(Math.random() * 10)}
+                    </span>
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            {/* CTA Overlay - positioned above the blurred content */}
+            {!accountData.protected && (
+              <div className="absolute inset-0 flex items-center justify-center z-10">
+                <div className="text-center bg-black/80 backdrop-blur-sm p-8 rounded-2xl border border-zinc-700 max-w-sm mx-4">
+                  {isLoggedIn ? (
+                    <>
+                      <button
+                        onClick={() => handleExcavate(false)}
+                        className="inline-flex items-center gap-2 bg-white text-black font-semibold px-6 py-3 rounded-lg hover:bg-zinc-200 transition-colors mb-2"
+                      >
+                        <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+                        </svg>
+                        Excavate Earliest Posts
+                      </button>
+                      <p className="text-sm text-zinc-400">
+                        Unlock up to 100 earliest posts
+                      </p>
+                    </>
+                  ) : (
+                    <>
+                      <div className="space-y-3 mb-3">
+                        <button className="w-full inline-flex items-center justify-center gap-2 bg-white text-black font-semibold px-6 py-3 rounded-lg hover:bg-zinc-200 transition-colors">
+                          Subscribe $9/month
+                        </button>
+                        <div className="text-zinc-500 text-sm">or</div>
+                        <button
+                          onClick={() => handleExcavate(false)}
+                          className="w-full inline-flex items-center justify-center gap-2 bg-zinc-800 text-white font-semibold px-6 py-3 rounded-lg hover:bg-zinc-700 transition-colors border border-zinc-600"
+                        >
+                          <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+                          </svg>
+                          Unlock this account – $3
+                        </button>
+                      </div>
+                      <p className="text-sm text-zinc-400">
+                        Unlock up to 100 earliest posts
+                      </p>
+                    </>
+                  )}
+                </div>
+              </div>
             )}
+
+            {/* Protected account overlay */}
+            {accountData.protected && (
+              <div className="absolute inset-0 flex items-center justify-center z-10">
+                <div className="text-center bg-black/80 backdrop-blur-sm p-8 rounded-2xl border border-orange-800/50 max-w-sm mx-4">
+                  <div className="inline-flex items-center gap-2 bg-zinc-800 text-zinc-400 font-semibold px-6 py-3 rounded-lg cursor-not-allowed mb-2">
+                    <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 20 20">
+                      <path fillRule="evenodd" d="M5 9V7a5 5 0 0110 0v2a2 2 0 012 2v5a2 2 0 01-2 2H5a2 2 0 01-2-2v-5a2 2 0 012-2zm8-2v2H7V7a3 3 0 016 0z" clipRule="evenodd" />
+                    </svg>
+                    Account Protected
+                  </div>
+                  <p className="text-sm text-orange-400">
+                    This account cannot be excavated
+                  </p>
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* Discover Section */}
+          <div className="mb-8 p-6 bg-zinc-900 rounded-xl border border-zinc-800">
+            <h2 className="text-lg font-semibold mb-3">Discover Earliest Posts</h2>
+            <p className="text-zinc-300 mb-4">
+              Timeline excavation reveals the authentic voice and early thoughts from {displayName}'s journey on X. 
+              Uncover their first interactions, original ideas, and the evolution of their online presence.
+            </p>
+            <p className="text-zinc-400 text-sm">
+              Our advanced excavation system searches deep into account histories, retrieving up to 100 of the 
+              chronologically earliest posts that provide unique insights into an account's origins and growth.
+            </p>
           </div>
 
           {/* Error display */}
@@ -528,7 +650,7 @@ export default function UserPage() {
             </div>
           )}
 
-          {/* Additional Context */}
+          {/* SEO Content - About Timeline Excavation */}
           <div className="mt-12 pt-8 border-t border-zinc-800">
             <h3 className="text-lg font-semibold mb-4">About Timeline Excavation</h3>
             <div className="space-y-4 text-sm text-zinc-400">
