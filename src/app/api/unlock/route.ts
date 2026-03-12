@@ -194,7 +194,7 @@ export async function POST(req: NextRequest) {
     if (requestedStage === 1) {
       // Stage 1: Use normal job creation
       const knownAccount = getAccountByUsername(username);
-      jobId = createAndRunJob(username, knownAccount?.created_at, undefined, 1);
+      jobId = createAndRunJob(username, knownAccount?.created_at, undefined, 1, force);
     } else {
       // Stage 2+: Use expansion job creation with prerequisite checking
       const expansionResult = createStageExpansionJob(username, requestedStage);

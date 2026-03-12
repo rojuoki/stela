@@ -80,6 +80,8 @@ class GlobalJobQueue {
    * Maps jobId → epoch-ms when the assigned token's cooldown ends.
    */
   private _waitingIds = new Map<string, number>();
+  /** Force rerun flags by jobId (cleared after job completes). */
+  private _forceFlags = new Map<string, boolean>();
 
   constructor() {
     // Eagerly initialize so restart-recovery and pending resume timers are set
@@ -180,7 +182,27 @@ class GlobalJobQueue {
   complete(jobId: string): void {
     this._runningJobIds.delete(jobId);
     this._pendingIds = this._pendingIds.filter((id) => id !== jobId);
+    this.clearForceFlag(jobId); // Clean up force flag
     this._startNext();
+  }
+
+  /** Set force flag for a job (admin rerun bypass) */
+  setForceFlag(jobId: string, force: boolean): void {
+    if (force) {
+      this._forceFlags.set(jobId, true);
+    } else {
+      this._forceFlags.delete(jobId);
+    }
+  }
+
+  /** Check if job has force flag set (bypass stage reuse) */
+  hasForceFlag(jobId: string): boolean {
+    return this._forceFlags.has(jobId);
+  }
+
+  /** Clear force flag when job completes */
+  clearForceFlag(jobId: string): void {
+    this._forceFlags.delete(jobId);
   }
 
   /**
@@ -414,6 +436,7 @@ export function createAndRunJob(
   accountCreatedAt?: string | null,
   holdId?: string,
   stage: number = 1,
+  force: boolean = false,
 ): string {
   const db = getDb();
   const jobId = randomUUID();
@@ -427,6 +450,12 @@ export function createAndRunJob(
     INSERT INTO jobs (id, account_username, requested_limit, stage, hold_id, status, created_at)
     VALUES (?, ?, ?, ?, ?, 'queued', ?)
   `).run(jobId, username.toLowerCase(), targetCount, stage, holdId ?? null, now);
+
+  // Set force flag for admin rerun bypass
+  if (force) {
+    globalQueue.setForceFlag(jobId, true);
+    console.log(`[jobs] Force flag set for job ${jobId} (@${username} Stage ${stage}) - will bypass stage reuse`);
+  }
 
   globalQueue.register(jobId);
   return jobId;
@@ -576,12 +605,15 @@ async function runJobAsync(jobId: string): Promise<void> {
 
     // ── Phase 4: Check for existing stage result and handle stage-specific excavation ──
     
+    // Check if this is a force rerun (admin bypass)
+    const isForceRerun = globalQueue.hasForceFlag(jobId);
+    
     // First, we need to get the account info to check for existing stage results.
     const existingAccount = db
       .prepare("SELECT account_id, created_at FROM accounts WHERE username = ?")
       .get(username.toLowerCase()) as { account_id: string; created_at: string } | undefined;
 
-    if (existingAccount) {
+    if (existingAccount && !isForceRerun) {
       const existingStageResult = getStageResult(existingAccount.account_id, jobStage);
       if (existingStageResult) {
         console.log(
@@ -597,6 +629,10 @@ async function runJobAsync(jobId: string): Promise<void> {
         
         // Skip excavation entirely - we have our result
       }
+    } else if (isForceRerun) {
+      console.log(
+        `[stage] Force rerun detected for job ${jobId} (@${username} Stage ${jobStage}) - bypassing existing stage result reuse`
+      );
     }
 
     // Only run excavation if we don't have a cached stage result
