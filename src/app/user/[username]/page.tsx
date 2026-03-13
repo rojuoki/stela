@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useRef, useMemo } from "react";
+import { useState, useEffect, useRef } from "react";
 import { useParams } from "next/navigation";
 import Link from "next/link";
 import { notFound } from "next/navigation";
@@ -51,6 +51,16 @@ const ARTIFICIAL_DELAY_MS = 750;
 /** Fixed polling interval — does NOT change based on job status. */
 const POLL_INTERVAL_MS = 2500;
 
+const DUMMY_CHART_HEIGHTS = [35, 62, 48, 75, 30, 88, 55, 42, 70, 25, 60, 45, 82, 38, 67, 52, 90, 33, 58, 44];
+
+const DUMMY_TWEET_STATS = [
+  { likes: 47, retweets: 12, replies: 5 },
+  { likes: 83, retweets: 7, replies: 2 },
+  { likes: 21, retweets: 3, replies: 8 },
+  { likes: 64, retweets: 18, replies: 4 },
+  { likes: 9, retweets: 1, replies: 3 },
+];
+
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
@@ -77,7 +87,7 @@ export default function UserPage() {
   const username = Array.isArray(params.username) ? params.username[0] : params.username;
 
   // User context - MUST be called before any early returns
-  const { user, refreshCredits } = useUser();
+  const { user, credits, refreshCredits } = useUser();
 
   // UI State for different phases
   const [uiPhase, setUiPhase] = useState<"preview" | "excavating" | "results">("preview");
@@ -93,27 +103,11 @@ export default function UserPage() {
   const [tweets, setTweets] = useState<TweetData[]>([]);
   const [jobInfo, setJobInfo] = useState<string>("");
   const [cacheHit, setCacheHit] = useState(false);
-  const [credits, setCredits] = useState<number>(0);
   const [activeJobId, setActiveJobId] = useState<string | null>(null);
   const [jobPhase, setJobPhase] = useState<JobPhase>(null);
   const [resumeAt, setResumeAt] = useState<string | null>(null);
   const [isAlreadyUnlocked, setIsAlreadyUnlocked] = useState(false);
   const [checkingUnlockStatus, setCheckingUnlockStatus] = useState(false);
-
-  const dummyChartHeights = useMemo(
-    () => Array.from({ length: 20 }, () => Math.random() * 80 + 20),
-    [username],
-  );
-
-  const dummyTweetStats = useMemo(
-    () =>
-      Array.from({ length: 5 }, () => ({
-        likes: Math.floor(Math.random() * 100),
-        retweets: Math.floor(Math.random() * 20),
-        replies: Math.floor(Math.random() * 10),
-      })),
-    [username],
-  );
 
   // Basic validation
   if (!username || typeof username !== "string") {
@@ -665,7 +659,7 @@ export default function UserPage() {
 
               <div className="relative h-24 bg-zinc-900 rounded-lg border border-zinc-800 p-2 blur-sm">
                 <div className="flex items-end gap-px h-full">
-                  {dummyChartHeights.map((h, i) => (
+                  {DUMMY_CHART_HEIGHTS.map((h, i) => (
                     <div
                       key={i}
                       className="flex-1 bg-blue-500 rounded-t-sm"
@@ -678,7 +672,7 @@ export default function UserPage() {
 
             {/* Blurred Tweet List */}
             <div className="border border-zinc-800 rounded-xl overflow-hidden blur-sm">
-              {dummyTweetStats.map((stats, i) => (
+              {DUMMY_TWEET_STATS.map((stats, i) => (
                 <div key={i} className="px-4 py-3 border-b border-zinc-800 last:border-b-0">
                   <div className="flex items-center gap-2 mb-1.5">
                     <span className="text-xs text-zinc-500">Mar {i + 1}, 2009</span>
