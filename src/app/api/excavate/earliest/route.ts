@@ -7,8 +7,7 @@ import { withDevMeasure, type MeasureCtx } from "@/lib/devMeasure";
 const DEV_PANEL = process.env.NEXT_PUBLIC_DEV_PANEL === "1";
 
 export async function POST(req: NextRequest) {
-  const userId = getUserId(req);
-  const mCtx: MeasureCtx = { userId, route: "/api/excavate/earliest" };
+  const userId: string = await getUserId(req);
   return withDevMeasure("excavate", async () => {
     const injected = await maybeInjectDevError(req);
     if (injected) return injected;
@@ -29,7 +28,7 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "Invalid username format" }, { status: 400 });
     }
 
-    mCtx.username = raw; // propagate to stats entry
+    // TODO: propagate username to stats entry in Phase 2
 
     const limit = Math.min(Math.max(body.limit ?? 100, 1), 100);
 
@@ -43,5 +42,5 @@ export async function POST(req: NextRequest) {
       console.error("[excavate/earliest] Unhandled:", msg);
       return NextResponse.json({ error: msg }, { status: 500 });
     }
-  }, mCtx);
+  }, { userId, route: "/api/excavate/earliest" });
 }

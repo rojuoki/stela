@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useMemo } from "react";
 import { useParams } from "next/navigation";
 import Link from "next/link";
 import { notFound } from "next/navigation";
@@ -16,6 +16,7 @@ import { TweetCard } from "../../../components/TweetCard";
 import { AccountHeader } from "../../../components/AccountHeader";
 import { JobStatus } from "../../../components/JobStatus";
 import { apiFetch } from "../../../lib/apiFetch";
+import { useUser } from "../../../contexts/UserContext";
 
 interface UnlockResponse {
   jobId: string | null;
@@ -75,6 +76,9 @@ export default function UserPage() {
   const params = useParams();
   const username = Array.isArray(params.username) ? params.username[0] : params.username;
 
+  // User context - MUST be called before any early returns
+  const { user, refreshCredits } = useUser();
+
   // UI State for different phases
   const [uiPhase, setUiPhase] = useState<"preview" | "excavating" | "results">("preview");
   
@@ -93,6 +97,23 @@ export default function UserPage() {
   const [activeJobId, setActiveJobId] = useState<string | null>(null);
   const [jobPhase, setJobPhase] = useState<JobPhase>(null);
   const [resumeAt, setResumeAt] = useState<string | null>(null);
+  const [isAlreadyUnlocked, setIsAlreadyUnlocked] = useState(false);
+  const [checkingUnlockStatus, setCheckingUnlockStatus] = useState(false);
+
+  const dummyChartHeights = useMemo(
+    () => Array.from({ length: 20 }, () => Math.random() * 80 + 20),
+    [username],
+  );
+
+  const dummyTweetStats = useMemo(
+    () =>
+      Array.from({ length: 5 }, () => ({
+        likes: Math.floor(Math.random() * 100),
+        retweets: Math.floor(Math.random() * 20),
+        replies: Math.floor(Math.random() * 10),
+      })),
+    [username],
+  );
 
   // Basic validation
   if (!username || typeof username !== "string") {
@@ -101,11 +122,8 @@ export default function UserPage() {
 
   const fetchCredits = async () => {
     try {
-      const res = await apiFetch("/api/credits");
-      if (res.ok) {
-        const data = await res.json();
-        setCredits(data.balance);
-      }
+      // Use UserContext's refreshCredits instead of direct API call
+      refreshCredits();
     } catch (e) {
       console.error("Failed to fetch credits:", e);
     }
@@ -163,6 +181,44 @@ export default function UserPage() {
       fetchCredits();
     }
   }, [username]);
+
+  // Check unlock status and load existing tweets when user and account are available
+  useEffect(() => {
+    if (user && accountData && !checkingUnlockStatus) {
+      setCheckingUnlockStatus(true);
+      fetch(`/api/account/unlock-status?username=${encodeURIComponent(accountData.username)}`, {
+        credentials: 'include'
+      })
+        .then(res => res.json())
+        .then(data => {
+          if (data.unlocked) {
+            setIsAlreadyUnlocked(true);
+            // Load existing tweets if available
+            loadTweets(data.accountId).then(loadedTweets => {
+              if (loadedTweets.length > 0) {
+                setTweets(loadedTweets);
+                setStatus("done");
+                setUiPhase("results");
+                setJobInfo(`${loadedTweets.length} posts • previously unlocked`);
+              }
+            });
+          }
+        })
+        .catch(error => {
+          console.error('Failed to check unlock status:', error);
+        })
+        .finally(() => {
+          setCheckingUnlockStatus(false);
+        });
+    }
+  }, [user, accountData, checkingUnlockStatus]);
+
+  // Refresh credits after successful excavation
+  useEffect(() => {
+    if (status === "done" && user) {
+      refreshCredits();
+    }
+  }, [status, user, refreshCredits]);
 
   // ── Polling driven by activeJobId ──────────────────────────────────────────
   useEffect(() => {
@@ -440,8 +496,7 @@ export default function UserPage() {
   const joinDate = formatJoinDate(accountData.created_at);
   const hasResults = tweets.length > 0;
 
-  // Determine user state for CTA - in production, always guest; in dev, check credits
-  const isLoggedIn = credits > 0; // Simple heuristic - logged in users typically have credits
+  const isLoggedIn = !!user; // Check if user is authenticated
 
   return (
     <main className="max-w-2xl mx-auto px-4 py-12">
@@ -468,23 +523,123 @@ export default function UserPage() {
       </div>
 
       {/* Phase 5: Dynamic content based on UI phase */}
-      
+
       {/* Preview Phase */}
       {uiPhase === "preview" && (
         <>
-          {/* Protected Account Warning */}
-          {accountData.protected && (
-            <div className="mb-8 p-4 bg-orange-900/20 border border-orange-800/50 rounded-lg">
-              <div className="flex items-center gap-2 text-orange-300 text-sm">
-                <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 20 20">
-                  <path fillRule="evenodd" d="M5 9V7a5 5 0 0110 0v2a2 2 0 012 2v5a2 2 0 01-2 2H5a2 2 0 01-2-2v-5a2 2 0 012-2zm8-2v2H7V7a3 3 0 616 0z" clipRule="evenodd" />
+          {/* CTA row — centered, directly below account header */}
+          <div className="flex flex-col items-center text-center mb-6 mt-2">
+            {accountData.protected ? (
+              <div className="flex items-center gap-2 text-orange-300 text-sm px-4 py-3 bg-orange-900/20 border border-orange-800/50 rounded-lg">
+                <svg className="w-4 h-4 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">
+                  <path fillRule="evenodd" d="M5 9V7a5 5 0 0110 0v2a2 2 0 012 2v5a2 2 0 01-2 2H5a2 2 0 01-2-2v-5a2 2 0 012-2zm8-2v2H7V7a3 3 0 016 0z" clipRule="evenodd" />
                 </svg>
                 This account is protected and cannot be excavated.
               </div>
-            </div>
-          )}
+            ) : isLoggedIn ? (
+              <>
+                {isAlreadyUnlocked ? (
+                  <>
+                    <div className="mb-3 p-4 bg-emerald-900/20 border border-emerald-800/50 rounded-lg max-w-sm">
+                      <div className="flex items-center gap-2 text-emerald-400 mb-2">
+                        <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 20 20">
+                          <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd" />
+                        </svg>
+                        <span className="font-medium">Already Unlocked</span>
+                      </div>
+                      <p className="text-sm text-zinc-400">
+                        You've already unlocked this account's earliest posts.
+                      </p>
+                    </div>
+                    <button
+                      onClick={() => handleExcavate(true)}
+                      className="bg-zinc-800 text-white font-semibold px-6 py-3 rounded-lg hover:bg-zinc-700 transition-colors border border-zinc-600"
+                    >
+                      Re-run Excavation
+                    </button>
+                    <p className="text-xs text-zinc-500 mt-2">
+                      Re-excavation uses 1 credit • You have {credits} credits
+                    </p>
+                  </>
+                ) : credits > 0 ? (
+                  <>
+                    <button
+                      onClick={() => handleExcavate(false)}
+                      className="inline-flex items-center gap-2 bg-white text-black font-semibold px-6 py-3 rounded-lg hover:bg-zinc-200 transition-colors mb-2"
+                    >
+                      <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+                      </svg>
+                      Excavate Earliest Posts
+                    </button>
+                    <p className="text-sm text-zinc-400">
+                      Unlock up to 100 earliest posts • Uses 1 credit
+                    </p>
+                    <p className="text-xs text-zinc-500">
+                      You have {credits} credits remaining
+                    </p>
+                  </>
+                ) : (
+                  <>
+                    <div className="mb-3 p-4 bg-zinc-900 border border-zinc-800 rounded-lg max-w-sm">
+                      <div className="flex items-center gap-2 text-orange-400 mb-2">
+                        <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 20 20">
+                          <path d="M8.433 7.418c.155-.103.346-.196.567-.267v1.698a2.305 2.305 0 01-.567-.267C8.07 8.34 8.07 7.949 8.433 7.418zM11 12.849v-1.698c.22.071.412.164.567.267.364.532.364.923 0 1.464-.155.103-.346.196-.567.267z" />
+                          <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm1-13a1 1 0 10-2 0v.092a4.535 4.535 0 00-1.676.662C6.602 6.234 6.102 7.036 6.102 8c0 .964.5 1.766 1.222 2.246.135.09.288.171.448.245.02.009.039.018.059.027.951.409 1.969.909 1.969 2.482 0 .964-.5 1.766-1.222 2.246-.135.09-.288.171-.448.245-.02.009-.039.018-.059.027-.951.409-1.969.909-1.969 2.482a1 1 0 102 0v-.092a4.535 4.535 0 001.676-.662C13.398 13.766 13.898 12.964 13.898 12c0-.964-.5-1.766-1.222-2.246a4.025 4.025 0 00-.448-.245 1.015 1.015 0 01-.059-.027C11.218 9.073 10.2 8.573 10.2 7c0-.964.5-1.766 1.222-2.246.135-.09.288-.171.448-.245.02-.009.039-.018.059-.027.351-.151.724-.297 1.071-.462V5a1 1 0 102 0z" clipRule="evenodd" />
+                        </svg>
+                        <span className="font-medium">No Credits Available</span>
+                      </div>
+                      <p className="text-sm text-zinc-400">
+                        You need 1 credit to unlock this account's earliest posts.
+                      </p>
+                    </div>
+                    <Link 
+                      href="/account/credits"
+                      className="bg-white text-black font-semibold px-6 py-3 rounded-lg hover:bg-zinc-200 transition-colors"
+                    >
+                      Get More Credits
+                    </Link>
+                  </>
+                )}
+              </>
+            ) : (
+              <>
+                <div className="mb-3 p-4 bg-zinc-900 border border-zinc-800 rounded-lg max-w-sm">
+                  <h3 className="font-medium mb-2">Sign In Required</h3>
+                  <p className="text-sm text-zinc-400">
+                    Create an account or sign in to unlock earliest posts
+                  </p>
+                </div>
+                <div className="flex items-center gap-3 mb-2">
+                  <Link 
+                    href="/signup"
+                    className="inline-flex items-center justify-center gap-2 bg-white text-black font-semibold px-6 py-3 rounded-lg hover:bg-zinc-200 transition-colors"
+                  >
+                    Create Account
+                  </Link>
+                  <Link 
+                    href="/login"
+                    className="inline-flex items-center justify-center gap-2 bg-zinc-800 text-white font-semibold px-6 py-3 rounded-lg hover:bg-zinc-700 transition-colors border border-zinc-600"
+                  >
+                    Sign In
+                  </Link>
+                </div>
+                <p className="text-xs text-zinc-500">New accounts get 3 free credits</p>
+              </>
+            )}
 
-          {/* Excavation Result Preview Container */}
+            {/* Error display */}
+            {error && (
+              <div className="mt-3 flex items-center gap-2 text-red-300 text-sm px-4 py-3 bg-red-900/20 border border-red-800/50 rounded-lg w-full max-w-sm">
+                <svg className="w-4 h-4 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">
+                  <path fillRule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7 4a1 1 0 11-2 0 1 1 0 012 0zm-1-9a1 1 0 00-1 1v4a1 1 0 102 0V6a1 1 0 00-1-1z" clipRule="evenodd" />
+                </svg>
+                {error}
+              </div>
+            )}
+          </div>
+
+          {/* Blurred result zone */}
           <div className="relative mb-8">
             {/* Blurred Engagement Chart */}
             <div className="mb-6">
@@ -510,11 +665,11 @@ export default function UserPage() {
 
               <div className="relative h-24 bg-zinc-900 rounded-lg border border-zinc-800 p-2 blur-sm">
                 <div className="flex items-end gap-px h-full">
-                  {[...Array(20)].map((_, i) => (
+                  {dummyChartHeights.map((h, i) => (
                     <div
                       key={i}
                       className="flex-1 bg-blue-500 rounded-t-sm"
-                      style={{ height: `${Math.random() * 80 + 20}%` }}
+                      style={{ height: `${h}%` }}
                     />
                   ))}
                 </div>
@@ -523,7 +678,7 @@ export default function UserPage() {
 
             {/* Blurred Tweet List */}
             <div className="border border-zinc-800 rounded-xl overflow-hidden blur-sm">
-              {[...Array(5)].map((_, i) => (
+              {dummyTweetStats.map((stats, i) => (
                 <div key={i} className="px-4 py-3 border-b border-zinc-800 last:border-b-0">
                   <div className="flex items-center gap-2 mb-1.5">
                     <span className="text-xs text-zinc-500">Mar {i + 1}, 2009</span>
@@ -540,7 +695,7 @@ export default function UserPage() {
                       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                         <path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z" />
                       </svg>
-                      {Math.floor(Math.random() * 100)}
+                      {stats.likes}
                     </span>
                     <span className="flex items-center gap-1">
                       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
@@ -549,109 +704,40 @@ export default function UserPage() {
                         <polyline points="7 23 3 19 7 15" />
                         <path d="M21 13v2a4 4 0 0 1-4 4H3" />
                       </svg>
-                      {Math.floor(Math.random() * 20)}
+                      {stats.retweets}
                     </span>
                     <span className="flex items-center gap-1">
                       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                         <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
                       </svg>
-                      {Math.floor(Math.random() * 10)}
+                      {stats.replies}
                     </span>
                   </div>
                 </div>
               ))}
             </div>
 
-            {/* CTA Overlay - positioned above the blurred content */}
-            {!accountData.protected && (
-              <div className="absolute inset-0 flex items-center justify-center z-10">
-                <div className="text-center bg-black/80 backdrop-blur-sm p-8 rounded-2xl border border-zinc-700 max-w-sm mx-4">
-                  {isLoggedIn ? (
-                    <>
-                      <button
-                        onClick={() => handleExcavate(false)}
-                        className="inline-flex items-center gap-2 bg-white text-black font-semibold px-6 py-3 rounded-lg hover:bg-zinc-200 transition-colors mb-2"
-                      >
-                        <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
-                        </svg>
-                        Excavate Earliest Posts
-                      </button>
-                      <p className="text-sm text-zinc-400">
-                        Unlock up to 100 earliest posts
-                      </p>
-                    </>
-                  ) : (
-                    <>
-                      <div className="space-y-3 mb-3">
-                        <button className="w-full inline-flex items-center justify-center gap-2 bg-white text-black font-semibold px-6 py-3 rounded-lg hover:bg-zinc-200 transition-colors">
-                          Subscribe $9/month
-                        </button>
-                        <div className="text-zinc-500 text-sm">or</div>
-                        <button
-                          onClick={() => handleExcavate(false)}
-                          className="w-full inline-flex items-center justify-center gap-2 bg-zinc-800 text-white font-semibold px-6 py-3 rounded-lg hover:bg-zinc-700 transition-colors border border-zinc-600"
-                        >
-                          <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
-                          </svg>
-                          Unlock this account – $3
-                        </button>
-                      </div>
-                      <p className="text-sm text-zinc-400">
-                        Unlock up to 100 earliest posts
-                      </p>
-                    </>
-                  )}
-                </div>
-              </div>
-            )}
-
-            {/* Protected account overlay */}
-            {accountData.protected && (
-              <div className="absolute inset-0 flex items-center justify-center z-10">
-                <div className="text-center bg-black/80 backdrop-blur-sm p-8 rounded-2xl border border-orange-800/50 max-w-sm mx-4">
-                  <div className="inline-flex items-center gap-2 bg-zinc-800 text-zinc-400 font-semibold px-6 py-3 rounded-lg cursor-not-allowed mb-2">
-                    <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 20 20">
-                      <path fillRule="evenodd" d="M5 9V7a5 5 0 0110 0v2a2 2 0 012 2v5a2 2 0 01-2 2H5a2 2 0 01-2-2v-5a2 2 0 012-2zm8-2v2H7V7a3 3 0 016 0z" clipRule="evenodd" />
-                    </svg>
-                    Account Protected
-                  </div>
-                  <p className="text-sm text-orange-400">
-                    This account cannot be excavated
-                  </p>
-                </div>
-              </div>
-            )}
-          </div>
-
-          {/* Discover Section */}
-          <div className="mb-8 p-6 bg-zinc-900 rounded-xl border border-zinc-800">
-            <h2 className="text-lg font-semibold mb-3">Discover Earliest Posts</h2>
-            <p className="text-zinc-300 mb-4">
-              Timeline excavation reveals the authentic voice and early thoughts from {displayName}'s journey on X. 
-              Uncover their first interactions, original ideas, and the evolution of their online presence.
-            </p>
-            <p className="text-zinc-400 text-sm">
-              Our advanced excavation system searches deep into account histories, retrieving up to 100 of the 
-              chronologically earliest posts that provide unique insights into an account's origins and growth.
-            </p>
-          </div>
-
-          {/* Error display */}
-          {error && (
-            <div className="mt-8 p-4 bg-red-900/20 border border-red-800/50 rounded-lg">
-              <div className="flex items-center gap-2 text-red-300 text-sm">
-                <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 20 20">
-                  <path fillRule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7 4a1 1 0 11-2 0 1 1 0 012 0zm-1-9a1 1 0 00-1 1v4a1 1 0 102 0V6a1 1 0 00-1-1z" clipRule="evenodd" />
-                </svg>
-                {error}
+            {/* Discover overlay — text only, centered over blurred zone */}
+            <div className="absolute inset-0 flex items-center justify-center z-10 pointer-events-none">
+              <div className="text-center max-w-sm px-6">
+                <p className="text-base font-semibold text-white drop-shadow-lg mb-3">
+                  Discover earliest posts from {displayName}
+                </p>
+                <p className="text-sm text-zinc-300 drop-shadow mb-2 leading-relaxed">
+                  Explore the earliest posts from {displayName}'s timeline.
+                  Uncover their first thoughts, early interactions, and the origins
+                  of their presence on X.
+                </p>
+                <p className="text-sm text-zinc-400 drop-shadow leading-relaxed">
+                  Excavation reveals up to 100 of the earliest posts, providing
+                  unique insights into an account's history and evolution over time.
+                </p>
               </div>
             </div>
-          )}
+          </div>
 
           {/* SEO Content - About Timeline Excavation */}
-          <div className="mt-12 pt-8 border-t border-zinc-800">
+          <div className="pt-8 border-t border-zinc-800">
             <h3 className="text-lg font-semibold mb-4">About Timeline Excavation</h3>
             <div className="space-y-4 text-sm text-zinc-400">
               <p>

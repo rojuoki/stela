@@ -1,5 +1,7 @@
 import type { Metadata } from "next";
 import "./globals.css";
+import { UserProvider } from "@/contexts/UserContext";
+import { NavBar } from "@/components/NavBar";
 
 export const metadata: Metadata = {
   title: "STELA — Unlock the earliest posts",
@@ -19,7 +21,10 @@ export default function RootLayout({
   return (
     <html lang="en">
       <body className="bg-black text-white min-h-screen antialiased">
-        {children}
+        <UserProvider>
+          <NavBar />
+          {children}
+        </UserProvider>
         {DevPanel && <DevPanel />}
       </body>
     </html>

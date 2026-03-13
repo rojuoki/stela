@@ -25,8 +25,7 @@ import { withDevMeasure, type MeasureCtx } from "@/lib/devMeasure";
 const DEV_PANEL = process.env.NEXT_PUBLIC_DEV_PANEL === "1";
 
 export async function POST(req: NextRequest) {
-  const userId = getUserId(req);
-  const mCtx: MeasureCtx = { userId, route: "/api/unlock" };
+  const userId = await getUserId(req);
   return withDevMeasure("unlock", async () => {
   const injected = await maybeInjectDevError(req);
   if (injected) return injected;
@@ -64,7 +63,7 @@ export async function POST(req: NextRequest) {
 
     // Input validation and normalization
     const username = normalizeUsername(body.username ?? "");
-    mCtx.username = username || undefined; // propagate to stats entry
+    // TODO: propagate username to stats entry in Phase 2
     if (!username) {
       return NextResponse.json({ 
         error: "Invalid username format. Must be 1-15 characters, letters/numbers/underscore only." 
@@ -234,5 +233,5 @@ export async function POST(req: NextRequest) {
       message: error instanceof Error ? error.message : "Unknown error"
     }, { status: 500 });
   }
-  }, mCtx); // withDevMeasure
+  }, { userId, route: "/api/unlock" }); // withDevMeasure
 }

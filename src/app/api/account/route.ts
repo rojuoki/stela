@@ -9,7 +9,7 @@ export async function GET(req: NextRequest) {
   const rawUsername = new URL(req.url).searchParams.get("username");
   const mCtx: MeasureCtx = { route: "/api/account", username: rawUsername ?? undefined };
   return withDevMeasure("lookup", async () => {
-  try {
+    try {
     // Rate limiting
     const clientIp = req.headers.get("x-forwarded-for") || 
                      req.headers.get("x-real-ip") || 
@@ -125,12 +125,12 @@ export async function GET(req: NextRequest) {
       throw error; // Re-throw unexpected errors
     }
 
-  } catch (error) {
-    console.error('[account] Unexpected error:', error);
-    return NextResponse.json({
-      error: "Internal server error",
-      message: error instanceof Error ? error.message : "Unknown error"
-    }, { status: 500 });
-  }
+    } catch (error) {
+      console.error('[account] Unexpected error:', error);
+      return NextResponse.json({
+        error: "Internal server error",
+        message: error instanceof Error ? error.message : "Unknown error"
+      }, { status: 500 });
+    }
   }, mCtx); // withDevMeasure
 }
