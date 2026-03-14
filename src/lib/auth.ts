@@ -1,6 +1,7 @@
 import * as jose from 'jose';
 import bcrypt from 'bcryptjs';
 import { NextRequest, NextResponse } from 'next/server';
+import { getDb } from './db';
 
 // JWT Configuration
 const JWT_SECRET = process.env.AUTH_SECRET || 'stela-auth-secret-key-phase1-development-only';
@@ -140,61 +141,46 @@ export function createLogoutResponse(data?: any): NextResponse {
   return response;
 }
 
-/**
- * For Phase 1: Simple in-memory user store
- * TODO: Replace with database in later phases
- */
-interface StoredUser {
+interface DbUser {
   id: string;
   email: string;
   name: string;
-  passwordHash: string;
-  createdAt: string;
+  password_hash: string;
+  created_at: string;
 }
-
-const users = new Map<string, StoredUser>();
 
 export async function createUser(email: string, password: string, name: string): Promise<User | null> {
-  // Check if user already exists
-  if (findUserByEmail(email)) {
-    return null; // User already exists
-  }
-  
-  const user: StoredUser = {
-    id: `user_${Date.now()}_${Math.random().toString(36).slice(2)}`,
-    email,
-    name,
-    passwordHash: await hashPassword(password),
-    createdAt: new Date().toISOString(),
-  };
-  
-  users.set(email, user);
-  
-  return {
-    id: user.id,
-    email: user.email,
-    name: user.name,
-  };
-}
+  const db = getDb();
+  const normalizedEmail = email.toLowerCase();
 
-export function findUserByEmail(email: string): StoredUser | null {
-  return users.get(email) || null;
+  const existing = db.prepare('SELECT id FROM users WHERE email = ?').get(normalizedEmail);
+  if (existing) {
+    return null;
+  }
+
+  const id = `user_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+  const passwordHash = await hashPassword(password);
+
+  db.prepare(
+    'INSERT INTO users (id, email, name, password_hash, created_at) VALUES (?, ?, ?, ?, ?)'
+  ).run(id, normalizedEmail, name, passwordHash, new Date().toISOString());
+
+  return { id, email: normalizedEmail, name };
 }
 
 export async function authenticateUser(email: string, password: string): Promise<User | null> {
-  const storedUser = findUserByEmail(email);
-  if (!storedUser) {
+  const db = getDb();
+  const normalizedEmail = email.toLowerCase();
+
+  const row = db.prepare('SELECT * FROM users WHERE email = ?').get(normalizedEmail) as DbUser | undefined;
+  if (!row) {
     return null;
   }
-  
-  const isValid = await verifyPassword(password, storedUser.passwordHash);
+
+  const isValid = await verifyPassword(password, row.password_hash);
   if (!isValid) {
     return null;
   }
-  
-  return {
-    id: storedUser.id,
-    email: storedUser.email,
-    name: storedUser.name,
-  };
+
+  return { id: row.id, email: row.email, name: row.name };
 }
