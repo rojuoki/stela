@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect, useRef } from "react";
-import { useParams } from "next/navigation";
+import { useParams, useRouter } from "next/navigation";
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import type {
@@ -84,10 +84,11 @@ function formatJoinDate(createdAt: string | null): string {
 
 export default function UserPage() {
   const params = useParams();
+  const router = useRouter();
   const username = Array.isArray(params.username) ? params.username[0] : params.username;
 
   // User context - MUST be called before any early returns
-  const { user, credits, refreshCredits } = useUser();
+  const { user, credits, subscription, refreshCredits } = useUser();
 
   // UI State for different phases
   const [uiPhase, setUiPhase] = useState<"preview" | "excavating" | "results">("preview");
@@ -414,6 +415,45 @@ export default function UserPage() {
     }
   };
 
+  // Handle "Unlock for $3" button - temporary implementation using existing purchase API
+  const handleUnlockForPrice = async () => {
+    if (!accountData || accountData.protected) return;
+
+    setError(null);
+
+    try {
+      // Step 1: Purchase unlock credit
+      const purchaseRes = await fetch('/api/purchase/unlock', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        credentials: 'include',
+      });
+
+      if (!purchaseRes.ok) {
+        const data = await purchaseRes.json().catch(() => ({}));
+        if (purchaseRes.status === 401) {
+          // Not logged in - redirect to signup or show login prompt
+          // For now, redirect to signup to capture the purchase intent
+          router.push('/signup');
+          return;
+        }
+        setError(data.error || 'Purchase failed');
+        return;
+      }
+
+      // Step 2: Refresh credits
+      await refreshCredits();
+
+      // Step 3: Automatically trigger excavation
+      await handleExcavate(false);
+
+    } catch (err) {
+      setError('Network error. Please try again.');
+    }
+  };
+
   if (!accountData && accountStatus === "loading") {
     return (
       <main className="max-w-2xl mx-auto px-4 py-12">
@@ -491,6 +531,9 @@ export default function UserPage() {
   const hasResults = tweets.length > 0;
 
   const isLoggedIn = !!user; // Check if user is authenticated
+  
+  // Determine if user can unlock (has credits OR basic subscription)
+  const canUnlock = isLoggedIn && (credits > 0 || subscription.plan === 'basic');
 
   return (
     <main className="max-w-2xl mx-auto px-4 py-12">
@@ -521,8 +564,8 @@ export default function UserPage() {
       {/* Preview Phase */}
       {uiPhase === "preview" && (
         <>
-          {/* CTA row — centered, directly below account header */}
-          <div className="flex flex-col items-center text-center mb-6 mt-2">
+          {/* Simple CTA buttons directly under account header */}
+          <div className="flex flex-col items-center mb-6">
             {accountData.protected ? (
               <div className="flex items-center gap-2 text-orange-300 text-sm px-4 py-3 bg-orange-900/20 border border-orange-800/50 rounded-lg">
                 <svg className="w-4 h-4 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">
@@ -530,101 +573,84 @@ export default function UserPage() {
                 </svg>
                 This account is protected and cannot be excavated.
               </div>
-            ) : isLoggedIn ? (
+            ) : canUnlock ? (
               <>
                 {isAlreadyUnlocked ? (
-                  <>
-                    <div className="mb-3 p-4 bg-emerald-900/20 border border-emerald-800/50 rounded-lg max-w-sm">
-                      <div className="flex items-center gap-2 text-emerald-400 mb-2">
-                        <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 20 20">
-                          <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd" />
-                        </svg>
-                        <span className="font-medium">Already Unlocked</span>
-                      </div>
-                      <p className="text-sm text-zinc-400">
-                        You've already unlocked this account's earliest posts.
-                      </p>
-                    </div>
+                  <div className="text-center">
                     <button
                       onClick={() => handleExcavate(true)}
-                      className="bg-zinc-800 text-white font-semibold px-6 py-3 rounded-lg hover:bg-zinc-700 transition-colors border border-zinc-600"
+                      className="bg-zinc-800 text-white font-semibold px-6 py-3 rounded-lg hover:bg-zinc-700 transition-colors border border-zinc-600 mb-2"
                     >
                       Re-run Excavation
                     </button>
-                    <p className="text-xs text-zinc-500 mt-2">
-                      Re-excavation uses 1 credit • You have {credits} credits
+                    <p className="text-xs text-zinc-500">
+                      Re-excavation uses 1 credit • You have {credits} credits{subscription.plan === 'basic' && ' • Basic subscriber'}
                     </p>
-                  </>
-                ) : credits > 0 ? (
-                  <>
+                  </div>
+                ) : (
+                  <div className="text-center">
                     <button
                       onClick={() => handleExcavate(false)}
-                      className="inline-flex items-center gap-2 bg-white text-black font-semibold px-6 py-3 rounded-lg hover:bg-zinc-200 transition-colors mb-2"
+                      className="bg-white text-black font-semibold px-6 py-3 rounded-lg hover:bg-zinc-200 transition-colors mb-2"
                     >
-                      <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
-                      </svg>
                       Excavate Earliest Posts
                     </button>
-                    <p className="text-sm text-zinc-400">
-                      Unlock up to 100 earliest posts • Uses 1 credit
-                    </p>
                     <p className="text-xs text-zinc-500">
-                      You have {credits} credits remaining
+                      {subscription.plan === 'basic' ? `Basic subscriber • ${credits} credits available` : `You have ${credits} credits remaining`}
                     </p>
-                  </>
-                ) : (
-                  <>
-                    <div className="mb-3 p-4 bg-zinc-900 border border-zinc-800 rounded-lg max-w-sm">
-                      <div className="flex items-center gap-2 text-orange-400 mb-2">
-                        <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 20 20">
-                          <path d="M8.433 7.418c.155-.103.346-.196.567-.267v1.698a2.305 2.305 0 01-.567-.267C8.07 8.34 8.07 7.949 8.433 7.418zM11 12.849v-1.698c.22.071.412.164.567.267.364.532.364.923 0 1.464-.155.103-.346.196-.567.267z" />
-                          <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm1-13a1 1 0 10-2 0v.092a4.535 4.535 0 00-1.676.662C6.602 6.234 6.102 7.036 6.102 8c0 .964.5 1.766 1.222 2.246.135.09.288.171.448.245.02.009.039.018.059.027.951.409 1.969.909 1.969 2.482 0 .964-.5 1.766-1.222 2.246-.135.09-.288.171-.448.245-.02.009-.039.018-.059.027-.951.409-1.969.909-1.969 2.482a1 1 0 102 0v-.092a4.535 4.535 0 001.676-.662C13.398 13.766 13.898 12.964 13.898 12c0-.964-.5-1.766-1.222-2.246a4.025 4.025 0 00-.448-.245 1.015 1.015 0 01-.059-.027C11.218 9.073 10.2 8.573 10.2 7c0-.964.5-1.766 1.222-2.246.135-.09.288-.171.448-.245.02-.009.039-.018.059-.027.351-.151.724-.297 1.071-.462V5a1 1 0 102 0z" clipRule="evenodd" />
-                        </svg>
-                        <span className="font-medium">No Credits Available</span>
-                      </div>
-                      <p className="text-sm text-zinc-400">
-                        You need 1 credit to unlock this account's earliest posts.
-                      </p>
-                    </div>
-                    <Link 
-                      href="/account/credits"
-                      className="bg-white text-black font-semibold px-6 py-3 rounded-lg hover:bg-zinc-200 transition-colors"
-                    >
-                      Get More Credits
-                    </Link>
-                  </>
+                  </div>
                 )}
               </>
             ) : (
               <>
-                <div className="mb-3 p-4 bg-zinc-900 border border-zinc-800 rounded-lg max-w-sm">
-                  <h3 className="font-medium mb-2">Sign In Required</h3>
-                  <p className="text-sm text-zinc-400">
-                    Create an account or sign in to unlock earliest posts
-                  </p>
-                </div>
-                <div className="flex items-center gap-3 mb-2">
-                  <Link 
-                    href="/signup"
-                    className="inline-flex items-center justify-center gap-2 bg-white text-black font-semibold px-6 py-3 rounded-lg hover:bg-zinc-200 transition-colors"
+                <div className="flex items-center gap-3 mb-3">
+                  <button
+                    onClick={handleUnlockForPrice}
+                    className="bg-white text-black font-semibold px-6 py-3 rounded-lg hover:bg-zinc-200 transition-colors"
                   >
-                    Create Account
-                  </Link>
+                    Unlock for $3
+                  </button>
                   <Link 
-                    href="/login"
-                    className="inline-flex items-center justify-center gap-2 bg-zinc-800 text-white font-semibold px-6 py-3 rounded-lg hover:bg-zinc-700 transition-colors border border-zinc-600"
+                    href="/subscribe"
+                    className="bg-zinc-800 text-white font-semibold px-6 py-3 rounded-lg hover:bg-zinc-700 transition-colors border border-zinc-600"
                   >
-                    Sign In
+                    Subscribe
                   </Link>
                 </div>
-                <p className="text-xs text-zinc-500">New accounts get 3 free credits</p>
+                {isLoggedIn ? (
+                  <div className="text-center">
+                    <p className="text-xs text-zinc-500">$3 for 1 unlock • Basic subscription gets 3 unlocks/month</p>
+                    <p className="text-xs text-zinc-400 mt-1">
+                      Currently signed in as {user?.email}
+                    </p>
+                  </div>
+                ) : (
+                  <div className="text-center">
+                    <p className="text-xs text-zinc-500 mb-2">$3 for 1 unlock • Basic subscription gets 3 unlocks/month</p>
+                    <div className="flex items-center justify-center gap-2 text-xs">
+                      <span className="text-zinc-400">Have an account?</span>
+                      <Link 
+                        href="/login"
+                        className="text-white hover:text-zinc-300 underline"
+                      >
+                        Sign in
+                      </Link>
+                      <span className="text-zinc-500">•</span>
+                      <Link 
+                        href="/signup"
+                        className="text-white hover:text-zinc-300 underline"
+                      >
+                        Create account
+                      </Link>
+                    </div>
+                  </div>
+                )}
               </>
             )}
 
             {/* Error display */}
             {error && (
-              <div className="mt-3 flex items-center gap-2 text-red-300 text-sm px-4 py-3 bg-red-900/20 border border-red-800/50 rounded-lg w-full max-w-sm">
+              <div className="mt-3 flex items-center gap-2 text-red-300 text-sm px-4 py-3 bg-red-900/20 border border-red-800/50 rounded-lg">
                 <svg className="w-4 h-4 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">
                   <path fillRule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7 4a1 1 0 11-2 0 1 1 0 012 0zm-1-9a1 1 0 00-1 1v4a1 1 0 102 0V6a1 1 0 00-1-1z" clipRule="evenodd" />
                 </svg>

@@ -401,6 +401,162 @@ export function getApiCostStats(): ApiCostStats {
   };
 }
 
+// ─── Subscription System (Phase 1) ─────────────────────────────────
+
+export interface Subscription {
+  id: string;
+  user_id: string;
+  plan: string;
+  cycle_start: string;
+  cycle_end: string;
+  credits_per_cycle: number;
+  status: 'active' | 'canceled' | 'expired';
+  created_at: string;
+}
+
+/** Get user's current subscription (null if free user) */
+export function getUserSubscription(userId: string): Subscription | null {
+  const db = getDb();
+  const subscription = db
+    .prepare("SELECT * FROM subscriptions WHERE user_id = ? AND status = 'active'")
+    .get(userId) as Subscription | undefined;
+  
+  return subscription || null;
+}
+
+/** Get effective user plan (free/basic) */
+export function getUserPlan(userId: string): 'free' | 'basic' {
+  const subscription = getUserSubscription(userId);
+  
+  if (!subscription) {
+    return 'free';
+  }
+  
+  // Check if subscription is still valid
+  const now = new Date();
+  const cycleEnd = new Date(subscription.cycle_end);
+  
+  if (cycleEnd < now) {
+    // Expired subscription - should be marked as expired
+    return 'free';
+  }
+  
+  return subscription.plan === 'basic' ? 'basic' : 'free';
+}
+
+/** Create or update a subscription for a user */
+export function createOrUpdateSubscription(
+  userId: string, 
+  plan: 'basic' = 'basic',
+  creditsPerCycle: number = 3
+): Subscription {
+  const db = getDb();
+  const now = new Date();
+  const cycleStart = now.toISOString();
+  const cycleEnd = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000).toISOString(); // 30 days
+  const subscriptionId = `sub_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+  
+  return db.transaction(() => {
+    // Cancel any existing active subscriptions
+    db.prepare(`
+      UPDATE subscriptions SET status = 'canceled' 
+      WHERE user_id = ? AND status = 'active'
+    `).run(userId);
+    
+    // Create new subscription
+    db.prepare(`
+      INSERT INTO subscriptions (id, user_id, plan, cycle_start, cycle_end, credits_per_cycle, status, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, 'active', ?)
+    `).run(subscriptionId, userId, plan, cycleStart, cycleEnd, creditsPerCycle, now.toISOString());
+    
+    // Grant initial cycle credits
+    giveCredits(userId, creditsPerCycle, `${plan} subscription activated`);
+    
+    return {
+      id: subscriptionId,
+      user_id: userId,
+      plan,
+      cycle_start: cycleStart,
+      cycle_end: cycleEnd,
+      credits_per_cycle: creditsPerCycle,
+      status: 'active' as const,
+      created_at: now.toISOString(),
+    };
+  })();
+}
+
+/** Check if user has sufficient entitlement to unlock (credits OR active subscription) */
+export function canUserUnlock(userId: string): {
+  canUnlock: boolean;
+  reason: 'credits' | 'subscription' | 'insufficient';
+  credits: number;
+  plan: 'free' | 'basic';
+} {
+  const credits = getCreditBalance(userId).balance;
+  const plan = getUserPlan(userId);
+  
+  // Users can unlock if they have credits OR active subscription
+  if (credits > 0) {
+    return { canUnlock: true, reason: 'credits', credits, plan };
+  }
+  
+  if (plan === 'basic') {
+    return { canUnlock: true, reason: 'subscription', credits, plan };
+  }
+  
+  return { canUnlock: false, reason: 'insufficient', credits, plan };
+}
+
+/** 
+ * Grant monthly subscription credits (placeholder for cron job)
+ * This will be called by a scheduled task to grant monthly credits
+ * to active Basic subscribers
+ */
+export function grantMonthlyCredits(): { processed: number; granted: number } {
+  const db = getDb();
+  const now = new Date();
+  
+  // Find active subscriptions that need credit refresh
+  const subscriptions = db.prepare(`
+    SELECT * FROM subscriptions 
+    WHERE status = 'active' 
+      AND cycle_end <= ?
+      AND plan = 'basic'
+  `).all(now.toISOString()) as Subscription[];
+  
+  let processed = 0;
+  let granted = 0;
+  
+  for (const subscription of subscriptions) {
+    processed++;
+    
+    try {
+      db.transaction(() => {
+        // Extend cycle
+        const newCycleStart = now.toISOString();
+        const newCycleEnd = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000).toISOString();
+        
+        db.prepare(`
+          UPDATE subscriptions 
+          SET cycle_start = ?, cycle_end = ?
+          WHERE id = ?
+        `).run(newCycleStart, newCycleEnd, subscription.id);
+        
+        // Grant monthly credits
+        giveCredits(subscription.user_id, subscription.credits_per_cycle, 
+                   `Monthly ${subscription.plan} subscription grant`);
+        
+        granted += subscription.credits_per_cycle;
+      })();
+    } catch (error) {
+      console.error(`[subscription] Failed to grant credits to ${subscription.user_id}:`, error);
+    }
+  }
+  
+  console.log(`[subscription] Granted monthly credits: ${processed} subscriptions processed, ${granted} credits granted`);
+  return { processed, granted };
+}
+
 // ─── Dev Panel helpers ─────────────────────────────────
 
 export interface DevUnlockEntry {

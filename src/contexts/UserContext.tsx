@@ -8,14 +8,23 @@ export interface User {
   name: string;
 }
 
+export interface UserSubscription {
+  plan: 'free' | 'basic';
+  isActive: boolean;
+  cycleEnd?: string;
+  creditsPerCycle?: number;
+}
+
 interface UserContextType {
   user: User | null;
   loading: boolean;
   credits: number;
+  subscription: UserSubscription;
   login: (email: string, password: string) => Promise<{ success: boolean; error?: string }>;
   signup: (name: string, email: string, password: string) => Promise<{ success: boolean; error?: string }>;
   logout: () => Promise<void>;
   refreshCredits: () => Promise<void>;
+  refreshSubscription: () => Promise<void>;
 }
 
 const UserContext = createContext<UserContextType | undefined>(undefined);
@@ -36,6 +45,10 @@ export function UserProvider({ children }: UserProviderProps) {
   const [user, setUser] = useState<User | null>(null);
   const [loading, setLoading] = useState(true);
   const [credits, setCredits] = useState(0);
+  const [subscription, setSubscription] = useState<UserSubscription>({
+    plan: 'free',
+    isActive: false,
+  });
 
   // Check if user is logged in on mount
   useEffect(() => {
@@ -51,16 +64,18 @@ export function UserProvider({ children }: UserProviderProps) {
       if (response.ok) {
         const data = await response.json();
         setUser(data.user);
-        // Also fetch credits for authenticated users
-        await fetchCredits();
+        // Also fetch credits and subscription for authenticated users
+        await Promise.all([fetchCredits(), fetchSubscription()]);
       } else {
         setUser(null);
         setCredits(0);
+        setSubscription({ plan: 'free', isActive: false });
       }
     } catch (error) {
       console.error('Auth check failed:', error);
       setUser(null);
       setCredits(0);
+      setSubscription({ plan: 'free', isActive: false });
     } finally {
       setLoading(false);
     }
@@ -81,6 +96,29 @@ export function UserProvider({ children }: UserProviderProps) {
     }
   };
 
+  const fetchSubscription = async () => {
+    try {
+      const response = await fetch('/api/subscription', {
+        credentials: 'include',
+      });
+
+      if (response.ok) {
+        const data = await response.json();
+        setSubscription({
+          plan: data.plan || 'free',
+          isActive: data.isActive || false,
+          cycleEnd: data.cycleEnd,
+          creditsPerCycle: data.creditsPerCycle,
+        });
+      } else {
+        setSubscription({ plan: 'free', isActive: false });
+      }
+    } catch (error) {
+      console.error('Subscription fetch failed:', error);
+      setSubscription({ plan: 'free', isActive: false });
+    }
+  };
+
   const login = async (email: string, password: string) => {
     try {
       const response = await fetch('/api/auth/login', {
@@ -96,7 +134,7 @@ export function UserProvider({ children }: UserProviderProps) {
 
       if (response.ok) {
         setUser(data.user);
-        await fetchCredits();
+        await Promise.all([fetchCredits(), fetchSubscription()]);
         return { success: true };
       } else {
         return { success: false, error: data.error || 'Login failed' };
@@ -121,7 +159,7 @@ export function UserProvider({ children }: UserProviderProps) {
 
       if (response.ok) {
         setUser(data.user);
-        await fetchCredits();
+        await Promise.all([fetchCredits(), fetchSubscription()]);
         return { success: true };
       } else {
         return { success: false, error: data.error || 'Signup failed' };
@@ -142,6 +180,7 @@ export function UserProvider({ children }: UserProviderProps) {
     } finally {
       setUser(null);
       setCredits(0);
+      setSubscription({ plan: 'free', isActive: false });
     }
   };
 
@@ -151,14 +190,22 @@ export function UserProvider({ children }: UserProviderProps) {
     }
   };
 
+  const refreshSubscription = async () => {
+    if (user) {
+      await fetchSubscription();
+    }
+  };
+
   const value: UserContextType = {
     user,
     loading,
     credits,
+    subscription,
     login,
     signup,
     logout,
     refreshCredits,
+    refreshSubscription,
   };
 
   return (
