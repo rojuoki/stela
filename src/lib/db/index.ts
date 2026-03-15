@@ -101,4 +101,25 @@ function runMigrations(db: Database.Database): void {
     })();
     console.log("[db] Migration M-006: added unlocks.stage and updated UNIQUE constraint for stage-aware unlocks");
   }
+
+  // M-007: add temporary_unlocks table (Phase 2: guest user unlock results)
+  const temporaryUnlocksExists = db.prepare(
+    "SELECT name FROM sqlite_master WHERE type='table' AND name='temporary_unlocks'"
+  ).get();
+  if (!temporaryUnlocksExists) {
+    db.exec(`
+      CREATE TABLE temporary_unlocks (
+        token       TEXT PRIMARY KEY,
+        account_id  TEXT NOT NULL,
+        username    TEXT NOT NULL,
+        tweets_json TEXT NOT NULL,
+        created_at  TEXT NOT NULL,
+        expires_at  TEXT NOT NULL,
+        consumed    INTEGER NOT NULL DEFAULT 0
+      );
+      CREATE INDEX idx_temporary_unlocks_expires ON temporary_unlocks(expires_at);
+      CREATE INDEX idx_temporary_unlocks_consumed ON temporary_unlocks(consumed);
+    `);
+    console.log("[db] Migration M-007: added temporary_unlocks table for guest user results");
+  }
 }

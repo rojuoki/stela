@@ -162,4 +162,17 @@ CREATE TABLE IF NOT EXISTS api_call_log (
   ts        TEXT    NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_api_call_log_ts ON api_call_log(ts DESC);
+
+-- Temporary unlock results (Phase 2: for guest users before account creation)
+CREATE TABLE IF NOT EXISTS temporary_unlocks (
+  token       TEXT PRIMARY KEY,
+  account_id  TEXT NOT NULL,
+  username    TEXT NOT NULL,
+  tweets_json TEXT NOT NULL,  -- JSON array of tweet data
+  created_at  TEXT NOT NULL,
+  expires_at  TEXT NOT NULL,
+  consumed    INTEGER NOT NULL DEFAULT 0  -- 1 when transferred to user account
+);
+CREATE INDEX IF NOT EXISTS idx_temporary_unlocks_expires ON temporary_unlocks(expires_at);
+CREATE INDEX IF NOT EXISTS idx_temporary_unlocks_consumed ON temporary_unlocks(consumed);
 `;

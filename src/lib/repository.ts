@@ -630,3 +630,91 @@ export function cleanupExpiredHolds(): number {
     return cleaned;
   })();
 }
+
+// ─── Temporary Unlocks (Phase 2) ───────────────────────────────
+
+export interface TemporaryUnlock {
+  token: string;
+  account_id: string;
+  username: string;
+  tweets_json: string;
+  created_at: string;
+  expires_at: string;
+  consumed: number;
+}
+
+/** Create a temporary unlock result for guest users */
+export function createTemporaryUnlock(accountId: string, username: string, tweets: any[]): string {
+  const db = getDb();
+  const token = `temp_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+  const now = new Date();
+  const expiresAt = new Date(now.getTime() + 48 * 60 * 60 * 1000); // 48 hours TTL
+  
+  db.prepare(`
+    INSERT INTO temporary_unlocks (token, account_id, username, tweets_json, created_at, expires_at)
+    VALUES (?, ?, ?, ?, ?, ?)
+  `).run(
+    token,
+    accountId,
+    username.toLowerCase(),
+    JSON.stringify(tweets),
+    now.toISOString(),
+    expiresAt.toISOString()
+  );
+  
+  console.log(`[temporary-unlock] Created token ${token} for @${username} (expires: ${expiresAt.toISOString()})`);
+  return token;
+}
+
+/** Get temporary unlock by token */
+export function getTemporaryUnlock(token: string): TemporaryUnlock | null {
+  const db = getDb();
+  const now = new Date().toISOString();
+  
+  const result = db.prepare(`
+    SELECT * FROM temporary_unlocks 
+    WHERE token = ? AND expires_at > ? AND consumed = 0
+  `).get(token, now) as TemporaryUnlock | undefined;
+  
+  return result || null;
+}
+
+/** Transfer temporary unlock to user account (on account creation) */
+export function transferTemporaryUnlock(token: string, userId: string): boolean {
+  const db = getDb();
+  
+  return db.transaction(() => {
+    const tempUnlock = getTemporaryUnlock(token);
+    if (!tempUnlock) {
+      return false;
+    }
+    
+    // Mark temporary unlock as consumed
+    db.prepare(`
+      UPDATE temporary_unlocks SET consumed = 1 WHERE token = ?
+    `).run(token);
+    
+    // Create official unlock record
+    recordUnlock(userId, tempUnlock.account_id, `temp-transfer-${token}`);
+    
+    console.log(`[temporary-unlock] Transferred token ${token} to user ${userId} for account ${tempUnlock.account_id}`);
+    return true;
+  })();
+}
+
+/** Clean up expired temporary unlocks */
+export function cleanupExpiredTemporaryUnlocks(): number {
+  const db = getDb();
+  const now = new Date().toISOString();
+  
+  const result = db.prepare(`
+    DELETE FROM temporary_unlocks 
+    WHERE expires_at < ?
+  `).run(now);
+  
+  if (result.changes > 0) {
+    console.log(`[temporary-unlock] Cleaned up ${result.changes} expired temporary unlocks`);
+  }
+  
+  return result.changes;
+}

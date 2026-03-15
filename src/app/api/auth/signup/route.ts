@@ -1,11 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createUser, createToken, createAuthResponse } from "@/lib/auth";
-import { giveCredits } from "@/lib/repository";
+import { giveCredits, transferTemporaryUnlock } from "@/lib/repository";
 
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
-    const { email, password, name } = body;
+    const { email, password, name, transferToken } = body;
 
     if (!email || !password || !name) {
       return NextResponse.json(
@@ -56,6 +56,20 @@ export async function POST(req: NextRequest) {
       // Don't fail signup if credit granting fails
     }
 
+    // Transfer temporary unlock if provided
+    let transferredUnlock = false;
+    if (transferToken) {
+      try {
+        transferredUnlock = transferTemporaryUnlock(transferToken, user.id);
+        if (transferredUnlock) {
+          console.log(`[signup] Transferred temporary unlock ${transferToken} to user ${user.id}`);
+        }
+      } catch (error) {
+        console.error('Failed to transfer temporary unlock:', error);
+        // Don't fail signup if transfer fails
+      }
+    }
+
     // Create token
     const token = await createToken(user);
 
@@ -66,6 +80,7 @@ export async function POST(req: NextRequest) {
         email: user.email,
         name: user.name,
       },
+      transferredUnlock,
     });
 
   } catch (error) {

@@ -415,40 +415,61 @@ export default function UserPage() {
     }
   };
 
-  // Handle "Unlock for $3" button - temporary implementation using existing purchase API
+  // Handle "Unlock for $3" button - direct checkout for guest users
   const handleUnlockForPrice = async () => {
     if (!accountData || accountData.protected) return;
 
     setError(null);
 
     try {
-      // Step 1: Purchase unlock credit
-      const purchaseRes = await fetch('/api/purchase/unlock', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        credentials: 'include',
-      });
+      if (user) {
+        // Logged-in user: use existing credit-based flow
+        const purchaseRes = await fetch('/api/purchase/unlock', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          credentials: 'include',
+        });
 
-      if (!purchaseRes.ok) {
-        const data = await purchaseRes.json().catch(() => ({}));
-        if (purchaseRes.status === 401) {
-          // Not logged in - redirect to signup or show login prompt
-          // For now, redirect to signup to capture the purchase intent
-          router.push('/signup');
+        if (!purchaseRes.ok) {
+          const data = await purchaseRes.json().catch(() => ({}));
+          setError(data.error || 'Purchase failed');
           return;
         }
-        setError(data.error || 'Purchase failed');
-        return;
+
+        // Refresh credits and trigger excavation
+        await refreshCredits();
+        await handleExcavate(false);
+      } else {
+        // Guest user: start unlock with payment intent
+        const unlockRes = await fetch('/api/unlock/guest', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ 
+            username: accountData.username,
+            returnUrl: window.location.href 
+          }),
+        });
+
+        if (!unlockRes.ok) {
+          const data = await unlockRes.json().catch(() => ({}));
+          setError(data.error || 'Failed to start checkout');
+          return;
+        }
+
+        const unlockData = await unlockRes.json();
+        
+        if (unlockData.redirectUrl) {
+          // Redirect to Stripe Checkout or payment page
+          window.location.href = unlockData.redirectUrl;
+        } else if (unlockData.resultToken) {
+          // Development: skip payment, go directly to results
+          router.push(`/results/${unlockData.resultToken}`);
+        }
       }
-
-      // Step 2: Refresh credits
-      await refreshCredits();
-
-      // Step 3: Automatically trigger excavation
-      await handleExcavate(false);
-
     } catch (err) {
       setError('Network error. Please try again.');
     }
