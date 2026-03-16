@@ -32,6 +32,27 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ toke
       }, { status: 500 });
     }
 
+    // Check if this is placeholder data from guest unlock - if so, try to get real data
+    const isPlaceholder = tweets.some((tweet: any) => 
+      tweet.post_id?.startsWith('excavating_') || 
+      tweet.full_text?.includes('🔄 Excavation in progress')
+    );
+
+    if (isPlaceholder) {
+      // Try to get actual excavated data
+      const { getAccountByUsername, getTweetsByAccount } = await import("@/lib/repository");
+      
+      const account = getAccountByUsername(tempUnlock.username);
+      if (account) {
+        const actualTweets = getTweetsByAccount(account.account_id);
+        if (actualTweets.length > 0) {
+          // Real data is available - return it instead of placeholder
+          console.log(`[results] Found actual excavated data for ${tempUnlock.username}: ${actualTweets.length} tweets`);
+          tweets = actualTweets;
+        }
+      }
+    }
+
     return NextResponse.json({
       token: tempUnlock.token,
       account_id: tempUnlock.account_id,

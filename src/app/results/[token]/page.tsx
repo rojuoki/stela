@@ -32,6 +32,7 @@ export default function ResultsPage() {
   const [error, setError] = useState<string | null>(null);
   const [transferring, setTransferring] = useState(false);
   const [transferred, setTransferred] = useState(false);
+  const [isExcavating, setIsExcavating] = useState(false);
 
   // Load temporary unlock data
   useEffect(() => {
@@ -56,6 +57,13 @@ export default function ResultsPage() {
 
         const result = await response.json();
         setData(result);
+        
+        // Check if this is placeholder/excavating data
+        const isPlaceholder = result.tweets?.some((tweet: TweetData) => 
+          tweet.post_id?.startsWith('excavating_') || 
+          tweet.full_text?.includes('🔄 Excavation in progress')
+        );
+        setIsExcavating(isPlaceholder);
 
         // Load account data for header
         if (result.username) {
@@ -74,6 +82,58 @@ export default function ResultsPage() {
 
     loadData();
   }, [token]);
+
+  // Polling for excavation completion
+  useEffect(() => {
+    if (!isExcavating || !token) return;
+
+    const pollInterval = 5000; // Poll every 5 seconds
+    let pollTimer: NodeJS.Timeout;
+
+    const pollForUpdates = async () => {
+      try {
+        const response = await fetch(`/api/results/${token}`);
+        if (response.ok) {
+          const result = await response.json();
+          
+          // Check if excavation is still in progress
+          const stillExcavating = result.tweets?.some((tweet: TweetData) => 
+            tweet.post_id?.startsWith('excavating_') || 
+            tweet.full_text?.includes('🔄 Excavation in progress')
+          );
+
+          if (!stillExcavating) {
+            // Excavation completed - update data and stop polling
+            setData(result);
+            setIsExcavating(false);
+            console.log(`[results] Excavation completed for token ${token}`);
+          } else {
+            // Still excavating - schedule next poll
+            pollTimer = setTimeout(pollForUpdates, pollInterval);
+          }
+        } else {
+          // Error occurred - stop polling and let user refresh manually
+          console.warn(`[results] Polling error for token ${token}:`, response.status);
+          setIsExcavating(false);
+        }
+      } catch (err) {
+        // Network error - stop polling
+        console.warn(`[results] Polling network error for token ${token}:`, err);
+        setIsExcavating(false);
+      }
+    };
+
+    // Start polling after initial load
+    pollTimer = setTimeout(pollForUpdates, pollInterval);
+    console.log(`[results] Started polling for excavation completion: ${token}`);
+
+    return () => {
+      if (pollTimer) {
+        clearTimeout(pollTimer);
+        console.log(`[results] Stopped polling for token ${token}`);
+      }
+    };
+  }, [isExcavating, token]);
 
   // Transfer to account when user signs up/logs in
   const handleTransferToAccount = async () => {
@@ -258,12 +318,23 @@ export default function ResultsPage() {
       <div className="mb-4">
         <div className="flex items-center gap-3 mb-2">
           <h1 className="text-xl font-bold">Earliest Posts from {displayName}</h1>
-          <div className="inline-flex items-center px-2 py-1 bg-emerald-900/50 text-emerald-300 text-xs font-medium rounded-full">
-            Unlocked
-          </div>
+          {isExcavating ? (
+            <div className="inline-flex items-center px-2 py-1 bg-amber-900/50 text-amber-300 text-xs font-medium rounded-full">
+              <div className="animate-spin rounded-full h-3 w-3 border border-amber-300 border-t-transparent mr-1.5"></div>
+              Excavating
+            </div>
+          ) : (
+            <div className="inline-flex items-center px-2 py-1 bg-emerald-900/50 text-emerald-300 text-xs font-medium rounded-full">
+              Unlocked
+            </div>
+          )}
         </div>
         <p className="text-sm text-zinc-400">
-          Unlocked on {formatDate(data.created_at)} • {data.tweets.length} posts found
+          {isExcavating ? (
+            <>Excavation started on {formatDate(data.created_at)} • Results will appear shortly</>
+          ) : (
+            <>Unlocked on {formatDate(data.created_at)} • {data.tweets.length} posts found</>
+          )}
         </p>
       </div>
 
@@ -271,7 +342,21 @@ export default function ResultsPage() {
       {hasResults && <EngagementChart tweets={data.tweets} />}
 
       {/* Tweet list */}
-      {hasResults ? (
+      {isExcavating ? (
+        <div className="border border-zinc-800 rounded-xl min-h-[200px] flex items-center justify-center">
+          <div className="text-center max-w-md px-6">
+            <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-white mx-auto mb-4"></div>
+            <h3 className="text-lg font-semibold text-white mb-2">Excavating Earliest Posts</h3>
+            <p className="text-sm text-zinc-400 mb-2">
+              Our system is working to discover the earliest posts from {displayName}'s timeline. 
+              This process can take a few minutes depending on the account's history.
+            </p>
+            <p className="text-xs text-zinc-500">
+              Results will automatically appear when excavation is complete. No need to refresh the page.
+            </p>
+          </div>
+        </div>
+      ) : hasResults ? (
         <div className="border border-zinc-800 rounded-xl overflow-hidden">
           {data.tweets.map((tweet) => (
             <TweetCard key={tweet.post_id} tweet={tweet} />

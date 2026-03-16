@@ -64,17 +64,33 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    // Path 4: No cache exists - create placeholder result for now
-    console.log(`[purchase/guest-unlock] No cached data for @${normalizedUsername}, creating placeholder result`);
+    // Path 4: No cache exists - start excavation and create placeholder result
+    console.log(`[purchase/guest-unlock] No cached data for @${normalizedUsername}, starting excavation`);
 
-    // Create a temporary unlock with development/placeholder content
-    // This ensures guest users get a valid /results/[token] page instead of 404
-    const placeholderAccountId = `guest_${normalizedUsername}_${Date.now()}`;
+    // Check for existing active job to avoid duplicates
+    let jobId = findActiveJobForUsername(normalizedUsername);
+    
+    if (!jobId) {
+      // Start new excavation job
+      jobId = createAndRunJob(
+        normalizedUsername, 
+        account?.created_at, 
+        undefined, // no credit hold for guest purchases
+        1, // stage 1
+        false // not forced
+      );
+      console.log(`[purchase/guest-unlock] Started excavation job ${jobId} for @${normalizedUsername}`);
+    } else {
+      console.log(`[purchase/guest-unlock] Using existing active job ${jobId} for @${normalizedUsername}`);
+    }
+
+    // Create a temporary unlock with placeholder content that indicates excavation is in progress
+    const placeholderAccountId = account?.account_id || `pending_${normalizedUsername}_${Date.now()}`;
     const placeholderTweets = [{
-      post_id: `guest_${Date.now()}`,
+      post_id: `excavating_${Date.now()}`,
       account_id: placeholderAccountId,
       created_at: new Date().toISOString(),
-      full_text: `Thank you for your purchase! Excavation for @${normalizedUsername} will be available soon. This is a development preview.`,
+      full_text: `🔄 Excavation in progress for @${normalizedUsername}. Your earliest posts will appear here shortly. Thank you for your purchase!`,
       media_json: null,
       like_count: 0,
       retweet_count: 0,
@@ -83,13 +99,14 @@ export async function POST(req: NextRequest) {
     }];
 
     const token = createTemporaryUnlock(placeholderAccountId, normalizedUsername, placeholderTweets);
-    console.log(`[purchase/guest-unlock] Created guest result token for @${normalizedUsername}: ${token}`);
+    console.log(`[purchase/guest-unlock] Created pending result token for @${normalizedUsername}: ${token} (job: ${jobId})`);
 
     return NextResponse.json({
       success: true,
       resultToken: token,
-      source: "placeholder",
-      message: "Payment successful - excavation feature coming soon"
+      jobId,
+      source: "excavation_started",
+      message: "Payment successful - excavation started"
     });
 
   } catch (error) {
