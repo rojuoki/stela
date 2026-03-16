@@ -9,6 +9,8 @@
 import { tokenPool } from "./tokenPool";
 import { recordApiCall } from "./repository";
 import { incXApiCalls, incXApi429 } from "./devStats";
+import { promises as fs } from "fs";
+import path from "path";
 
 const API_BASE = process.env.X_API_BASE || "https://api.x.com/2";
 const BEARER = () => {
@@ -130,7 +132,99 @@ function normalizeEndpoint(endpoint: string): string {
   return endpoint.replace(/^\//, "");
 }
 
-// ─── Raw rate-limit header logger ─────────────────────
+// ─── Debug response logger ────────────────────────────
+
+/**
+ * Mask sensitive headers for debug logging.
+ * Never logs Authorization, API keys, cookies, or other credentials.
+ */
+function maskHeaders(headers: Headers): Record<string, string> {
+  const masked: Record<string, string> = {};
+  const sensitiveHeaders = [
+    'authorization',
+    'x-api-key', 
+    'cookie',
+    'set-cookie',
+    'x-bearer-token'
+  ];
+  
+  for (const [key, value] of headers.entries()) {
+    const lowerKey = key.toLowerCase();
+    if (sensitiveHeaders.includes(lowerKey)) {
+      masked[key] = '[MASKED]';
+    } else {
+      masked[key] = value;
+    }
+  }
+  
+  return masked;
+}
+
+/**
+ * Extract relevant body information based on status code.
+ * 200: meta fields only, 429+: full body for error analysis.
+ */
+function extractBodyInfo(status: number, body: any): any {
+  if (status === 200) {
+    // For success responses, only extract meta information
+    return {
+      meta: body?.meta || null,
+      data_count: Array.isArray(body?.data) ? body.data.length : 0,
+      includes_count: body?.includes ? Object.keys(body.includes).length : 0
+    };
+  } else {
+    // For error responses, include full body for diagnosis
+    return body;
+  }
+}
+
+/**
+ * Save debug response to ndjson file when DEBUG_X_API=1.
+ * Fire-and-forget async operation, never throws.
+ */
+async function saveDebugResponse(
+  endpoint: string,
+  status: number,
+  headers: Headers,
+  body: any,
+  jobId?: string,
+  activeToken?: string
+): Promise<void> {
+  if (!process.env.DEBUG_X_API) return;
+  
+  try {
+    const logDir = process.env.DEBUG_X_API_LOG_DIR || './logs';
+    await fs.mkdir(logDir, { recursive: true });
+    
+    const today = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
+    const logFile = path.join(logDir, `x-api-debug-${today}.ndjson`);
+    
+    const logEntry = {
+      timestamp: new Date().toISOString(),
+      endpoint: endpoint.replace(/^\//, ''), // strip leading slash
+      status,
+      job_id: jobId || null,
+      token_index: activeToken ? tokenPool.getTokenIndex(activeToken) : null,
+      headers: maskHeaders(headers),
+      rate_limit_headers: {
+        limit: headers.get('x-rate-limit-limit'),
+        remaining: headers.get('x-rate-limit-remaining'),
+        reset: headers.get('x-rate-limit-reset'),
+        retry_after: headers.get('retry-after')
+      },
+      body: extractBodyInfo(status, body)
+    };
+    
+    const line = JSON.stringify(logEntry) + '\n';
+    await fs.appendFile(logFile, line);
+    
+  } catch (error) {
+    // Silent failure - debug logging should never crash the main flow
+    console.error('[debug-log] Failed to save debug response:', error);
+  }
+}
+
+// ─── Raw rate-limit header logger ─────────────────────</thinking>
 
 /**
  * Emit a single-line log of raw X API rate-limit response headers.
@@ -256,12 +350,26 @@ async function xfetch(
     }
 
     if (res.ok) {
-      return await res.json();
+      const responseBody = await res.json();
+      
+      // Debug logging for successful responses
+      saveDebugResponse(endpoint, res.status, res.headers, responseBody, stats.jobId, activeToken);
+      
+      return responseBody;
     }
 
     const body = await res.text().catch(() => "");
     console.error(`${label} HTTP ${res.status}: ${body.slice(0, 300)}`);
     stats.errors.push({ status: res.status, body: body.slice(0, 500), endpoint });
+
+    // Debug logging for error responses (429, 4xx, 5xx)
+    let bodyForDebug: any;
+    try {
+      bodyForDebug = JSON.parse(body);
+    } catch {
+      bodyForDebug = body; // Keep as string if not valid JSON
+    }
+    saveDebugResponse(endpoint, res.status, res.headers, bodyForDebug, stats.jobId, activeToken);
 
     if (res.status === 429) {
       incXApi429();
