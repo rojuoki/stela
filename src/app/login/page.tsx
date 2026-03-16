@@ -1,24 +1,26 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, Suspense } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useUser } from "@/contexts/UserContext";
+import { ReturnToHandler } from "../../components/ReturnToHandler";
 
 export default function LoginPage() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
+  const [returnTo, setReturnTo] = useState('/');
   const router = useRouter();
   const { user, login } = useUser();
 
   // Redirect if already logged in
   useEffect(() => {
     if (user) {
-      router.push("/");
+      router.push(returnTo);
     }
-  }, [user, router]);
+  }, [user, router, returnTo]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -29,8 +31,8 @@ export default function LoginPage() {
       const result = await login(email, password);
 
       if (result.success) {
-        // Successful login - redirect to home
-        router.push("/");
+        // Successful login - redirect to returnTo URL or home
+        router.push(returnTo);
       } else {
         setError(result.error || "Login failed");
       }
@@ -43,6 +45,10 @@ export default function LoginPage() {
 
   return (
     <main className="max-w-md mx-auto px-4 py-12">
+      <Suspense fallback={null}>
+        <ReturnToHandler onReturnTo={setReturnTo} />
+      </Suspense>
+      
       {/* Header */}
       <div className="text-center mb-8">
         <Link href="/" className="text-2xl font-bold mb-1 tracking-tight hover:text-zinc-300 transition-colors">

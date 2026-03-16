@@ -93,24 +93,32 @@ export default function ResultsPage() {
 
       if (response.ok) {
         setTransferred(true);
-        // Optionally redirect to account dashboard
-        setTimeout(() => {
-          router.push('/account/unlocks');
-        }, 2000);
+        // Only redirect for guest users who just signed up
+        // Logged-in users who used "Unlock for $3" should stay on results page
       } else {
+        // For guest unlocks, show transfer error
+        // For logged-in unlocks, ignore transfer errors (already recorded)
         const errorData = await response.json();
-        setError(errorData.error || 'Failed to save unlock');
+        if (!data || errorData.error !== 'Unlock not found, expired, or already transferred') {
+          setError(errorData.error || 'Failed to save unlock');
+        }
       }
     } catch (err) {
-      setError('Network error');
+      // For guest unlocks, show network error
+      // For logged-in unlocks, ignore transfer errors
+      if (!data) {
+        setError('Network error');
+      }
     } finally {
       setTransferring(false);
     }
   };
 
-  // Auto-transfer if user is already logged in
+  // Auto-transfer if user is already logged in (only for guest unlocks)
   useEffect(() => {
     if (!userLoading && user && data && !transferred && !transferring) {
+      // Check if this was originally a guest unlock (by checking if user has consumed the temp unlock)
+      // For logged-in users who created the unlock, no transfer is needed
       handleTransferToAccount();
     }
   }, [user, userLoading, data, transferred, transferring]);
@@ -209,7 +217,7 @@ export default function ResultsPage() {
         </div>
       )}
 
-      {/* Account Creation Prompt - only for guests */}
+      {/* Account Creation Prompt - only for guest users */}
       {!user && !transferred && (
         <div className="mb-6 bg-gradient-to-r from-blue-900/20 to-purple-900/20 border border-blue-800/50 rounded-xl p-6">
           <div className="text-center">
@@ -225,13 +233,13 @@ export default function ResultsPage() {
             </p>
             <div className="flex items-center justify-center gap-3">
               <Link
-                href="/signup"
+                href={`/signup?returnTo=${encodeURIComponent(`/results/${token}`)}`}
                 className="bg-gradient-to-r from-blue-600 to-purple-600 text-white font-semibold px-6 py-3 rounded-lg hover:from-blue-700 hover:to-purple-700 transition-all"
               >
                 Create Account
               </Link>
               <Link
-                href="/login"
+                href={`/login?returnTo=${encodeURIComponent(`/results/${token}`)}`}
                 className="bg-zinc-800 text-white font-semibold px-6 py-3 rounded-lg hover:bg-zinc-700 transition-colors border border-zinc-600"
               >
                 Sign In
@@ -244,41 +252,7 @@ export default function ResultsPage() {
         </div>
       )}
 
-      {/* Transfer Success Message */}
-      {transferred && (
-        <div className="mb-6 bg-emerald-900/20 border border-emerald-800/50 rounded-xl p-6">
-          <div className="text-center">
-            <div className="w-12 h-12 bg-emerald-600 rounded-full flex items-center justify-center mx-auto mb-4">
-              <svg className="w-6 h-6 text-white" fill="currentColor" viewBox="0 0 20 20">
-                <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd" />
-              </svg>
-            </div>
-            <h3 className="text-lg font-semibold mb-2 text-emerald-300">Unlock Saved Successfully!</h3>
-            <p className="text-sm text-emerald-100 mb-4">
-              This unlock has been saved to your account and you can access it anytime from your dashboard.
-            </p>
-            <Link
-              href="/account/unlocks"
-              className="inline-flex items-center gap-2 bg-emerald-600 text-white font-semibold px-4 py-2 rounded-lg hover:bg-emerald-700 transition-colors text-sm"
-            >
-              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-              </svg>
-              View My Unlocks
-            </Link>
-          </div>
-        </div>
-      )}
-
-      {/* Transfer Loading */}
-      {transferring && (
-        <div className="mb-6 bg-zinc-900/50 border border-zinc-700 rounded-xl p-6">
-          <div className="text-center">
-            <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-500 mx-auto mb-4"></div>
-            <p className="text-zinc-400">Saving unlock to your account...</p>
-          </div>
-        </div>
-      )}
+      {/* Silently handle auto-transfer for logged-in users - no UI needed */}
 
       {/* Results Display */}
       <div className="mb-4">

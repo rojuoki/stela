@@ -415,60 +415,39 @@ export default function UserPage() {
     }
   };
 
-  // Handle "Unlock for $3" button - direct checkout for guest users
+  // Handle "Unlock for $3" button - use new guest purchase endpoint
   const handleUnlockForPrice = async () => {
     if (!accountData || accountData.protected) return;
 
     setError(null);
 
     try {
-      if (user) {
-        // Logged-in user: use existing credit-based flow
-        const purchaseRes = await fetch('/api/purchase/unlock', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          credentials: 'include',
-        });
+      // Use new guest purchase endpoint that handles payment + excavation
+      const res = await apiFetch("/api/purchase/guest-unlock", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ 
+          username: accountData.username,
+          returnUrl: window.location.href 
+        }),
+      });
 
-        if (!purchaseRes.ok) {
-          const data = await purchaseRes.json().catch(() => ({}));
-          setError(data.error || 'Purchase failed');
-          return;
-        }
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        setError(data.error || `Failed to unlock: HTTP ${res.status}`);
+        return;
+      }
 
-        // Refresh credits and trigger excavation
-        await refreshCredits();
-        await handleExcavate(false);
+      const unlockData = await res.json();
+      
+      if (unlockData.redirectUrl) {
+        // Production: redirect to Stripe Checkout or other flow
+        window.location.href = unlockData.redirectUrl;
+      } else if (unlockData.resultToken) {
+        // Go directly to results page with the result token
+        router.push(`/results/${unlockData.resultToken}`);
       } else {
-        // Guest user: start unlock with payment intent
-        const unlockRes = await fetch('/api/unlock/guest', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({ 
-            username: accountData.username,
-            returnUrl: window.location.href 
-          }),
-        });
-
-        if (!unlockRes.ok) {
-          const data = await unlockRes.json().catch(() => ({}));
-          setError(data.error || 'Failed to start checkout');
-          return;
-        }
-
-        const unlockData = await unlockRes.json();
-        
-        if (unlockData.redirectUrl) {
-          // Redirect to Stripe Checkout or payment page
-          window.location.href = unlockData.redirectUrl;
-        } else if (unlockData.resultToken) {
-          // Development: skip payment, go directly to results
-          router.push(`/results/${unlockData.resultToken}`);
-        }
+        setError("Unexpected response from server");
       }
     } catch (err) {
       setError('Network error. Please try again.');
@@ -839,6 +818,38 @@ export default function UserPage() {
             cacheHit={cacheHit}
             resumeAt={resumeAt}
           />
+
+          {/* Guest Account Creation Prompt - only for guest users with results */}
+          {!user && hasResults && (
+            <div className="mb-6 bg-gradient-to-r from-blue-900/20 to-purple-900/20 border border-blue-800/50 rounded-xl p-6">
+              <div className="text-center">
+                <div className="w-12 h-12 bg-gradient-to-r from-blue-500 to-purple-500 rounded-full flex items-center justify-center mx-auto mb-4">
+                  <svg className="w-6 h-6 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 3v4M3 5h4M6 17v4m-2-2h4m5-16l2.286 6.857L21 12l-5.714 2.143L13 21l-2.286-6.857L5 12l5.714-2.143L13 3z" />
+                  </svg>
+                </div>
+                <h3 className="text-lg font-semibold mb-2 text-white">Create a free account to save your unlock</h3>
+                <p className="text-sm text-zinc-400 mb-4 max-w-md mx-auto">
+                  This unlock will be saved to your account so you can access it anytime. 
+                  Plus you'll get 3 free credits to unlock more accounts.
+                </p>
+                <div className="flex items-center justify-center gap-3">
+                  <Link
+                    href={`/signup?returnTo=${encodeURIComponent(`/user/${username}`)}`}
+                    className="bg-gradient-to-r from-blue-600 to-purple-600 text-white font-semibold px-6 py-3 rounded-lg hover:from-blue-700 hover:to-purple-700 transition-all"
+                  >
+                    Create Account
+                  </Link>
+                  <Link
+                    href={`/login?returnTo=${encodeURIComponent(`/user/${username}`)}`}
+                    className="bg-zinc-800 text-white font-semibold px-6 py-3 rounded-lg hover:bg-zinc-700 transition-colors border border-zinc-600"
+                  >
+                    Sign In
+                  </Link>
+                </div>
+              </div>
+            </div>
+          )}
 
           {/* Engagement Chart */}
           {hasResults && <EngagementChart tweets={tweets} />}

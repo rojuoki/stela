@@ -1,9 +1,10 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, Suspense } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useUser } from "@/contexts/UserContext";
+import { ReturnToHandler } from "../../components/ReturnToHandler";
 
 export default function SignupPage() {
   const [name, setName] = useState("");
@@ -11,15 +12,16 @@ export default function SignupPage() {
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
+  const [returnTo, setReturnTo] = useState('/');
   const router = useRouter();
   const { user, signup } = useUser();
 
   // Redirect if already logged in
   useEffect(() => {
     if (user) {
-      router.push("/");
+      router.push(returnTo);
     }
-  }, [user, router]);
+  }, [user, router, returnTo]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -30,8 +32,8 @@ export default function SignupPage() {
       const result = await signup(name, email, password);
 
       if (result.success) {
-        // Successful signup - redirect to home
-        router.push("/");
+        // Successful signup - redirect to returnTo URL or home
+        router.push(returnTo);
       } else {
         setError(result.error || "Signup failed");
       }
@@ -44,6 +46,10 @@ export default function SignupPage() {
 
   return (
     <main className="max-w-md mx-auto px-4 py-12">
+      <Suspense fallback={null}>
+        <ReturnToHandler onReturnTo={setReturnTo} />
+      </Suspense>
+      
       {/* Header */}
       <div className="text-center mb-8">
         <Link href="/" className="text-2xl font-bold mb-1 tracking-tight hover:text-zinc-300 transition-colors">
