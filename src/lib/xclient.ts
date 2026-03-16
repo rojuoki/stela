@@ -215,6 +215,24 @@ async function xfetch(
         tokenPool.updateFromHeaders(activeToken, res.headers);
       }
       logRawXRate(res);
+
+      // [xrl] specialized log for /2/tweets/search/all - tracking token-specific rate limits
+      if (endpoint === "/tweets/search/all") {
+        const limit = res.headers.get("x-rate-limit-limit");
+        const remaining = res.headers.get("x-rate-limit-remaining");
+        const resetEpoch = res.headers.get("x-rate-limit-reset");
+        const tokenIndex = tokenPool.getTokenIndex(activeToken);
+        const at = new Date().toISOString();
+        
+        console.log(
+          `[xrl] job=${stats.jobId ?? "null"} tok=t${tokenIndex} ep=tweets/search/all ` +
+          `at=${at} status=${res.status} ` +
+          `x-rate-limit-limit=${limit ?? "null"} ` +
+          `x-rate-limit-remaining=${remaining ?? "null"} ` +
+          `x-rate-limit-reset=${resetEpoch ?? "null"}`
+        );
+      }
+
       const remaining = res.headers.get("x-rate-limit-remaining");
       const reset = res.headers.get("x-rate-limit-reset");
       const now = Math.floor(Date.now() / 1000);
