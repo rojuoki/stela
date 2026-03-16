@@ -23,8 +23,14 @@ const BEARER = () => {
 const MAX_RETRIES = 2;
 const BACKOFF_BASE_MS = 1000;
 
+/** Inter-request delay to maintain rate limit spacing (matches EXPLORE_INTER_REQUEST_DELAY_MS). */
+const INTER_REQUEST_DELAY_MS = 1300;
+
 /** Total X API fetch calls since server start — debug only. */
 let xCallCount = 0;
+
+/** Track last tweets/search/all call timestamp for rate limit spacing. */
+let lastSearchAllTimestamp = 0;
 
 // ─── end_time safety ──────────────────────────────────
 
@@ -302,6 +308,20 @@ async function xfetch(
 
     let res: Response;
     try {
+      // ── Rate limit spacing for tweets/search/all ──────────────────────────
+      if (endpoint === "/tweets/search/all") {
+        const now = Date.now();
+        const timeSinceLastCall = now - lastSearchAllTimestamp;
+        
+        if (timeSinceLastCall < INTER_REQUEST_DELAY_MS) {
+          const waitTime = INTER_REQUEST_DELAY_MS - timeSinceLastCall;
+          console.log(`[rate-limit] tweets/search/all spacing: waiting ${waitTime}ms (last call ${timeSinceLastCall}ms ago)`);
+          await sleep(waitTime);
+        }
+        
+        lastSearchAllTimestamp = Date.now();
+      }
+
       res = await fetch(url.toString(), {
         headers: { Authorization: `Bearer ${activeToken}` },
       });
@@ -414,7 +434,9 @@ async function xfetch(
             stats.token = alternativeToken;
             stats.tokenSwitchAttempts = switchAttempts + 1;
             
-            // Immediate retry with new token - no delay!
+            // Wait before retry with new token to maintain rate limit spacing
+            console.log(`[token-switch] Waiting ${INTER_REQUEST_DELAY_MS}ms before retry with new token`);
+            await sleep(INTER_REQUEST_DELAY_MS);
             return xfetch(endpoint, params, stats);
           } else {
             console.log(`[token-switch] FAILED: No alternative token available (current: ...${activeToken.slice(-6)})`);
