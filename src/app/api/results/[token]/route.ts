@@ -58,6 +58,7 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ toke
       account_id: tempUnlock.account_id,
       username: tempUnlock.username,
       tweets,
+      job_id: tempUnlock.job_id,
       created_at: tempUnlock.created_at,
       expires_at: tempUnlock.expires_at,
     });

@@ -7,14 +7,16 @@ import { notFound } from "next/navigation";
 import { EngagementChart } from "../../../components/EngagementChart";
 import { TweetCard } from "../../../components/TweetCard";
 import { AccountHeader } from "../../../components/AccountHeader";
+import { JobStatus } from "../../../components/JobStatus";
 import { useUser } from "../../../contexts/UserContext";
-import type { TweetData, AccountData } from "../../../components/types";
+import type { TweetData, AccountData, Status, JobPhase } from "../../../components/types";
 
 interface TemporaryUnlockData {
   token: string;
   account_id: string;
   username: string;
   tweets: TweetData[];
+  job_id: string | null;
   created_at: string;
   expires_at: string;
 }
@@ -33,6 +35,12 @@ export default function ResultsPage() {
   const [transferring, setTransferring] = useState(false);
   const [transferred, setTransferred] = useState(false);
   const [isExcavating, setIsExcavating] = useState(false);
+  
+  // Job status tracking
+  const [jobStatus, setJobStatus] = useState<Status>("idle");
+  const [jobPhase, setJobPhase] = useState<JobPhase>(null);
+  const [jobInfo, setJobInfo] = useState<string>("");
+  const [jobResumeAt, setJobResumeAt] = useState<string | null>(null);
 
   // Load temporary unlock data
   useEffect(() => {
@@ -64,6 +72,13 @@ export default function ResultsPage() {
           tweet.full_text?.includes('🔄 Excavation in progress')
         );
         setIsExcavating(isPlaceholder);
+        
+        // Initialize job status if this is a guest result with active excavation
+        if (isPlaceholder && result.job_id) {
+          setJobStatus("running");
+          setJobPhase("running");
+          setJobInfo("Starting excavation...");
+        }
 
         // Load account data for header
         if (result.username) {
@@ -134,6 +149,76 @@ export default function ResultsPage() {
       }
     };
   }, [isExcavating, token]);
+
+  // Job status polling for guest results with active excavation
+  useEffect(() => {
+    if (!data?.job_id || !isExcavating) return;
+
+    const pollInterval = 3000; // Poll every 3 seconds for job status
+    let pollTimer: NodeJS.Timeout;
+
+    const pollJobStatus = async () => {
+      try {
+        const response = await fetch(`/api/jobs/${data.job_id}`);
+        if (response.ok) {
+          const jobData = await response.json();
+          
+          // Update job status for UI display
+          const status = jobData.status;
+          setJobResumeAt(jobData.resumeAt);
+          
+          if (status === 'waiting_rate_limit') {
+            setJobStatus("running");
+            setJobPhase("waiting_rate_limit");
+            setJobInfo("API rate limit - will resume automatically");
+          } else if (status === 'queued') {
+            setJobStatus("running");
+            setJobPhase("queued");
+            const position = jobData.queuePosition;
+            setJobInfo(position ? `Position ${position} in queue` : "Queued for excavation");
+          } else if (status === 'running') {
+            setJobStatus("running");
+            setJobPhase("running");
+            setJobInfo(`Excavating earliest posts (${jobData.apiCalls || 0} API calls)`);
+          } else if (status === 'succeeded') {
+            // Job completed - the main result polling will pick up the new data
+            setJobStatus("done");
+            setJobPhase(null);
+            setJobInfo("Excavation completed");
+          } else if (status === 'failed') {
+            setJobStatus("failed");
+            setJobPhase(null);
+            setJobInfo("Excavation failed");
+            setIsExcavating(false); // Stop polling for results
+          }
+          
+          // Continue polling if job is still active
+          if (['queued', 'running', 'waiting_rate_limit'].includes(status)) {
+            pollTimer = setTimeout(pollJobStatus, pollInterval);
+          }
+        } else {
+          console.warn(`[results] Job status polling error for ${data.job_id}:`, response.status);
+          // Continue polling on HTTP errors
+          pollTimer = setTimeout(pollJobStatus, pollInterval);
+        }
+      } catch (err) {
+        console.warn(`[results] Job status polling network error for ${data.job_id}:`, err);
+        // Continue polling on network errors
+        pollTimer = setTimeout(pollJobStatus, pollInterval);
+      }
+    };
+
+    // Start job status polling
+    pollTimer = setTimeout(pollJobStatus, pollInterval);
+    console.log(`[results] Started job status polling for ${data.job_id}`);
+
+    return () => {
+      if (pollTimer) {
+        clearTimeout(pollTimer);
+        console.log(`[results] Stopped job status polling for ${data.job_id}`);
+      }
+    };
+  }, [data?.job_id, isExcavating]);
 
   // Transfer to account when user signs up/logs in
   const handleTransferToAccount = async () => {
@@ -313,6 +398,19 @@ export default function ResultsPage() {
       )}
 
       {/* Silently handle auto-transfer for logged-in users - no UI needed */}
+
+      {/* Job Status - show for guest results with active excavation */}
+      {data?.job_id && isExcavating && (
+        <JobStatus
+          status={jobStatus}
+          jobPhase={jobPhase}
+          jobInfo={jobInfo}
+          error={null}
+          credits={0} // Guest users don't have credits
+          cacheHit={false}
+          resumeAt={jobResumeAt}
+        />
+      )}
 
       {/* Results Display */}
       <div className="mb-4">

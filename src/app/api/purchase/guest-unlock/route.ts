@@ -98,7 +98,7 @@ export async function POST(req: NextRequest) {
       fetched_at: new Date().toISOString()
     }];
 
-    const token = createTemporaryUnlock(placeholderAccountId, normalizedUsername, placeholderTweets);
+    const token = createTemporaryUnlock(placeholderAccountId, normalizedUsername, placeholderTweets, jobId);
     console.log(`[purchase/guest-unlock] Created pending result token for @${normalizedUsername}: ${token} (job: ${jobId})`);
 
     return NextResponse.json({

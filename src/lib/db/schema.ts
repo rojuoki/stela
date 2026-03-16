@@ -169,6 +169,7 @@ CREATE TABLE IF NOT EXISTS temporary_unlocks (
   account_id  TEXT NOT NULL,
   username    TEXT NOT NULL,
   tweets_json TEXT NOT NULL,  -- JSON array of tweet data
+  job_id      TEXT,           -- Associated excavation job ID for progress tracking
   created_at  TEXT NOT NULL,
   expires_at  TEXT NOT NULL,
   consumed    INTEGER NOT NULL DEFAULT 0  -- 1 when transferred to user account

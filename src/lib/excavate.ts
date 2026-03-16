@@ -551,17 +551,21 @@ async function excavateFullArchive(
         await sleep(EXPLORE_INTER_REQUEST_DELAY_MS);
       } else {
         // Resuming mid-month-scan: we already know this year has tweets.
-        earliestHitYear = year;
+        // earliestHitYear is already restored from checkpoint, don't overwrite it.
         zeroYearStreak = 0;
         stepYears = 1;
         console.log(
-          `[explore] year=${year} — skipping year probe (resuming mid-month-scan)`,
+          `[explore] year=${year} — skipping year probe (resuming mid-month-scan), using saved earliestHitYear=${earliestHitYear}`,
         );
       }
 
+      // For month scanning, always use earliestHitYear which contains the correct year:
+      // - New discoveries: earliestHitYear was set to actualHitYear after refinement
+      // - Checkpoint resume: earliestHitYear was restored from saved checkpoint
+
       // ── Month scan ──────────────────────────────────
-      // Use the correct year for month scanning.
-      const scanYear = year;
+      // Use earliestHitYear for month scanning (correct after 2-year step refinement & checkpoint resume).
+      const scanYear = earliestHitYear;
 
       const monthFrom =
         scanYear === skipYearProbeFor && cp?.next_month !== undefined

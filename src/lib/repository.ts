@@ -638,31 +638,33 @@ export interface TemporaryUnlock {
   account_id: string;
   username: string;
   tweets_json: string;
+  job_id: string | null;
   created_at: string;
   expires_at: string;
   consumed: number;
 }
 
 /** Create a temporary unlock result for guest users */
-export function createTemporaryUnlock(accountId: string, username: string, tweets: any[]): string {
+export function createTemporaryUnlock(accountId: string, username: string, tweets: any[], jobId?: string | null): string {
   const db = getDb();
   const token = `temp_${Date.now()}_${Math.random().toString(36).slice(2)}`;
   const now = new Date();
   const expiresAt = new Date(now.getTime() + 48 * 60 * 60 * 1000); // 48 hours TTL
   
   db.prepare(`
-    INSERT INTO temporary_unlocks (token, account_id, username, tweets_json, created_at, expires_at)
-    VALUES (?, ?, ?, ?, ?, ?)
+    INSERT INTO temporary_unlocks (token, account_id, username, tweets_json, job_id, created_at, expires_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
   `).run(
     token,
     accountId,
     username.toLowerCase(),
     JSON.stringify(tweets),
+    jobId || null,
     now.toISOString(),
     expiresAt.toISOString()
   );
   
-  console.log(`[temporary-unlock] Created token ${token} for @${username} (expires: ${expiresAt.toISOString()})`);
+  console.log(`[temporary-unlock] Created token ${token} for @${username}${jobId ? ` (job: ${jobId})` : ''} (expires: ${expiresAt.toISOString()})`);
   return token;
 }
 
