@@ -1013,8 +1013,7 @@ async function collectWindowPass(
   // Track pending normal window advancement after split processing
   let pendingNormalWindowAdvancement: { to: Date; span: number } | null = null;
   
-  // Dedupe-only state for parent split windows (not counted toward target)
-  const splitParentTweets = new Set<string>();
+  // Note: Split parent tweets are no longer tracked - each window processes independently
   
   let stopReason: StopReason = "ACCOUNT_HAS_LESS_THAN_LIMIT";
 
@@ -1209,13 +1208,15 @@ async function collectWindowPass(
           `[split] window=[${currentWindowStart.toISOString().slice(0, 10)}, ${currentWindowEnd.toISOString().slice(0, 10)}] -> [${currentWindowStart.toISOString().slice(0, 10)}, ${mid.toISOString().slice(0, 10)}], [${rightStart.toISOString().slice(0, 10)}, ${currentWindowEnd.toISOString().slice(0, 10)}]`,
         );
         
-        // Store parent page1 tweets for dedupe only (NOT in collected)
+        // Store parent page1 tweets for historical record only (NOT collected)
+        // Parent data is discarded; only child windows contribute to collection
         if (checkpointOpts?.userId && page.tweets.length > 0) {
           storeTweets(checkpointOpts.userId, page.tweets, page.media);
         }
-        for (const t of page.tweets) {
-          splitParentTweets.add(t.id);
-        }
+        
+        console.log(
+          `[split][parent] Discarding ${page.tweets.length} parent tweets (split sample only) — child windows will handle collection`,
+        );
         
         onProgress?.(stats.totalCalls);
         
@@ -1341,10 +1342,15 @@ async function collectWindowPass(
     const sizeBeforeWindow = collected.size;
     onProgress?.(stats.totalCalls);
     
-    // Apply dedupe when processing child windows
+    // Sort all window tweets by created_at (earliest first) for consistent processing
+    const sortedTweets = windowTweets.sort((a, b) => 
+      new Date(a.created_at).getTime() - new Date(b.created_at).getTime()
+    );
+    
+    // Apply pure ID-based dedupe against collected tweets only
     let dedupeFiltered = 0;
-    for (const t of windowTweets) {
-      if (!splitParentTweets.has(t.id)) { // Skip parent duplicates
+    for (const t of sortedTweets) {
+      if (!collected.has(t.id)) {
         collected.set(t.id, t);
       } else {
         dedupeFiltered++;
@@ -1582,7 +1588,15 @@ async function excavateTimeline(
       storeTweets(user.id, page.tweets, page.media);
     }
 
-    for (const t of page.tweets) collected.set(t.id, t);
+    // Sort tweets by created_at (earliest first) for consistent processing
+    const sortedPageTweets = page.tweets.sort((a, b) => 
+      new Date(a.created_at).getTime() - new Date(b.created_at).getTime()
+    );
+    for (const t of sortedPageTweets) {
+      if (!collected.has(t.id)) {
+        collected.set(t.id, t);
+      }
+    }
 
     let nextToken = page.nextToken;
     while (nextToken && collected.size < limit && stats.totalCalls < MAX_API_CALLS) {
@@ -1608,7 +1622,15 @@ async function excavateTimeline(
         storeTweets(user.id, page.tweets, page.media);
       }
       
-      for (const t of page.tweets) collected.set(t.id, t);
+      // Sort paginated tweets by created_at (earliest first) for consistent processing
+      const sortedPaginatedTweets = page.tweets.sort((a, b) => 
+        new Date(a.created_at).getTime() - new Date(b.created_at).getTime()
+      );
+      for (const t of sortedPaginatedTweets) {
+        if (!collected.has(t.id)) {
+          collected.set(t.id, t);
+        }
+      }
       nextToken = page.nextToken;
     }
 
