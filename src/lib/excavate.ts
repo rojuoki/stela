@@ -1178,34 +1178,52 @@ async function collectWindowPass(
       // ── Dense-window split detection (only for normal windows) ──────────────
       if (!isProcessingSplit && page.nextToken && currentSpanDays >= MIN_SPLIT_SPAN_DAYS) {
         console.log(
-          `[split] window=[${currentWindowStart.toISOString().slice(0, 10)}, ${currentWindowEnd.toISOString().slice(0, 10)}] spanDays=${currentSpanDays} next_token_present=true -> splitting`,
+          `[split] window=[${currentWindowStart.toISOString().slice(0, 10)}, ${currentWindowEnd.toISOString().slice(0, 10)}] spanDays=${currentSpanDays} next_token_present=true -> 4-way splitting`,
         );
         
-        const mid = new Date((currentWindowStart.getTime() + currentWindowEnd.getTime()) / 2);
+        // 4-way split: divide into quarters with remainder added to the last quarter
+        const totalSpanMs = currentWindowEnd.getTime() - currentWindowStart.getTime();
+        const quarterSpanMs = Math.floor(totalSpanMs / 4);
         
-        // FIX: Prevent boundary overlap by advancing right window start by 1ms
-        const rightStart = new Date(mid.getTime() + 1);
+        const q1End = new Date(currentWindowStart.getTime() + quarterSpanMs);
+        const q2Start = new Date(q1End.getTime() + 1);
+        const q2End = new Date(currentWindowStart.getTime() + quarterSpanMs * 2);
+        const q3Start = new Date(q2End.getTime() + 1);
+        const q3End = new Date(currentWindowStart.getTime() + quarterSpanMs * 3);
+        const q4Start = new Date(q3End.getTime() + 1);
+        // q4End = currentWindowEnd (includes remainder)
         
-        const leftSpan = Math.ceil((mid.getTime() - currentWindowStart.getTime()) / (24 * 60 * 60 * 1000));
-        const rightSpan = Math.ceil((currentWindowEnd.getTime() - rightStart.getTime()) / (24 * 60 * 60 * 1000));
+        const q1SpanDays = Math.ceil(quarterSpanMs / (24 * 60 * 60 * 1000));
+        const q2SpanDays = Math.ceil(quarterSpanMs / (24 * 60 * 60 * 1000));
+        const q3SpanDays = Math.ceil(quarterSpanMs / (24 * 60 * 60 * 1000));
+        const q4SpanDays = Math.ceil((currentWindowEnd.getTime() - q4Start.getTime()) / (24 * 60 * 60 * 1000));
         
-        // Enqueue child windows (chronological order: left first)
-        // Left: [start, mid] (inclusive), Right: [mid+1ms, end] (exclusive at boundary)
+        // Enqueue child windows (chronological order: Q1 → Q2 → Q3 → Q4)
         splitQueue.push(
           {
             start: currentWindowStart.toISOString(),
-            end: mid.toISOString(), 
-            spanDays: leftSpan
+            end: q1End.toISOString(),
+            spanDays: q1SpanDays
           },
           {
-            start: rightStart.toISOString(),
+            start: q2Start.toISOString(),
+            end: q2End.toISOString(),
+            spanDays: q2SpanDays
+          },
+          {
+            start: q3Start.toISOString(),
+            end: q3End.toISOString(),
+            spanDays: q3SpanDays
+          },
+          {
+            start: q4Start.toISOString(),
             end: currentWindowEnd.toISOString(),
-            spanDays: rightSpan
+            spanDays: q4SpanDays
           }
         );
         
         console.log(
-          `[split] window=[${currentWindowStart.toISOString().slice(0, 10)}, ${currentWindowEnd.toISOString().slice(0, 10)}] -> [${currentWindowStart.toISOString().slice(0, 10)}, ${mid.toISOString().slice(0, 10)}], [${rightStart.toISOString().slice(0, 10)}, ${currentWindowEnd.toISOString().slice(0, 10)}]`,
+          `[split] 4-way: [${currentWindowStart.toISOString().slice(0, 10)}, ${q1End.toISOString().slice(0, 10)}] [${q2Start.toISOString().slice(0, 10)}, ${q2End.toISOString().slice(0, 10)}] [${q3Start.toISOString().slice(0, 10)}, ${q3End.toISOString().slice(0, 10)}] [${q4Start.toISOString().slice(0, 10)}, ${currentWindowEnd.toISOString().slice(0, 10)}] spans=[${q1SpanDays}, ${q2SpanDays}, ${q3SpanDays}, ${q4SpanDays}]`,
         );
         
         // Store parent page1 tweets for historical record only (NOT collected)
