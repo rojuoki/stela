@@ -1092,13 +1092,36 @@ async function collectWindowPass(
     } else {
       // ── Priority 2: Normal window (independent progression) ─────────────────
       
-      // FIX: Apply pending normal window advancement after split processing completes
-      if (pendingNormalWindowAdvancement) {
+      // ── PENDING ADVANCEMENT: Only apply after ALL split processing is complete ──
+      // Split が発生した窓は child A/B の解決完了まで future window に進めない
+      if (pendingNormalWindowAdvancement && splitQueue.length === 0) {
+        // ── STOP CHECK BEFORE PENDING ADVANCEMENT APPLICATION ─────────────────
+        // Final validation before applying queued normal window advancement
+        if (collected.size >= collectLimit) {
+          stopReason = "OK_LIMIT_REACHED";
+          console.log(
+            `[collect] @${username} target reached before pending advancement (${collected.size} >= ${collectLimit}) — canceling future window advance`,
+          );
+          break;
+        }
+        if (stats.totalCalls >= callCeiling) {
+          stopReason = "MAX_API_CALLS_REACHED";
+          console.log(
+            `[collect] @${username} API budget exhausted before pending advancement (${stats.totalCalls} >= ${callCeiling}) — canceling future window advance`,
+          );
+          break;
+        }
+        
+        // Apply pending normal window advancement after ALL split processing completes
         normalWindowStart = pendingNormalWindowAdvancement.to;
         normalWindowSpan = pendingNormalWindowAdvancement.span;
         pendingNormalWindowAdvancement = null;
         console.log(
           `[collect] Applied pending normal window advancement to ${normalWindowStart.toISOString().slice(0, 10)} (post-split)`
+        );
+      } else if (pendingNormalWindowAdvancement && splitQueue.length > 0) {
+        console.log(
+          `[collect][split] @${username} deferring pending advancement until split processing completes (${splitQueue.length} child windows remaining)`,
         );
       }
       
@@ -1427,6 +1450,25 @@ async function collectWindowPass(
       continue;
     }
 
+    // ── STOP CHECK AFTER EACH SPLIT CHILD WINDOW ───────────────────────────
+    // Check after each split child completes to prevent unnecessary processing
+    if (isProcessingSplit) {
+      if (collected.size >= collectLimit) {
+        stopReason = "OK_LIMIT_REACHED";
+        console.log(
+          `[collect][split] @${username} target reached after child window (${collected.size} >= ${collectLimit}) — stopping split processing`,
+        );
+        break;
+      }
+      if (stats.totalCalls >= callCeiling) {
+        stopReason = "MAX_API_CALLS_REACHED";
+        console.log(
+          `[collect][split] @${username} API budget exhausted after child window (${stats.totalCalls} >= ${callCeiling}) — stopping split processing`,
+        );
+        break;
+      }
+    }
+
     // ── Persist window completion BEFORE stop checks ───────────────────────
     // Advancing collectStart + saving the checkpoint here (rather than after
     // the break conditions) ensures that an unexpected interruption between
@@ -1466,6 +1508,7 @@ async function collectWindowPass(
       );
     }
 
+    // ── STOP CHECK BEFORE ANY ADVANCEMENT ───────────────────────────────────
     if (collected.size >= collectLimit) {
       stopReason = "OK_LIMIT_REACHED";
       break;
