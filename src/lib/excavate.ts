@@ -8,10 +8,9 @@
  *             (zeroStreak) to detect a missing-early-period pattern.
  *   Phase B — Collect: bounded pagination from earliest region forward.
  *             Paginate within each window; sort ascending; take first 100.
- *   Phase C — Deep backfill: activated only when zeroStreak ≥ DEEP_TRIGGER_ZERO_STREAK.
- *             Re-runs the same collect code path over [accountCreated, earliestRegionStart)
- *             to recover tweets that the explore phase may have skipped.
- *             Budget: min(remaining, MAX_API_CALLS_DEEP).
+ *   Phase C — Deep backfill: DISABLED. The main explore→collect pipeline already
+ *             guarantees earliest region coverage. Deep backfill was redundant and
+ *             only increased API usage without improving correctness.
  *
  * Fallback: Timeline (/2/users/:id/tweets) when full-archive returns 403.
  *           Marks acquisitionMode = "fallback". Does NOT claim "earliest guaranteed."
@@ -48,16 +47,12 @@ import { getDb } from "./db";
 const MAX_API_CALLS = 50;
 
 /**
- * Additional budget reserved for deep backfill.
- * The actual deep budget is min(remaining-after-standard, MAX_API_CALLS_DEEP).
+ * Deep backfill constants (DISABLED - Phase C removed)
+ * These constants are kept for reference but are no longer used.
  */
-const MAX_API_CALLS_DEEP = 30;
-
-/**
- * Minimum number of consecutive empty-month results (from the start of
- * the month scan) before a month hit triggers the deep backfill pass.
- */
-const DEEP_TRIGGER_ZERO_STREAK = 4;
+// const MAX_API_CALLS_DEEP = 30; // DISABLED
+// const DEEP_TRIGGER_ZERO_STREAK = 4; // DISABLED
+const DEEP_TRIGGER_ZERO_STREAK = 4; // Keep for zeroStreak logging compatibility
 
 /**
  * Number of consecutive zero-year results before switching to 2-year steps.
@@ -480,17 +475,27 @@ async function excavateFullArchive(
         if (!yOldest) {
           // Year has no tweets — optimize year stepping.
           zeroYearStreak++;
+          let nextYear = year + stepYears;
+          
           if (zeroYearStreak >= YEAR_STEP_ZERO_STREAK_THRESHOLD && stepYears === 1) {
             stepYears = 2;
+            // Fix gap bug: ensure next probe starts exactly at current window end
+            // yearEnd was calculated with old stepYears (1), so recalculate for seamless continuation
+            const currentWindowEnd = new Date(Date.UTC(year + 1, 0, 1)); // End of current 1-year window
+            nextYear = currentWindowEnd.getUTCFullYear(); // Start next probe at window end (no gap)
+            
+            // Update loop variable to prevent gap in next iteration
+            year = nextYear - stepYears; // Adjust so year += stepYears lands on nextYear
+            
             console.log(
-              `[explore] year-scan mode: step=2, zeroStreak=${zeroYearStreak} (switching to 2-year steps)`,
+              `[explore] year-scan mode: step=2, zeroStreak=${zeroYearStreak} (switching to 2-year steps, seamless from ${currentWindowEnd.getUTCFullYear()})`,
             );
           }
 
           // Checkpoint BEFORE yielding to prevent re-queue race.
           saveCheckpoint?.({
             phase: "explore_year",
-            next_year: year + stepYears,
+            next_year: nextYear,
             earliest_hit_year: -1,
             zero_streak: 0,
             deep_triggered: false,
@@ -627,10 +632,129 @@ async function excavateFullArchive(
         }
         
         if (yearTweetCount === 10) {
-          // found == 10 → dense/unknown → refine (continue to month scanning)
-          console.log(
-            `[explore] year probe window=[${yearStart.toISOString().slice(0, 10)}, ${yEndStr.slice(0, 10)}] found=${yearTweetCount} → dense/unknown, continue refinement`,
-          );
+          // found == 10 → dense/unknown → refine
+          if (stepYears > 1) {
+            // Multi-year window: decompose into individual years first
+            console.log(
+              `[explore] multi-year window hit (step=${stepYears}) → refining with 1-year granularity probes`,
+            );
+            
+            let foundEarliestRegion = false;
+            
+            // Decompose multi-year window into individual years
+            for (let subYear = year; subYear < year + stepYears && !foundEarliestRegion; subYear++) {
+              const subYearStart = subYear === startYear ? accountCreated : new Date(Date.UTC(subYear, 0, 1));
+              const subYearEnd = new Date(Date.UTC(subYear + 1, 0, 1));
+              const subYearEndBounded = minDate(subYearEnd, now);
+              
+              // Skip if already whole-collected
+              if (isRangeFullyCollected(subYearStart, subYearEndBounded)) {
+                console.log(
+                  `[explore] sub-year=${subYear} → skipping (already whole-collected)`,
+                );
+                continue;
+              }
+              
+              // Probe this individual year
+              let subYearPage: TimelinePage;
+              try {
+                subYearPage = await searchAllTweets(
+                  query,
+                  subYearStart.toISOString(),
+                  subYearEndBounded.toISOString(),
+                  stats,
+                  10,
+                );
+              } catch (e) {
+                if (e instanceof XApiStop && e.statusCode === 403) throw e;
+                if (e instanceof XApiStop) {
+                  return errorResult(user.username, limit, stats, e.reason as StopReason, "full_archive");
+                }
+                throw e;
+              }
+              
+              const subYearCount = subYearPage.tweets.length;
+              console.log(
+                `[explore] sub-year=${subYear} window=[${subYearStart.toISOString().slice(0, 10)}, ${subYearEndBounded.toISOString().slice(0, 10)}] found=${subYearCount}`,
+              );
+              onProgress?.(stats.totalCalls);
+              
+              // Apply normal threshold rules
+              if (subYearCount === 0) {
+                // Skip empty year
+                await sleep(EXPLORE_INTER_REQUEST_DELAY_MS);
+                continue;
+              } else if (subYearCount >= 1 && subYearCount <= 9) {
+                // found 1-9 → whole-collect this year
+                console.log(
+                  `[explore] sub-year=${subYear} found=${subYearCount} → whole-collect (fully visible)`,
+                );
+                
+                await wholeCollectFromProbe(
+                  query,
+                  subYearStart,
+                  subYearEndBounded,
+                  stats,
+                  collected,
+                  MAX_API_CALLS,
+                  user.username,
+                  subYearPage,
+                  onProgress,
+                  user.id,
+                );
+                
+                // Mark this range as fully collected
+                wholeCollectedRanges.push({ start: subYearStart, end: subYearEndBounded });
+                console.log(
+                  `[explore] marked sub-year range [${subYearStart.toISOString().slice(0, 10)}, ${subYearEndBounded.toISOString().slice(0, 10)}] as whole-collected`,
+                );
+                
+                await sleep(EXPLORE_INTER_REQUEST_DELAY_MS);
+                continue;
+              } else if (subYearCount === 10) {
+                // found == 10 → this specific year needs month-level refinement
+                console.log(
+                  `[explore] sub-year=${subYear} found=${subYearCount} → dense/unknown, needs month-level refinement`,
+                );
+                
+                // Set this year as the earliest region for month scanning
+                earliestHitYear = subYear;
+                earliestRegionStart = subYearStart;
+                foundEarliestRegion = true;
+                
+                // Save checkpoint before entering month scan
+                saveCheckpoint?.({
+                  phase: "explore_month",
+                  next_year: subYear,
+                  month_scan_year: subYear,
+                  next_month: subYear === startYear ? accountCreated.getUTCMonth() : 0,
+                  earliest_hit_year: subYear,
+                  zero_streak: 0,
+                  deep_triggered: deepTriggered,
+                  allow_deep: allowDeep,
+                  earliest_region_start: null,
+                  collect_window_start: null,
+                  collect_span_days: COLLECT_INITIAL_SPAN_DAYS,
+                  zero_year_streak: 0,
+                  step_years: 1,
+                  collected_ids: [...collected.keys()],
+                });
+                
+                await sleep(EXPLORE_INTER_REQUEST_DELAY_MS);
+                break yearLoop; // Exit to month scanning
+              }
+            }
+            
+            if (!foundEarliestRegion) {
+              // All sub-years processed, continue main year loop
+              continue;
+            }
+          } else {
+            // Single year with found == 10 → continue to month scanning
+            console.log(
+              `[explore] year probe window=[${yearStart.toISOString().slice(0, 10)}, ${yEndStr.slice(0, 10)}] found=${yearTweetCount} → dense/unknown, continue refinement`,
+            );
+          }
         }
 
         // Save a checkpoint IMMEDIATELY before the inter-request sleep so that
@@ -773,17 +897,11 @@ async function excavateFullArchive(
           await sleep(EXPLORE_INTER_REQUEST_DELAY_MS);
         } else {
           // Found tweets in this month.
+          // Note: Deep backfill trigger detection disabled (Phase C is disabled)
           if (zeroStreak >= DEEP_TRIGGER_ZERO_STREAK) {
-            if (allowDeep) {
-              deepTriggered = true;
-              console.log(
-                `[deep] trigger: year=${scanYear} zeroStreak=${zeroStreak} firstHitMonth=${m + 1} reason=MISSING_EARLY_MONTHS`,
-              );
-            } else {
-              console.log(
-                `[deep] skipped: new account (created=${accountCreated.getUTCFullYear()} zeroStreak=${zeroStreak})`,
-              );
-            }
+            console.log(
+              `[deep] trigger detected but deep backfill is disabled: year=${scanYear} zeroStreak=${zeroStreak} firstHitMonth=${m + 1}`,
+            );
           }
 
           // ── Apply explicit probe thresholds ──
@@ -1031,59 +1149,11 @@ async function excavateFullArchive(
   );
   let stopReason: StopReason = standardStop;
 
-  // ── Phase C: Deep backfill (missing early period) ──
-
-  let deepAddedCount = 0;
-
-  // Don't start deep backfill when the main collect was already rate-limited:
-  // the token is in cooldown and the very first deep API call would hit 429
-  // again, burning one call from the budget for nothing.  The job will be
-  // re-queued; deep backfill will run on the next resume once the token
-  // recovers (standardStop won't be RATE_LIMIT then).
-  if (deepTriggered && earliestHitYear > 0 && standardStop !== "RATE_LIMIT") {
-    const X_ARCHIVE_FLOOR = new Date("2006-03-21T00:00:00Z");
-    const deepStart = maxDate(X_ARCHIVE_FLOOR, accountCreated);
-    const deepEnd = earliestRegionStart;
-    const remainingBudget = MAX_API_CALLS - stats.totalCalls;
-    const deepCallBudget = Math.min(remainingBudget, MAX_API_CALLS_DEEP);
-
-    if (deepCallBudget > 0 && deepEnd > deepStart) {
-      const deepCallCeiling = stats.totalCalls + deepCallBudget;
-      const sizeBefore = collected.size;
-
-      console.log(
-        `[deep] backfill range=[${deepStart.toISOString().slice(0, 10)}, ${deepEnd.toISOString().slice(0, 10)}) account_created=${accountCreated.toISOString().slice(0, 10)} budget=${deepCallBudget}`,
-      );
-
-      // Deep backfill uses incremental storage but no checkpoint (bounded budget,
-      // and standard collect results are already safe in DB if 429 hits here).
-      const deepStop = await collectWindowPass(
-        query,
-        deepStart,
-        deepEnd,
-        stats,
-        collected,
-        deepCallCeiling,
-        Number.MAX_SAFE_INTEGER,
-        user.username,
-        onProgress,
-        { userId: user.id },
-      );
-
-      deepAddedCount = collected.size - sizeBefore;
-      console.log(
-        `[deep] backfill done: added=${deepAddedCount} stop=${deepStop} totalCalls=${stats.totalCalls}`,
-      );
-
-      if (deepStop === "MAX_API_CALLS_REACHED" && stopReason !== "OK_LIMIT_REACHED") {
-        stopReason = "MAX_API_CALLS_REACHED";
-      }
-    } else {
-      console.log(
-        `[deep] backfill skipped: budget=${deepCallBudget} range_valid=${deepEnd > deepStart}`,
-      );
-    }
-  }
+  // ── Phase C: Deep backfill (DISABLED) ──
+  // Disabled: Main explore→collect pipeline already guarantees earliest region coverage.
+  // Deep backfill is redundant and only increases API usage without improving correctness.
+  
+  let deepAddedCount = 0; // Keep for return type compatibility
 
   if (stats.totalCalls >= MAX_API_CALLS && stopReason === "ACCOUNT_HAS_LESS_THAN_LIMIT") {
     stopReason = "MAX_API_CALLS_REACHED";
@@ -1097,7 +1167,7 @@ async function excavateFullArchive(
   const storedNewCount = storeTweets(user.id, sorted, []); // Media already stored during incremental saves
 
   console.log(
-    `[excavate] @${user.username} done: fetched=${sorted.length} stored_new=${storedNewCount} api_calls=${stats.totalCalls} mode=full_archive stop=${stopReason}${deepTriggered ? ` deep_added=${deepAddedCount}` : ""}`,
+    `[excavate] @${user.username} done: fetched=${sorted.length} stored_new=${storedNewCount} api_calls=${stats.totalCalls} mode=full_archive stop=${stopReason}`,
   );
 
   return {
@@ -1111,8 +1181,8 @@ async function excavateFullArchive(
     storedNewCount,
     errors: stats.errors,
     acquisitionMode: "full_archive",
-    deepTriggered,
-    deepAddedCount: deepTriggered ? deepAddedCount : undefined,
+    deepTriggered: false, // Deep backfill is disabled
+    deepAddedCount: undefined, // No deep backfill performed
   };
 }
 
