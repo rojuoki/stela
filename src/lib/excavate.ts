@@ -69,7 +69,7 @@ const YEAR_STEP_ZERO_STREAK_THRESHOLD = 3;
 const EXPLORE_INTER_REQUEST_DELAY_MS = 1300;
 
 /** Full-archive collect: initial window width when scanning forward. */
-const COLLECT_INITIAL_SPAN_DAYS = 30;
+const COLLECT_INITIAL_SPAN_DAYS = 7;
 const COLLECT_MAX_SPAN_DAYS = 365 * 2;
 /** Max pages to paginate within a single collect window (100/page = 500 tweets max). */
 const MAX_COLLECT_PAGES_PER_WINDOW = 5;
@@ -1396,6 +1396,9 @@ async function collectWindowPass(
     }
 
     // ── Adaptive window sizing ─────────────────────────────────────────────
+    // Special case: first window (7-day initial) with 0 tweets → jump to 30 days
+    const isFirstWindow = collected.size === 0 && currentSpanDays === COLLECT_INITIAL_SPAN_DAYS && !isProcessingSplit;
+    
     // Grow aggressively on empty windows (sparse/early account) to reduce
     // wasted API calls. Shrink when the page cap is hit (dense period) so we
     // don't skip tweets on the earliest side.
@@ -1403,7 +1406,13 @@ async function collectWindowPass(
     let adaptAction: string;
     let nextSpanDays: number;
 
-    if (uniqueNew === 0) {
+    if (uniqueNew === 0 && isFirstWindow) {
+      nextSpanDays = 30;  // Special jump to 30 days for empty first window
+      adaptAction = "first_window_jump";
+      console.log(
+        `[collect][adaptive] First 7-day window empty → jumping to 30 days for sparse account optimization`,
+      );
+    } else if (uniqueNew === 0) {
       nextSpanDays = Math.min(currentSpanDays * GROW_FACTOR_ZERO, COLLECT_MAX_SPAN_DAYS);
       adaptAction = "grow_zero";
     } else if (uniqueNew < TARGET_MIN_HITS) {
