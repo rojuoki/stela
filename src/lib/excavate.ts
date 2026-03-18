@@ -54,11 +54,7 @@ const MAX_API_CALLS = 50;
 // const DEEP_TRIGGER_ZERO_STREAK = 4; // DISABLED
 const DEEP_TRIGGER_ZERO_STREAK = 4; // Keep for zeroStreak logging compatibility
 
-/**
- * Number of consecutive zero-year results before switching to 2-year steps.
- * This optimizes year scanning for accounts with long "initial sparse" periods.
- */
-const YEAR_STEP_ZERO_STREAK_THRESHOLD = 3;
+// Simple 1-year stepping for better efficiency and predictability
 
 /** Delay between consecutive explore probes to avoid hammering the rate limit. */
 const EXPLORE_INTER_REQUEST_DELAY_MS = 1300;
@@ -171,10 +167,7 @@ export interface ExcavationCheckpoint {
   zero_streak: number;
   deep_triggered: boolean;
   allow_deep: boolean;
-  /** Consecutive zero-year count for step optimization. */
-  zero_year_streak: number;
-  /** Current year step size (1 or 2). */
-  step_years: number;
+  // Using simple 1-year stepping
 
   // ── Region / collect state ──────────────────────────
   /** ISO string — set once the earliest region is found. */
@@ -430,18 +423,14 @@ async function excavateFullArchive(
     const skipYearProbeFor =
       cp?.phase === "explore_month" ? cp.month_scan_year : undefined;
 
-    // Year-scan optimization state.
-    let zeroYearStreak = cp?.zero_year_streak ?? 0;
-    let stepYears = cp?.step_years ?? 1;
-
     yearLoop: for (
       let year = resumeFromYear;
       year <= endYear && stats.totalCalls < MAX_API_CALLS;
-      year += stepYears
+      year++ // Simple 1-year steps
     ) {
       const yearStart =
         year === startYear ? accountCreated : new Date(Date.UTC(year, 0, 1));
-      const yearEnd = new Date(Date.UTC(year + stepYears, 0, 1));
+      const yearEnd = new Date(Date.UTC(year + 1, 0, 1)); // Always 1-year window
       const yEndStr = minDate(yearEnd, now).toISOString();
 
       // ── Skip if range already whole-collected ──
@@ -473,29 +462,11 @@ async function excavateFullArchive(
         onProgress?.(stats.totalCalls);
 
         if (!yOldest) {
-          // Year has no tweets — optimize year stepping.
-          zeroYearStreak++;
-          let nextYear = year + stepYears;
-          
-          if (zeroYearStreak >= YEAR_STEP_ZERO_STREAK_THRESHOLD && stepYears === 1) {
-            stepYears = 2;
-            // Fix gap bug: ensure next probe starts exactly at current window end
-            // yearEnd was calculated with old stepYears (1), so recalculate for seamless continuation
-            const currentWindowEnd = new Date(Date.UTC(year + 1, 0, 1)); // End of current 1-year window
-            nextYear = currentWindowEnd.getUTCFullYear(); // Start next probe at window end (no gap)
-            
-            // Update loop variable to prevent gap in next iteration
-            year = nextYear - stepYears; // Adjust so year += stepYears lands on nextYear
-            
-            console.log(
-              `[explore] year-scan mode: step=2, zeroStreak=${zeroYearStreak} (switching to 2-year steps, seamless from ${currentWindowEnd.getUTCFullYear()})`,
-            );
-          }
-
+          // Year has no tweets — continue to next year
           // Checkpoint BEFORE yielding to prevent re-queue race.
           saveCheckpoint?.({
             phase: "explore_year",
-            next_year: nextYear,
+            next_year: year + 1,
             earliest_hit_year: -1,
             zero_streak: 0,
             deep_triggered: false,
@@ -503,83 +474,13 @@ async function excavateFullArchive(
             earliest_region_start: null,
             collect_window_start: null,
             collect_span_days: COLLECT_INITIAL_SPAN_DAYS,
-            zero_year_streak: zeroYearStreak,
-            step_years: stepYears,
           });
           await sleep(EXPLORE_INTER_REQUEST_DELAY_MS);
           continue;
         }
 
-        // Year has tweets — may need to refine if we were using 2-year steps.
-        let actualHitYear = year;
-        
-        // If we hit with 2-year steps, check the skipped year to find exact hit year.
-        if (stepYears === 2 && year > startYear) {
-          const prevYear = year - 1;
-          if (prevYear >= startYear) {
-            const prevYearStart = new Date(Date.UTC(prevYear, 0, 1));
-            const prevYearEnd = new Date(Date.UTC(prevYear + 1, 0, 1));
-            const prevYEndStr = minDate(prevYearEnd, now).toISOString();
-
-            console.log(
-              `[explore] 2-year step hit at ${year} — checking skipped year ${prevYear} for refinement`,
-            );
-
-            try {
-              const prevPage = await searchAllTweets(query, prevYearStart.toISOString(), prevYEndStr, stats, 10); // Use max_results=10 for probe
-              const prevCount = prevPage.tweets.length;
-              
-              if (prevCount >= 1 && prevCount <= 9) {
-                // found 1-9 → whole-collect the refinement year
-                actualHitYear = prevYear;
-                console.log(
-                  `[explore] refinement: year=${prevYear} found=${prevCount} → whole-collect (fully visible)`,
-                );
-                
-                const refinementEnd = minDate(prevYearEnd, now);
-                await wholeCollectFromProbe(
-                  query,
-                  prevYearStart,
-                  refinementEnd,
-                  stats,
-                  collected,
-                  MAX_API_CALLS,
-                  user.username,
-                  prevPage,
-                  onProgress,
-                  user.id,
-                );
-                
-                // Mark refinement range as fully collected
-                wholeCollectedRanges.push({ start: prevYearStart, end: refinementEnd });
-                console.log(
-                  `[explore] marked refinement range [${prevYearStart.toISOString().slice(0, 10)}, ${refinementEnd.toISOString().slice(0, 10)}] as whole-collected`,
-                );
-              } else if (prevCount === 10) {
-                // found == 10 → dense, needs further refinement
-                actualHitYear = prevYear;
-                console.log(
-                  `[explore] refinement: year=${prevYear} found=${prevCount} → dense/unknown, needs refinement`,
-                );
-              } else {
-                // found == 0
-                console.log(
-                  `[explore] refinement: year=${prevYear} found=0 (${year} is correct hit year)`,
-                );
-              }
-            } catch (e) {
-              if (e instanceof XApiStop && e.statusCode === 403) throw e;
-              if (e instanceof XApiStop) {
-                return errorResult(user.username, limit, stats, e.reason as StopReason, "full_archive");
-              }
-              throw e;
-            }
-          }
-        }
-
-        earliestHitYear = actualHitYear;
-        zeroYearStreak = 0;
-        stepYears = 1;
+        // Year has tweets — set as earliest hit year
+        earliestHitYear = year;
 
         // ── Apply explicit probe thresholds ──
         const yearTweetCount = yPage.tweets.length;
@@ -615,16 +516,14 @@ async function excavateFullArchive(
           // Save checkpoint for next year
           saveCheckpoint?.({
             phase: "explore_year",
-            next_year: year + stepYears,
-            earliest_hit_year: actualHitYear,
+            next_year: year + 1,
+            earliest_hit_year: year,
             zero_streak: 0,
             deep_triggered: deepTriggered,
             allow_deep: allowDeep,
             earliest_region_start: null,
             collect_window_start: null,
             collect_span_days: COLLECT_INITIAL_SPAN_DAYS,
-            zero_year_streak: 0,
-            step_years: 1,
             collected_ids: [...collected.keys()],
           });
           await sleep(EXPLORE_INTER_REQUEST_DELAY_MS);
@@ -632,129 +531,10 @@ async function excavateFullArchive(
         }
         
         if (yearTweetCount === 10) {
-          // found == 10 → dense/unknown → refine
-          if (stepYears > 1) {
-            // Multi-year window: decompose into individual years first
-            console.log(
-              `[explore] multi-year window hit (step=${stepYears}) → refining with 1-year granularity probes`,
-            );
-            
-            let foundEarliestRegion = false;
-            
-            // Decompose multi-year window into individual years
-            for (let subYear = year; subYear < year + stepYears && !foundEarliestRegion; subYear++) {
-              const subYearStart = subYear === startYear ? accountCreated : new Date(Date.UTC(subYear, 0, 1));
-              const subYearEnd = new Date(Date.UTC(subYear + 1, 0, 1));
-              const subYearEndBounded = minDate(subYearEnd, now);
-              
-              // Skip if already whole-collected
-              if (isRangeFullyCollected(subYearStart, subYearEndBounded)) {
-                console.log(
-                  `[explore] sub-year=${subYear} → skipping (already whole-collected)`,
-                );
-                continue;
-              }
-              
-              // Probe this individual year
-              let subYearPage: TimelinePage;
-              try {
-                subYearPage = await searchAllTweets(
-                  query,
-                  subYearStart.toISOString(),
-                  subYearEndBounded.toISOString(),
-                  stats,
-                  10,
-                );
-              } catch (e) {
-                if (e instanceof XApiStop && e.statusCode === 403) throw e;
-                if (e instanceof XApiStop) {
-                  return errorResult(user.username, limit, stats, e.reason as StopReason, "full_archive");
-                }
-                throw e;
-              }
-              
-              const subYearCount = subYearPage.tweets.length;
-              console.log(
-                `[explore] sub-year=${subYear} window=[${subYearStart.toISOString().slice(0, 10)}, ${subYearEndBounded.toISOString().slice(0, 10)}] found=${subYearCount}`,
-              );
-              onProgress?.(stats.totalCalls);
-              
-              // Apply normal threshold rules
-              if (subYearCount === 0) {
-                // Skip empty year
-                await sleep(EXPLORE_INTER_REQUEST_DELAY_MS);
-                continue;
-              } else if (subYearCount >= 1 && subYearCount <= 9) {
-                // found 1-9 → whole-collect this year
-                console.log(
-                  `[explore] sub-year=${subYear} found=${subYearCount} → whole-collect (fully visible)`,
-                );
-                
-                await wholeCollectFromProbe(
-                  query,
-                  subYearStart,
-                  subYearEndBounded,
-                  stats,
-                  collected,
-                  MAX_API_CALLS,
-                  user.username,
-                  subYearPage,
-                  onProgress,
-                  user.id,
-                );
-                
-                // Mark this range as fully collected
-                wholeCollectedRanges.push({ start: subYearStart, end: subYearEndBounded });
-                console.log(
-                  `[explore] marked sub-year range [${subYearStart.toISOString().slice(0, 10)}, ${subYearEndBounded.toISOString().slice(0, 10)}] as whole-collected`,
-                );
-                
-                await sleep(EXPLORE_INTER_REQUEST_DELAY_MS);
-                continue;
-              } else if (subYearCount === 10) {
-                // found == 10 → this specific year needs month-level refinement
-                console.log(
-                  `[explore] sub-year=${subYear} found=${subYearCount} → dense/unknown, needs month-level refinement`,
-                );
-                
-                // Set this year as the earliest region for month scanning
-                earliestHitYear = subYear;
-                earliestRegionStart = subYearStart;
-                foundEarliestRegion = true;
-                
-                // Save checkpoint before entering month scan
-                saveCheckpoint?.({
-                  phase: "explore_month",
-                  next_year: subYear,
-                  month_scan_year: subYear,
-                  next_month: subYear === startYear ? accountCreated.getUTCMonth() : 0,
-                  earliest_hit_year: subYear,
-                  zero_streak: 0,
-                  deep_triggered: deepTriggered,
-                  allow_deep: allowDeep,
-                  earliest_region_start: null,
-                  collect_window_start: null,
-                  collect_span_days: COLLECT_INITIAL_SPAN_DAYS,
-                  zero_year_streak: 0,
-                  step_years: 1,
-                  collected_ids: [...collected.keys()],
-                });
-                
-                await sleep(EXPLORE_INTER_REQUEST_DELAY_MS);
-                break yearLoop; // Exit to month scanning
-              }
-            }
-            
-            if (!foundEarliestRegion) {
-              // All sub-years processed, continue main year loop
-              continue;
-            }
-          } else {
-            // Single year with found == 10 → continue to month scanning
-            console.log(
-              `[explore] year probe window=[${yearStart.toISOString().slice(0, 10)}, ${yEndStr.slice(0, 10)}] found=${yearTweetCount} → dense/unknown, continue refinement`,
-            );
-          }
+          // found == 10 → dense/unknown → continue to month scanning
+          console.log(
+            `[explore] year probe window=[${yearStart.toISOString().slice(0, 10)}, ${yEndStr.slice(0, 10)}] found=${yearTweetCount} → dense/unknown, continue refinement`,
+          );
         }
 
         // Save a checkpoint IMMEDIATELY before the inter-request sleep so that
@@ -765,25 +545,21 @@ async function excavateFullArchive(
         // potentially wasting the 429 budget on an already-answered question).
         saveCheckpoint?.({
           phase: "explore_month",
-          next_year: actualHitYear,
-          month_scan_year: actualHitYear,
-          next_month: actualHitYear === startYear ? accountCreated.getUTCMonth() : 0,
-          earliest_hit_year: actualHitYear,
+          next_year: year,
+          month_scan_year: year,
+          next_month: year === startYear ? accountCreated.getUTCMonth() : 0,
+          earliest_hit_year: year,
           zero_streak: 0,
           deep_triggered: deepTriggered,
           allow_deep: allowDeep,
           earliest_region_start: null,
           collect_window_start: null,
           collect_span_days: COLLECT_INITIAL_SPAN_DAYS,
-          zero_year_streak: 0,
-          step_years: 1,
         });
         await sleep(EXPLORE_INTER_REQUEST_DELAY_MS);
       } else {
         // Resuming mid-month-scan: we already know this year has tweets.
         // earliestHitYear is already restored from checkpoint, don't overwrite it.
-        zeroYearStreak = 0;
-        stepYears = 1;
         console.log(
           `[explore] year=${year} — skipping year probe (resuming mid-month-scan), using saved earliestHitYear=${earliestHitYear}`,
         );
@@ -794,7 +570,7 @@ async function excavateFullArchive(
       // - Checkpoint resume: earliestHitYear was restored from saved checkpoint
 
       // ── Month scan ──────────────────────────────────
-      // Use earliestHitYear for month scanning (correct after 2-year step refinement & checkpoint resume).
+      // Use earliestHitYear for month scanning (set from year probe & checkpoint resume).
       const scanYear = earliestHitYear;
 
       const monthFrom =
@@ -823,8 +599,6 @@ async function excavateFullArchive(
         earliest_region_start: null,
         collect_window_start: null,
         collect_span_days: COLLECT_INITIAL_SPAN_DAYS,
-        zero_year_streak: 0,
-        step_years: 1,
       });
 
       for (
@@ -891,8 +665,6 @@ async function excavateFullArchive(
             earliest_region_start: null,
             collect_window_start: null,
             collect_span_days: COLLECT_INITIAL_SPAN_DAYS,
-            zero_year_streak: 0,
-            step_years: 1,
           });
           await sleep(EXPLORE_INTER_REQUEST_DELAY_MS);
         } else {
@@ -964,8 +736,6 @@ async function excavateFullArchive(
             collect_window_start: earliestRegionStart.toISOString(),
             collect_span_days: COLLECT_INITIAL_SPAN_DAYS,
             collected_ids: [...collected.keys()],
-            zero_year_streak: 0,
-            step_years: 1,
           });
 
           await sleep(EXPLORE_INTER_REQUEST_DELAY_MS);
@@ -994,8 +764,6 @@ async function excavateFullArchive(
           collect_window_start: earliestRegionStart.toISOString(),
           collect_span_days: COLLECT_INITIAL_SPAN_DAYS,
           collected_ids: [],
-          zero_year_streak: 0,
-          step_years: 1,
         });
         break;
       }
@@ -1112,8 +880,6 @@ async function excavateFullArchive(
     collect_stagnation_count: stagnation?.count ?? 0,
     collect_last_window_key: stagnation?.lastWindowKey ?? null,
     split_window_queue: splitQueue ?? [],
-    zero_year_streak: 0,
-    step_years: 1,
   });
 
   const standardStop = await collectWindowPass(
