@@ -397,6 +397,20 @@ async function excavateFullArchive(
 
   const collected = new Map<string, XTweet>();
 
+  // Track whole-collected ranges to avoid duplicate probing
+  interface CollectedRange {
+    start: Date;
+    end: Date;
+  }
+  const wholeCollectedRanges: CollectedRange[] = [];
+
+  // Helper function to check if a range is fully contained within any collected range
+  const isRangeFullyCollected = (start: Date, end: Date): boolean => {
+    return wholeCollectedRanges.some(range => 
+      start >= range.start && end <= range.end
+    );
+  };
+
   // If resuming from collect phase, skip explore entirely and reload saved tweets.
   if (cp?.phase === "collect" && cp.earliest_region_start) {
     earliestRegionStart = new Date(cp.earliest_region_start);
@@ -435,12 +449,20 @@ async function excavateFullArchive(
       const yearEnd = new Date(Date.UTC(year + stepYears, 0, 1));
       const yEndStr = minDate(yearEnd, now).toISOString();
 
+      // ── Skip if range already whole-collected ──
+      if (isRangeFullyCollected(yearStart, minDate(yearEnd, now))) {
+        console.log(
+          `[explore] year=${year} window=[${yearStart.toISOString().slice(0, 10)}, ${yEndStr.slice(0, 10)}] → skipping (already whole-collected)`,
+        );
+        continue;
+      }
+
       // ── Year probe (skipped when resuming mid-month-scan for this year) ──
 
       if (year !== skipYearProbeFor) {
         let yPage: TimelinePage;
         try {
-          yPage = await searchAllTweets(query, yearStart.toISOString(), yEndStr, stats, 5);
+          yPage = await searchAllTweets(query, yearStart.toISOString(), yEndStr, stats, 10);
         } catch (e) {
           if (e instanceof XApiStop && e.statusCode === 403) throw e;
           if (e instanceof XApiStop) {
@@ -499,15 +521,43 @@ async function excavateFullArchive(
             );
 
             try {
-              const prevPage = await searchAllTweets(query, prevYearStart.toISOString(), prevYEndStr, stats, 5);
-              const prevOldest = oldestInPage(prevPage.tweets);
+              const prevPage = await searchAllTweets(query, prevYearStart.toISOString(), prevYEndStr, stats, 10); // Use max_results=10 for probe
+              const prevCount = prevPage.tweets.length;
               
-              if (prevOldest) {
+              if (prevCount >= 1 && prevCount <= 9) {
+                // found 1-9 → whole-collect the refinement year
                 actualHitYear = prevYear;
                 console.log(
-                  `[explore] refinement: year=${prevYear} found=${prevPage.tweets.length} (actual hit year confirmed)`,
+                  `[explore] refinement: year=${prevYear} found=${prevCount} → whole-collect (fully visible)`,
+                );
+                
+                const refinementEnd = minDate(prevYearEnd, now);
+                await wholeCollectFromProbe(
+                  query,
+                  prevYearStart,
+                  refinementEnd,
+                  stats,
+                  collected,
+                  MAX_API_CALLS,
+                  user.username,
+                  prevPage,
+                  onProgress,
+                  user.id,
+                );
+                
+                // Mark refinement range as fully collected
+                wholeCollectedRanges.push({ start: prevYearStart, end: refinementEnd });
+                console.log(
+                  `[explore] marked refinement range [${prevYearStart.toISOString().slice(0, 10)}, ${refinementEnd.toISOString().slice(0, 10)}] as whole-collected`,
+                );
+              } else if (prevCount === 10) {
+                // found == 10 → dense, needs further refinement
+                actualHitYear = prevYear;
+                console.log(
+                  `[explore] refinement: year=${prevYear} found=${prevCount} → dense/unknown, needs refinement`,
                 );
               } else {
+                // found == 0
                 console.log(
                   `[explore] refinement: year=${prevYear} found=0 (${year} is correct hit year)`,
                 );
@@ -525,6 +575,63 @@ async function excavateFullArchive(
         earliestHitYear = actualHitYear;
         zeroYearStreak = 0;
         stepYears = 1;
+
+        // ── Apply explicit probe thresholds ──
+        const yearTweetCount = yPage.tweets.length;
+        if (yearTweetCount >= 1 && yearTweetCount <= 9) {
+          // found 1-9 → treat as fully visible → whole-collect
+          console.log(
+            `[explore] year probe window=[${yearStart.toISOString().slice(0, 10)}, ${yEndStr.slice(0, 10)}] found=${yearTweetCount} → whole-collect (fully visible)`,
+          );
+          
+          const wholeCollectEnd = minDate(yearEnd, now);
+          
+          // Use the EXACT probe window for whole-collect (NOT start year only)
+          await wholeCollectFromProbe(
+            query,
+            yearStart,
+            wholeCollectEnd,
+            stats,
+            collected,
+            MAX_API_CALLS,
+            user.username,
+            yPage,
+            onProgress,
+            user.id,
+          );
+          
+          // Mark this range as fully collected to avoid duplicate probes
+          wholeCollectedRanges.push({ start: yearStart, end: wholeCollectEnd });
+          console.log(
+            `[explore] marked range [${yearStart.toISOString().slice(0, 10)}, ${wholeCollectEnd.toISOString().slice(0, 10)}] as whole-collected`,
+          );
+          
+          // Continue year scanning (don't break) - this was just an optimization
+          // Save checkpoint for next year
+          saveCheckpoint?.({
+            phase: "explore_year",
+            next_year: year + stepYears,
+            earliest_hit_year: actualHitYear,
+            zero_streak: 0,
+            deep_triggered: deepTriggered,
+            allow_deep: allowDeep,
+            earliest_region_start: null,
+            collect_window_start: null,
+            collect_span_days: COLLECT_INITIAL_SPAN_DAYS,
+            zero_year_streak: 0,
+            step_years: 1,
+            collected_ids: [...collected.keys()],
+          });
+          await sleep(EXPLORE_INTER_REQUEST_DELAY_MS);
+          continue; // Skip month scanning for this year
+        }
+        
+        if (yearTweetCount === 10) {
+          // found == 10 → dense/unknown → refine (continue to month scanning)
+          console.log(
+            `[explore] year probe window=[${yearStart.toISOString().slice(0, 10)}, ${yEndStr.slice(0, 10)}] found=${yearTweetCount} → dense/unknown, continue refinement`,
+          );
+        }
 
         // Save a checkpoint IMMEDIATELY before the inter-request sleep so that
         // an HMR restart (or any crash) during the sleep doesn't leave the
@@ -612,14 +719,23 @@ async function excavateFullArchive(
         const mEnd = new Date(Date.UTC(scanYear, m + 1, 1));
         if (mStart >= now) break;
 
+        // ── Skip if month range already whole-collected ──
+        const monthEndBounded = minDate(mEnd, now);
+        if (isRangeFullyCollected(mStart, monthEndBounded)) {
+          console.log(
+            `[explore] month=${scanYear}-${String(m + 1).padStart(2, "0")} window=[${mStart.toISOString().slice(0, 10)}, ${monthEndBounded.toISOString().slice(0, 10)}] → skipping (already whole-collected)`,
+          );
+          continue;
+        }
+
         let mPage: TimelinePage;
         try {
           mPage = await searchAllTweets(
             query,
             mStart.toISOString(),
-            minDate(mEnd, now).toISOString(),
+            monthEndBounded.toISOString(),
             stats,
-            5,
+            10,
           );
         } catch (e) {
           if (e instanceof XApiStop && e.statusCode === 403) throw e;
@@ -631,7 +747,7 @@ async function excavateFullArchive(
 
         const mOldest = oldestInPage(mPage.tweets);
         console.log(
-          `[explore] month=${scanYear}-${String(m + 1).padStart(2, "0")} window=[${mStart.toISOString().slice(0, 10)}, ${minDate(mEnd, now).toISOString().slice(0, 10)}] found=${mPage.tweets.length} oldest=${mOldest?.created_at.slice(0, 10) ?? "none"}`,
+          `[explore] month=${scanYear}-${String(m + 1).padStart(2, "0")} window=[${mStart.toISOString().slice(0, 10)}, ${monthEndBounded.toISOString().slice(0, 10)}] found=${mPage.tweets.length} oldest=${mOldest?.created_at.slice(0, 10) ?? "none"}`,
         );
         onProgress?.(stats.totalCalls);
 
@@ -670,6 +786,50 @@ async function excavateFullArchive(
             }
           }
 
+          // ── Apply explicit probe thresholds ──
+          const monthTweetCount = mPage.tweets.length;
+          if (monthTweetCount >= 1 && monthTweetCount <= 9) {
+            // found 1-9 → treat as fully visible → whole-collect
+            console.log(
+              `[explore] month probe window=[${mStart.toISOString().slice(0, 10)}, ${monthEndBounded.toISOString().slice(0, 10)}] found=${monthTweetCount} → whole-collect (fully visible)`,
+            );
+            
+            await wholeCollectFromProbe(
+              query,
+              mStart,
+              monthEndBounded,
+              stats,
+              collected,
+              MAX_API_CALLS,
+              user.username,
+              mPage,
+              onProgress,
+              user.id,
+            );
+            
+            // Mark this month range as fully collected
+            wholeCollectedRanges.push({ start: mStart, end: monthEndBounded });
+            console.log(
+              `[explore] marked month range [${mStart.toISOString().slice(0, 10)}, ${monthEndBounded.toISOString().slice(0, 10)}] as whole-collected`,
+            );
+            
+            // Continue month scanning to find the absolute earliest region
+            // Set earliest region to this month for reference
+            if (!earliestRegionStart) {
+              earliestRegionStart = mStart;
+            }
+            
+            await sleep(EXPLORE_INTER_REQUEST_DELAY_MS);
+            continue; // Continue to next month
+          }
+          
+          if (monthTweetCount === 10) {
+            // found == 10 → dense/unknown → refine (break and start collect phase)
+            console.log(
+              `[explore] month probe window=[${mStart.toISOString().slice(0, 10)}, ${monthEndBounded.toISOString().slice(0, 10)}] found=${monthTweetCount} → dense/unknown, start collect phase`,
+            );
+          }
+
           earliestRegionStart = mStart;
 
           // Checkpoint: found the earliest region, about to enter collect.
@@ -685,7 +845,7 @@ async function excavateFullArchive(
             earliest_region_start: earliestRegionStart.toISOString(),
             collect_window_start: earliestRegionStart.toISOString(),
             collect_span_days: COLLECT_INITIAL_SPAN_DAYS,
-            collected_ids: [],
+            collected_ids: [...collected.keys()],
             zero_year_streak: 0,
             step_years: 1,
           });
@@ -746,8 +906,36 @@ async function excavateFullArchive(
   }
 
   console.log(
-    `[explore] @${user.username} earliest region: ${earliestRegionStart.toISOString().slice(0, 10)} (${stats.totalCalls} calls so far)`,
+    `[explore] @${user.username} earliest region: ${earliestRegionStart.toISOString().slice(0, 10)} (${stats.totalCalls} calls so far, collected=${collected.size})`,
   );
+
+  // ── Early completion check: Skip collect phase if whole-collect already satisfied limit ──
+  if (collected.size >= limit) {
+    console.log(
+      `[explore] @${user.username} target already satisfied by whole-collect optimizations (${collected.size} >= ${limit})`,
+    );
+    
+    // Sort and finalize the results
+    const sorted = [...collected.values()]
+      .sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime())
+      .slice(0, limit);
+
+    const storedNewCount = storeTweets(user.id, sorted, []); // Tweets already stored during whole-collect
+    
+    return {
+      username: user.username,
+      userId: user.id,
+      createdAt: user.created_at,
+      requestedLimit: limit,
+      fetchedCount: sorted.length,
+      stopReason: "OK_LIMIT_REACHED",
+      apiCalls: stats.totalCalls,
+      storedNewCount,
+      errors: stats.errors,
+      acquisitionMode: "full_archive",
+      deepTriggered: false,
+    };
+  }
 
   // ── Phase B: Collect from earliest region forward ──
 
@@ -976,6 +1164,123 @@ interface CollectCheckpointOpts {
     currentSpanDays: number,
     stag: { count: number; lastWindowKey: string | null },
   ) => void;
+}
+
+/**
+ * Perform immediate whole-collection of a sparse range (1-9 tweets detected in probe).
+ * Uses probe response as page 1, continues from page 2 if next_token exists.
+ * Eliminates duplicate API calls and unifies probe→collect flow.
+ * 
+ * @param query Search query
+ * @param start Window start time
+ * @param end Window end time  
+ * @param stats API call stats
+ * @param collected Map to add collected tweets to
+ * @param callCeiling Max API calls allowed
+ * @param username Username for logging
+ * @param probeResponse Initial probe response to reuse as page 1
+ * @param onProgress Progress callback
+ * @param userId User ID for incremental storage
+ * @returns Number of unique new tweets collected
+ */
+async function wholeCollectFromProbe(
+  query: string,
+  start: Date,
+  end: Date,
+  stats: ApiCallStats,
+  collected: Map<string, XTweet>,
+  callCeiling: number,
+  username: string,
+  probeResponse: TimelinePage,
+  onProgress?: (apiCalls: number) => void,
+  userId?: string,
+): Promise<number> {
+  if (stats.totalCalls >= callCeiling) {
+    return 0; // No budget left
+  }
+
+  console.log(
+    `[whole-collect] @${username} window=[${start.toISOString().slice(0, 10)}, ${end.toISOString().slice(0, 10)}] found=${probeResponse.tweets.length} reusing_probe_as_page1`,
+  );
+
+  const sizeBefore = collected.size;
+  let totalPages = 0;
+
+  // Page 1: Reuse probe response (avoid duplicate API call)
+  if (probeResponse.tweets.length > 0) {
+    // Store tweets immediately for persistence
+    if (userId) {
+      storeTweets(userId, probeResponse.tweets, probeResponse.media);
+    }
+
+    // Add to collection (Map handles deduplication)
+    for (const tweet of probeResponse.tweets) {
+      collected.set(tweet.id, tweet);
+    }
+
+    totalPages = 1;
+    console.log(
+      `[whole-collect] page 1 (probe reuse): +${probeResponse.tweets.length} tweets, total_collected=${collected.size}`,
+    );
+  }
+
+  // Continue from page 2 if next_token exists
+  let nextToken = probeResponse.nextToken;
+  while (nextToken && stats.totalCalls < callCeiling && totalPages < MAX_COLLECT_PAGES_PER_WINDOW) {
+    let page: TimelinePage;
+    try {
+      page = await searchAllTweets(
+        query,
+        start.toISOString(),
+        end.toISOString(),
+        stats,
+        100, // Full page size for efficiency
+        nextToken,
+        "recency",
+      );
+    } catch (e) {
+      if (e instanceof XApiStop) {
+        console.log(`[whole-collect] @${username} stopped: ${e.reason}`);
+        break;
+      }
+      throw e;
+    }
+
+    // Store tweets immediately for persistence
+    if (userId && page.tweets.length > 0) {
+      storeTweets(userId, page.tweets, page.media);
+    }
+
+    // Add new tweets to collection (Map handles deduplication)
+    for (const tweet of page.tweets) {
+      collected.set(tweet.id, tweet);
+    }
+
+    totalPages++;
+    nextToken = page.nextToken;
+    onProgress?.(stats.totalCalls);
+
+    console.log(
+      `[whole-collect] page ${totalPages}: +${page.tweets.length} tweets, total_collected=${collected.size}`,
+    );
+
+    // Break if no more pages or if we've collected enough
+    if (!nextToken || page.tweets.length === 0) {
+      break;
+    }
+
+    // Rate limiting between pages
+    if (nextToken) {
+      await sleep(EXPLORE_INTER_REQUEST_DELAY_MS);
+    }
+  }
+
+  const uniqueNew = collected.size - sizeBefore;
+  console.log(
+    `[whole-collect] @${username} completed: pages=${totalPages} uniqueNew=${uniqueNew} total_calls=${stats.totalCalls}`,
+  );
+
+  return uniqueNew;
 }
 
 /**
@@ -1407,9 +1712,9 @@ async function collectWindowPass(
     let nextSpanDays: number;
 
     if (dense) {
-      // Dense condition: stay at 7 days
-      nextSpanDays = MIN_COLLECT_SPAN_DAYS;
-      adaptAction = "stay_dense";
+      // Dense condition: keep current span when it's working well
+      nextSpanDays = currentSpanDays;
+      adaptAction = "keep_dense";
     } else {
       // Sparse condition: step progression 7 → 30 → 120 → endOfYear
       if (currentSpanDays === MIN_COLLECT_SPAN_DAYS) {
