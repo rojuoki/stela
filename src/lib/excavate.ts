@@ -80,14 +80,13 @@ const MAX_COLLECT_PAGES_PER_WINDOW = 5;
  */
 const MIN_SPLIT_SPAN_DAYS = 7;
 
-// ── Adaptive window sizing constants ──────────────────────────────────────────
-// Controls how collectSpanDays grows/shrinks based on hit density per window.
-const TARGET_MIN_HITS = 10;        // below this → window is "low density"
-const MIN_COLLECT_SPAN_DAYS = 7;   // floor to prevent runaway shrink
-// ceiling = COLLECT_MAX_SPAN_DAYS (reuse existing)
-const GROW_FACTOR_ZERO = 8;        // aggressive grow when window is empty
-const GROW_FACTOR_LOW  = 4;        // gentle grow when window has <TARGET_MIN_HITS tweets
-const SHRINK_FACTOR_FULL = 0.5;    // halve span when window is clogged (page cap hit)
+// ── Step-based window sizing constants ──────────────────────────────────────────
+// Simple step-based model: Dense → stay small (7 days), Sparse → expand stepwise
+const DENSE_THRESHOLD = 10;        // uniqueNew >= this AND not clogged → window is "dense"
+const MIN_COLLECT_SPAN_DAYS = 7;   // floor (always stay at 7 for dense windows)
+const STEP_30_DAYS = 30;           // first expansion step for sparse windows
+const STEP_120_DAYS = 120;         // second expansion step for sparse windows
+// ceiling = endOfYear calculation (dynamic based on current window year)
 
 /**
  * Number of consecutive same-window / stored_new=0 iterations before forcing
@@ -433,7 +432,7 @@ async function excavateFullArchive(
     ) {
       const yearStart =
         year === startYear ? accountCreated : new Date(Date.UTC(year, 0, 1));
-      const yearEnd = new Date(Date.UTC(year + 1, 0, 1));
+      const yearEnd = new Date(Date.UTC(year + stepYears, 0, 1));
       const yEndStr = minDate(yearEnd, now).toISOString();
 
       // ── Year probe (skipped when resuming mid-month-scan for this year) ──
@@ -1395,52 +1394,54 @@ async function collectWindowPass(
       storeTweets(checkpointOpts.userId, windowTweets, []); // Media already stored per-page
     }
 
-    // ── Adaptive window sizing ─────────────────────────────────────────────
-    // Special case: first window (7-day initial) with 0 tweets → jump to 30 days
-    const isFirstWindow = collected.size === 0 && currentSpanDays === COLLECT_INITIAL_SPAN_DAYS && !isProcessingSplit;
-    
-    // Grow aggressively on empty windows (sparse/early account) to reduce
-    // wasted API calls. Shrink when the page cap is hit (dense period) so we
-    // don't skip tweets on the earliest side.
+    // ── Step-based window sizing ─────────────────────────────────────────────
+    // Core Idea: Dense → stay small (7 days), Sparse → expand stepwise (7 → 30 → 120 → endOfYear)
     const clogged = !exhausted && pagesInWindow >= MAX_COLLECT_PAGES_PER_WINDOW;
+    const dense = uniqueNew >= DENSE_THRESHOLD && !clogged;
+    
+    // Calculate end of current window's year for year-end window logic
+    const currentWindowYear = currentWindowStart.getUTCFullYear();
+    const endOfYear = new Date(Date.UTC(currentWindowYear, 11, 31, 23, 59, 59, 999));
+    
     let adaptAction: string;
     let nextSpanDays: number;
 
-    if (uniqueNew === 0 && isFirstWindow) {
-      nextSpanDays = 30;  // Special jump to 30 days for empty first window
-      adaptAction = "first_window_jump";
-      console.log(
-        `[collect][adaptive] First 7-day window empty → jumping to 30 days for sparse account optimization`,
-      );
-    } else if (uniqueNew === 0) {
-      nextSpanDays = Math.min(currentSpanDays * GROW_FACTOR_ZERO, COLLECT_MAX_SPAN_DAYS);
-      adaptAction = "grow_zero";
-    } else if (uniqueNew < TARGET_MIN_HITS) {
-      nextSpanDays = Math.min(currentSpanDays * GROW_FACTOR_LOW, COLLECT_MAX_SPAN_DAYS);
-      adaptAction = "grow_low";
-    } else if (clogged) {
-      nextSpanDays = Math.max(Math.floor(currentSpanDays * SHRINK_FACTOR_FULL), MIN_COLLECT_SPAN_DAYS);
-      adaptAction = "shrink_full";
+    if (dense) {
+      // Dense condition: stay at 7 days
+      nextSpanDays = MIN_COLLECT_SPAN_DAYS;
+      adaptAction = "stay_dense";
     } else {
-      nextSpanDays = currentSpanDays;
-      adaptAction = "keep";
-    }
-
-    // ── Budget cap: if close to the limit, shrink the next window so we don't
-    // over-fetch and hit unnecessary 429s. Estimate required days from the
-    // observed density (tweets/day this window) with 2× headroom.
-    if (uniqueNew > 0 && collected.size < collectLimit) {
-      const remaining = collectLimit - collected.size;
-      const densityPerDay = uniqueNew / currentSpanDays;
-      const estimatedDays = Math.ceil((remaining / densityPerDay) * 2);
-      if (estimatedDays < nextSpanDays) {
-        nextSpanDays = Math.max(estimatedDays, MIN_COLLECT_SPAN_DAYS);
-        adaptAction += "+budget_cap";
+      // Sparse condition: step progression 7 → 30 → 120 → endOfYear
+      if (currentSpanDays === MIN_COLLECT_SPAN_DAYS) {
+        nextSpanDays = STEP_30_DAYS;
+        adaptAction = "step_to_30";
+      } else if (currentSpanDays === STEP_30_DAYS) {
+        if (uniqueNew >= DENSE_THRESHOLD) {
+          nextSpanDays = STEP_30_DAYS;
+          adaptAction = "keep_30";
+        } else {
+          nextSpanDays = STEP_120_DAYS;
+          adaptAction = "step_to_120";
+        }
+      } else if (currentSpanDays === STEP_120_DAYS) {
+        if (uniqueNew >= DENSE_THRESHOLD) {
+          nextSpanDays = STEP_120_DAYS;
+          adaptAction = "keep_120";
+        } else {
+          // Move to endOfYear window
+          const daysToEndOfYear = Math.ceil((endOfYear.getTime() - currentWindowStart.getTime()) / (24 * 60 * 60 * 1000));
+          nextSpanDays = Math.max(daysToEndOfYear, MIN_COLLECT_SPAN_DAYS);
+          adaptAction = "step_to_end_of_year";
+        }
+      } else {
+        // Post year-end or other cases: return to 7-day probe for next year
+        nextSpanDays = MIN_COLLECT_SPAN_DAYS;
+        adaptAction = "reset_to_7";
       }
     }
 
     console.log(
-      `[collect][adaptive] spanDays=${currentSpanDays} uniqueNew=${uniqueNew} pages=${pagesInWindow} exhausted=${exhausted} action=${adaptAction} nextSpanDays=${nextSpanDays}`,
+      `[collect][step-based] spanDays=${currentSpanDays} uniqueNew=${uniqueNew} dense=${dense} pages=${pagesInWindow} exhausted=${exhausted} action=${adaptAction} nextSpanDays=${nextSpanDays}`,
     );
 
     // ── Stagnation detection ─────────────────────────────────────────────────
