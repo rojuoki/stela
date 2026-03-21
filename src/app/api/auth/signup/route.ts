@@ -48,13 +48,7 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // Give new user 3 free credits
-    try {
-      giveCredits(user.id, 3, "New user signup bonus");
-    } catch (error) {
-      console.error('Failed to give signup credits:', error);
-      // Don't fail signup if credit granting fails
-    }
+    // Note: Free users get 0 credits. Credits are granted through subscriptions or purchases.
 
     // Transfer temporary unlock if provided
     let transferredUnlock = false;

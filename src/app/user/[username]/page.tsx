@@ -45,6 +45,9 @@ interface JobResponse {
   result?: { userId: string; fetchedCount: number; stopReason: string };
 }
 
+/** True only when the dev panel is enabled at build time. */
+const DEV_PANEL = process.env.NEXT_PUBLIC_DEV_PANEL === "1";
+
 /** Artificial delay (0.5–1.0s) for UX consistency */
 const ARTIFICIAL_DELAY_MS = 750;
 
@@ -577,14 +580,19 @@ export default function UserPage() {
               <>
                 {isAlreadyUnlocked ? (
                   <div className="text-center">
-                    <button
-                      onClick={() => handleExcavate(true)}
-                      className="bg-zinc-800 text-white font-semibold px-6 py-3 rounded-lg hover:bg-zinc-700 transition-colors border border-zinc-600 mb-2"
-                    >
-                      Re-run Excavation
-                    </button>
+                    {DEV_PANEL && (
+                      <button
+                        onClick={() => handleExcavate(true)}
+                        className="bg-zinc-800 text-white font-semibold px-6 py-3 rounded-lg hover:bg-zinc-700 transition-colors border border-zinc-600 mb-2"
+                      >
+                        Re-run Excavation
+                      </button>
+                    )}
                     <p className="text-xs text-zinc-500">
-                      Re-excavation uses 1 credit • You have {credits} credits{subscription.plan === 'basic' && ' • Basic subscriber'}
+                      {DEV_PANEL ? 
+                        `Re-excavation uses 1 credit • You have ${credits} credits${subscription.plan === 'basic' ? ' • Basic subscriber' : ''}` :
+                        `Account previously unlocked • ${credits} credits available${subscription.plan === 'basic' ? ' • Basic subscriber' : ''}`
+                      }
                     </p>
                   </div>
                 ) : (
@@ -603,48 +611,25 @@ export default function UserPage() {
               </>
             ) : (
               <>
-                <div className="flex items-center gap-3 mb-3">
+                <div className="text-center">
                   <button
                     onClick={handleUnlockForPrice}
-                    className="bg-white text-black font-semibold px-6 py-3 rounded-lg hover:bg-zinc-200 transition-colors"
+                    className="bg-white text-black font-semibold px-6 py-3 rounded-lg hover:bg-zinc-200 transition-colors mb-3"
                   >
                     Unlock for $3
                   </button>
-                  <Link 
-                    href="/subscribe"
-                    className="bg-zinc-800 text-white font-semibold px-6 py-3 rounded-lg hover:bg-zinc-700 transition-colors border border-zinc-600"
-                  >
-                    Subscribe
-                  </Link>
-                </div>
-                {isLoggedIn ? (
-                  <div className="text-center">
-                    <p className="text-xs text-zinc-500">$3 for 1 unlock • Basic subscription gets 3 unlocks/month</p>
-                    <p className="text-xs text-zinc-400 mt-1">
-                      Currently signed in as {user?.email}
-                    </p>
-                  </div>
-                ) : (
-                  <div className="text-center">
-                    <p className="text-xs text-zinc-500 mb-2">$3 for 1 unlock • Basic subscription gets 3 unlocks/month</p>
-                    <div className="flex items-center justify-center gap-2 text-xs">
-                      <span className="text-zinc-400">Have an account?</span>
+                  {!isLoggedIn && (
+                    <div className="text-sm text-zinc-400">
+                      Have an account?{" "}
                       <Link 
                         href="/login"
                         className="text-white hover:text-zinc-300 underline"
                       >
                         Sign in
                       </Link>
-                      <span className="text-zinc-500">•</span>
-                      <Link 
-                        href="/signup"
-                        className="text-white hover:text-zinc-300 underline"
-                      >
-                        Create account
-                      </Link>
                     </div>
-                  </div>
-                )}
+                  )}
+                </div>
               </>
             )}
 
@@ -868,7 +853,7 @@ export default function UserPage() {
           )}
 
           {/* Expansion options - placeholder for Phase 5 */}
-          {hasResults && (
+          {hasResults && DEV_PANEL && (
             <div className="mt-8 text-center">
               <button
                 onClick={() => handleExcavate(true)}

@@ -6,10 +6,15 @@ import { useUser } from "../../contexts/UserContext";
 import { useRouter } from "next/navigation";
 
 export default function SubscribePage() {
-  const { user, credits, subscription, refreshCredits, refreshSubscription } = useUser();
+  const { user, credits, subscription, signup, refreshCredits, refreshSubscription } = useUser();
   const router = useRouter();
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  
+  // Form state for account creation
+  const [name, setName] = useState("");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
 
   const handleSubscribe = async () => {
     setLoading(true);
@@ -33,6 +38,59 @@ export default function SubscribePage() {
       } else {
         const data = await response.json();
         setError(data.error || 'Subscription failed');
+      }
+    } catch (err) {
+      setError('Network error. Please try again.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleSignupAndSubscribe = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setLoading(true);
+    setError(null);
+
+    if (!name.trim() || !email.trim() || !password.trim()) {
+      setError("All fields are required");
+      setLoading(false);
+      return;
+    }
+
+    if (password.length < 6) {
+      setError("Password must be at least 6 characters long");
+      setLoading(false);
+      return;
+    }
+
+    try {
+      // Create account using UserContext signup function
+      const signupResult = await signup(name.trim(), email.trim(), password);
+
+      if (!signupResult.success) {
+        setError(signupResult.error || 'Account creation failed');
+        setLoading(false);
+        return;
+      }
+
+      // Account created successfully and user is now logged in
+      // Now create subscription
+      const subscriptionResponse = await fetch('/api/subscription/create', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ plan: 'basic' }),
+        credentials: 'include',
+      });
+
+      if (subscriptionResponse.ok) {
+        // Refresh subscription and credits to reflect the new subscription
+        await Promise.all([refreshCredits(), refreshSubscription()]);
+        router.push('/'); // Redirect to home with logged in state
+      } else {
+        const subscriptionData = await subscriptionResponse.json();
+        setError(subscriptionData.error || 'Subscription setup failed');
       }
     } catch (err) {
       setError('Network error. Please try again.');
@@ -148,28 +206,71 @@ export default function SubscribePage() {
         </div>
 
         {!user && (
-          <div className="bg-orange-900/20 border border-orange-800/50 rounded-lg p-4 mb-6">
-            <div className="flex items-center gap-2 text-orange-300 mb-2">
+          <div className="bg-zinc-800 border border-zinc-700 rounded-lg p-4 mb-6">
+            <div className="flex items-center gap-2 text-white mb-3">
               <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 20 20">
-                <path fillRule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7-4a1 1 0 11-2 0 1 1 0 012 0zM9 9a1 1 0 000 2v3a1 1 0 001 1h1a1 1 0 100-2v-3a1 1 0 00-1-1H9z" clipRule="evenodd" />
+                <path d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
               </svg>
-              <span className="font-medium">Account Required</span>
+              <span className="font-medium">Create Account & Subscribe</span>
             </div>
-            <p className="text-sm text-orange-100 mb-3">
-              You'll need to sign in or create an account to start your subscription.
+            <p className="text-sm text-zinc-400 mb-4">
+              Create your account and start your subscription in one step.
             </p>
-            <div className="flex gap-2">
+            
+            <form onSubmit={handleSignupAndSubscribe} className="space-y-3">
+              <div>
+                <input
+                  type="text"
+                  placeholder="Your name"
+                  value={name}
+                  onChange={(e) => setName(e.target.value)}
+                  disabled={loading}
+                  className="w-full bg-zinc-900 border border-zinc-600 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-blue-500 disabled:opacity-50"
+                  required
+                />
+              </div>
+              <div>
+                <input
+                  type="email"
+                  placeholder="your@email.com"
+                  value={email}
+                  onChange={(e) => setEmail(e.target.value)}
+                  disabled={loading}
+                  className="w-full bg-zinc-900 border border-zinc-600 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-blue-500 disabled:opacity-50"
+                  required
+                />
+              </div>
+              <div>
+                <input
+                  type="password"
+                  placeholder="Password (6+ characters)"
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  disabled={loading}
+                  className="w-full bg-zinc-900 border border-zinc-600 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-blue-500 disabled:opacity-50"
+                  minLength={6}
+                  required
+                />
+              </div>
+              
+              <div className="pt-2">
+                <button
+                  type="submit"
+                  disabled={loading}
+                  className="w-full bg-gradient-to-r from-blue-600 to-purple-600 text-white font-semibold py-3 px-6 rounded-lg hover:from-blue-700 hover:to-purple-700 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  {loading ? 'Creating Account & Subscribing...' : 'Create Account & Subscribe for $9/month'}
+                </button>
+              </div>
+            </form>
+            
+            <div className="mt-4 pt-3 border-t border-zinc-700 text-center">
+              <p className="text-xs text-zinc-500 mb-2">Already have an account?</p>
               <Link
                 href="/login"
-                className="text-xs bg-orange-600 text-white px-3 py-1.5 rounded hover:bg-orange-700 transition-colors"
+                className="text-sm text-blue-400 hover:text-blue-300 underline"
               >
-                Sign In
-              </Link>
-              <Link
-                href="/signup"
-                className="text-xs bg-zinc-700 text-white px-3 py-1.5 rounded hover:bg-zinc-600 transition-colors"
-              >
-                Create Account
+                Sign in to upgrade
               </Link>
             </div>
           </div>
@@ -186,18 +287,20 @@ export default function SubscribePage() {
           </div>
         )}
 
-        <button
-          onClick={handleSubscribe}
-          disabled={loading || !user || isCurrentlySubscribed}
-          className="w-full bg-gradient-to-r from-blue-600 to-purple-600 text-white font-semibold py-3 px-6 rounded-lg hover:from-blue-700 hover:to-purple-700 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
-        >
-          {loading 
-            ? 'Processing...' 
-            : isCurrentlySubscribed 
-              ? 'Already Subscribed' 
-              : 'Subscribe for $9/month'
-          }
-        </button>
+        {user && (
+          <button
+            onClick={handleSubscribe}
+            disabled={loading || !user || isCurrentlySubscribed}
+            className="w-full bg-gradient-to-r from-blue-600 to-purple-600 text-white font-semibold py-3 px-6 rounded-lg hover:from-blue-700 hover:to-purple-700 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            {loading 
+              ? 'Processing...' 
+              : isCurrentlySubscribed 
+                ? 'Already Subscribed' 
+                : 'Subscribe for $9/month'
+            }
+          </button>
+        )}
 
         <div className="mt-4 text-center text-xs text-zinc-500">
           <p>🔒 Secure payment processing</p>

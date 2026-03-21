@@ -61,9 +61,9 @@ export default function Home() {
 
       {/* Main Header */}
       <main>
-        <div className="text-center mb-8">
-          <h1 className="text-3xl font-bold mb-2 tracking-tight">
-            Discover Earliest Posts
+        <div className="mb-8">
+          <h1 className="text-4xl font-bold mb-2 tracking-tight">
+            STELA
           </h1>
           <p className="text-zinc-400 text-lg">
             Unlock the earliest posts of any public X account.

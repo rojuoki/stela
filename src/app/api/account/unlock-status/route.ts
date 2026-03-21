@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getUserId } from "@/lib/getUserId";
-import { hasUserUnlockedAccount, getAccountByUsername } from "@/lib/repository";
+import { hasUserUnlockedAccount, getAccountByUsername, getTemporaryUnlock, transferTemporaryUnlock } from "@/lib/repository";
 import { withDevMeasure } from "@/lib/devMeasure";
 
 export async function GET(req: NextRequest) {
@@ -24,6 +24,46 @@ export async function GET(req: NextRequest) {
           unlocked: false,
           reason: "account_not_found"
         });
+      }
+
+      // Check for temporary unlock first (guest purchases)
+      let hasTemporaryUnlock = false;
+      const tempUnlockToken = req.cookies.get('temp-unlock-token')?.value;
+      
+      if (tempUnlockToken) {
+        const tempUnlock = getTemporaryUnlock(tempUnlockToken);
+        if (tempUnlock && tempUnlock.username.toLowerCase() === username.toLowerCase()) {
+          hasTemporaryUnlock = true;
+          
+          // If user is authenticated, transfer the temporary unlock to their account
+          if (userId !== "anonymous") {
+            try {
+              const transferred = transferTemporaryUnlock(tempUnlockToken, userId);
+              if (transferred) {
+                console.log(`[unlock-status] Transferred temporary unlock to user ${userId} for ${username}`);
+                // Clear the temporary unlock cookie since it's now transferred
+                const response = NextResponse.json({
+                  unlocked: true,
+                  authenticated: true,
+                  accountId: account.account_id,
+                  transferred: true
+                });
+                response.cookies.delete('temp-unlock-token');
+                return response;
+              }
+            } catch (error) {
+              console.error(`[unlock-status] Failed to transfer temporary unlock:`, error);
+            }
+          } else {
+            // Guest user with valid temporary unlock
+            return NextResponse.json({
+              unlocked: true,
+              authenticated: false,
+              accountId: account.account_id,
+              temporary: true
+            });
+          }
+        }
       }
 
       // Check unlock status for authenticated users

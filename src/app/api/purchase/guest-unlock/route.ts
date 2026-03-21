@@ -55,12 +55,22 @@ export async function POST(req: NextRequest) {
         const token = createTemporaryUnlock(account.account_id, normalizedUsername, tweets);
         console.log(`[purchase/guest-unlock] Using cached data for @${normalizedUsername}: ${token}`);
         
-        return NextResponse.json({
+        const response = NextResponse.json({
           success: true,
           resultToken: token,
           source: "cached",
           message: "Using existing excavated data"
         });
+        
+        // Set cookie to track temporary unlock for potential login migration
+        response.cookies.set('temp-unlock-token', token, {
+          httpOnly: true,
+          secure: process.env.NODE_ENV === 'production',
+          sameSite: 'lax',
+          maxAge: 48 * 60 * 60 // 48 hours (same as temporary unlock TTL)
+        });
+        
+        return response;
       }
     }
 
@@ -101,13 +111,23 @@ export async function POST(req: NextRequest) {
     const token = createTemporaryUnlock(placeholderAccountId, normalizedUsername, placeholderTweets, jobId);
     console.log(`[purchase/guest-unlock] Created pending result token for @${normalizedUsername}: ${token} (job: ${jobId})`);
 
-    return NextResponse.json({
+    const response = NextResponse.json({
       success: true,
       resultToken: token,
       jobId,
       source: "excavation_started",
       message: "Payment successful - excavation started"
     });
+    
+    // Set cookie to track temporary unlock for potential login migration
+    response.cookies.set('temp-unlock-token', token, {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === 'production',
+      sameSite: 'lax',
+      maxAge: 48 * 60 * 60 // 48 hours (same as temporary unlock TTL)
+    });
+    
+    return response;
 
   } catch (error) {
     console.error('[purchase/guest-unlock] Error:', error);
