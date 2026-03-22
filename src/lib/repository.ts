@@ -583,7 +583,8 @@ export function getDevUnlocks(userId: string): DevUnlockEntry[] {
          a.username,
          a.created_at          AS account_created_at,
          j.requested_limit     AS cap,
-         (SELECT COUNT(*) FROM tweets t WHERE t.account_id = u.account_id)
+         MIN(CASE WHEN u.stage = 1 THEN 100 ELSE 999999 END, 
+             (SELECT COUNT(*) FROM tweets t WHERE t.account_id = u.account_id))
                                AS unlocked_count
        FROM unlocks u
        LEFT JOIN accounts a ON a.account_id = u.account_id
