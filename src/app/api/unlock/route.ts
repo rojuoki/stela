@@ -96,7 +96,8 @@ export async function POST(req: NextRequest) {
           
           if (alreadyUnlockedStage1) {
             // Free re-unlock for same user (Stage 1 already unlocked)
-            recordStageUnlock(userId, account.account_id, 1, "cache-hit-free");
+            const boundaryEnd = Math.min(100, cachedCount); // Stage 1 boundary
+            recordStageUnlock(userId, account.account_id, 1, boundaryEnd, boundaryEnd, "cache-hit-free");
             recordApiCall("cache/unlock", true); // saved: no excavation needed
             console.log(`[unlock] Free cache hit for @${username} Stage 1: ${cachedCount} tweets, user already unlocked`);
             
@@ -129,7 +130,8 @@ export async function POST(req: NextRequest) {
                 balance: currentBalance.balance,
               }, { status: 500 });
             }
-            recordStageUnlock(userId, account.account_id, 1, "cache-hit-paid");
+            const boundaryEnd = Math.min(100, cachedCount); // Stage 1 boundary  
+            recordStageUnlock(userId, account.account_id, 1, boundaryEnd, boundaryEnd, "cache-hit-paid");
             recordApiCall("cache/unlock", true); // saved: tweets already in DB
 
             console.log(`[unlock] Paid cache hit for @${username} Stage 1: ${cachedCount} tweets, 1 credit consumed`);
@@ -193,10 +195,10 @@ export async function POST(req: NextRequest) {
     if (requestedStage === 1) {
       // Stage 1: Use normal job creation
       const knownAccount = getAccountByUsername(username);
-      jobId = createAndRunJob(username, knownAccount?.created_at, undefined, 1, force);
+      jobId = createAndRunJob(username, knownAccount?.created_at, undefined, 1, force, userId);
     } else {
       // Stage 2+: Use expansion job creation with prerequisite checking
-      const expansionResult = createStageExpansionJob(username, requestedStage);
+      const expansionResult = createStageExpansionJob(username, requestedStage, undefined, userId);
       if (expansionResult.error) {
         return NextResponse.json({
           error: expansionResult.error,

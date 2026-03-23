@@ -27,7 +27,7 @@
 import { randomUUID } from "crypto";
 import { getDb } from "./db";
 import { excavateEarliest, excavateStageExpansion, type ExcavationCheckpoint, type ExcavationResult } from "./excavate";
-import { captureHeld, releaseHeld } from "./repository";
+import { captureHeld, releaseHeld, recordStageUnlock } from "./repository";
 import { tokenPool } from "./tokenPool";
 import { XApiStop } from "./xclient";
 import { 
@@ -42,6 +42,7 @@ export interface JobRecord {
   id: string;
   account_username: string;
   account_id: string | null;
+  user_id: string;
   requested_limit: number;
   /** Phase 4: Stage being excavated (1, 2, 3, etc.) - defaults to 1 for backward compatibility */
   stage: number;
@@ -437,6 +438,7 @@ export function createAndRunJob(
   holdId?: string,
   stage: number = 1,
   force: boolean = false,
+  userId: string = "anonymous",
 ): string {
   const db = getDb();
   const jobId = randomUUID();
@@ -447,9 +449,9 @@ export function createAndRunJob(
   const targetCount = stage === 1 ? computeTargetCount(accountCreatedAt) : 0; // Will be computed at execution time
 
   db.prepare(`
-    INSERT INTO jobs (id, account_username, requested_limit, stage, hold_id, status, created_at)
-    VALUES (?, ?, ?, ?, ?, 'queued', ?)
-  `).run(jobId, username.toLowerCase(), targetCount, stage, holdId ?? null, now);
+    INSERT INTO jobs (id, account_username, user_id, requested_limit, stage, hold_id, status, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, 'queued', ?)
+  `).run(jobId, username.toLowerCase(), userId, targetCount, stage, holdId ?? null, now);
 
   // Set force flag for admin rerun bypass
   if (force) {
@@ -469,6 +471,7 @@ export function createStageExpansionJob(
   username: string,
   targetStage: number,
   holdId?: string,
+  userId: string = "anonymous",
 ): { jobId: string; error?: never } | { error: string; jobId?: never } {
   if (targetStage <= 1) {
     return { error: "Use createAndRunJob for Stage 1" };
@@ -498,7 +501,7 @@ export function createStageExpansionJob(
   }
 
   // All checks passed - create the expansion job
-  const jobId = createAndRunJob(username, account.created_at, holdId, targetStage);
+  const jobId = createAndRunJob(username, account.created_at, holdId, targetStage, false, userId);
   return { jobId };
 }
 
@@ -533,10 +536,11 @@ async function runJobAsync(jobId: string): Promise<void> {
   let suspended = false;
 
   try {
+    const db = getDb();
     const jobRow = db
-      .prepare("SELECT account_username, requested_limit, stage, hold_id, resume_state, status FROM jobs WHERE id = ?")
+      .prepare("SELECT account_username, user_id, requested_limit, stage, hold_id, resume_state, status FROM jobs WHERE id = ?")
       .get(jobId) as
-      | { account_username: string; requested_limit: number; stage: number; hold_id: string | null; resume_state: string | null; status: string }
+      | { account_username: string; user_id: string; requested_limit: number; stage: number; hold_id: string | null; resume_state: string | null; status: string }
       | undefined;
 
     if (!jobRow) {
@@ -555,7 +559,7 @@ async function runJobAsync(jobId: string): Promise<void> {
       return; // finally handles cleanup
     }
 
-    const { account_username: username, requested_limit: limit, stage: jobStage, hold_id: holdId } = jobRow;
+    const { account_username: username, user_id: requestingUserId, requested_limit: limit, stage: jobStage, hold_id: holdId } = jobRow;
 
     // Restore checkpoint from previous run (if any).
     let initialCheckpoint: ExcavationCheckpoint | null = null;
@@ -688,7 +692,7 @@ async function runJobAsync(jobId: string): Promise<void> {
             : Date.now() + 60_000;
         } else {
           const msg = e instanceof Error ? e.message : String(e);
-          failJobInDb(jobId, "EXCAVATION_ERROR", msg, undefined, holdId);
+          failJobInDb(jobId, "EXCAVATION_ERROR", msg);
           return; // finally handles cleanup
         }
       }
@@ -731,7 +735,7 @@ async function runJobAsync(jobId: string): Promise<void> {
     // ── Hard failure path ────────────────────────────────────────────────────
     const hardFailReasons = ["PROTECTED_OR_SUSPENDED_OR_NOT_FOUND", "API_ERROR"];
     if (hardFailReasons.includes(result.stopReason) && result.fetchedCount === 0) {
-      failJobInDb(jobId, result.stopReason, `Stop reason: ${result.stopReason}`, result, holdId);
+      failJobInDb(jobId, result.stopReason, `Stop reason: ${result.stopReason}`, result);
       return; // finally handles cleanup
     }
 
@@ -744,7 +748,11 @@ async function runJobAsync(jobId: string): Promise<void> {
         console.log(
           `[jobs] Job ${jobId} was canceled while running — skipping success write, releasing hold`,
         );
-        if (holdId) releaseHeld(holdId, "Job canceled while running");
+        // Use credit_holds.job_id as billing source of truth
+        const cancelHold = db.prepare("SELECT * FROM credit_holds WHERE job_id = ? AND status = 'held'").get(jobId) as {
+          id: string; user_id: string; amount: number; status: string;
+        } | undefined;
+        if (cancelHold) releaseHeld(cancelHold.id, "Job canceled while running");
         return; // finally handles token release and complete()
       }
     }
@@ -761,14 +769,19 @@ async function runJobAsync(jobId: string): Promise<void> {
       }
     }
 
-    // ── Success path ─────────────────────────────────────────────────────────
-    if (holdId && result.fetchedCount > 0) {
-      const captured = captureHeld(holdId, `Excavation success: ${result.fetchedCount} posts`);
+    // ── Success path with proper billing source of truth ───────────────────────
+    // Use credit_holds.job_id as canonical billing link instead of jobs.hold_id
+    const hold = db.prepare("SELECT * FROM credit_holds WHERE job_id = ? AND status = 'held'").get(jobId) as {
+      id: string; user_id: string; amount: number; status: string;
+    } | undefined;
+
+    if (hold && result.fetchedCount > 0) {
+      const captured = captureHeld(hold.id, `Excavation success: ${result.fetchedCount} posts`);
       console.log(
         `[jobs] Credit ${captured ? "captured" : "capture failed"} for job ${jobId}`,
       );
-    } else if (holdId && result.fetchedCount === 0) {
-      const released = releaseHeld(holdId, "Excavation returned 0 posts");
+    } else if (hold && result.fetchedCount === 0) {
+      const released = releaseHeld(hold.id, "Excavation returned 0 posts");
       console.log(
         `[jobs] Credit ${released ? "released" : "release failed"} for job ${jobId} (0 posts)`,
       );
@@ -795,10 +808,14 @@ async function runJobAsync(jobId: string): Promise<void> {
     );
 
     if (result.userId && result.fetchedCount > 0) {
-      db.prepare(`
-        INSERT OR IGNORE INTO unlocks (user_id, account_id, stage, job_id, unlocked_at)
-        VALUES ('anonymous', ?, ?, ?, ?)
-      `).run(result.userId, jobStage, jobId, new Date().toISOString());
+      // Calculate boundary_end and granted_count based on the excavation result
+      const boundaryEnd = result.fetchedCount;
+      const grantedCount = result.fetchedCount; // For now, simple case where all fetched posts are new
+      
+      // Use proper recordStageUnlock function with the requesting user_id
+      recordStageUnlock(requestingUserId, result.userId, jobStage, boundaryEnd, grantedCount, jobId);
+      
+      console.log(`[jobs] Recorded unlock: user=${requestingUserId}, account=${result.userId}, stage=${jobStage}, boundary=${boundaryEnd}, granted=${grantedCount}`);
     }
 
     console.log(
@@ -833,8 +850,13 @@ function failJobInDb(
 ): void {
   const db = getDb();
 
-  if (holdId) {
-    const released = releaseHeld(holdId, `Job failed: ${errorCode}`);
+  // Use credit_holds.job_id as billing source of truth instead of holdId parameter
+  const hold = db.prepare("SELECT * FROM credit_holds WHERE job_id = ? AND status = 'held'").get(jobId) as {
+    id: string; user_id: string; amount: number; status: string;
+  } | undefined;
+
+  if (hold) {
+    const released = releaseHeld(hold.id, `Job failed: ${errorCode}`);
     console.log(
       `[jobs] Credit ${released ? "released" : "release failed"} for failed job ${jobId}`,
     );

@@ -87,7 +87,8 @@ export async function POST(req: NextRequest) {
         account?.created_at, 
         undefined, // no credit hold for guest purchases
         1, // stage 1
-        false // not forced
+        false, // not forced
+        "anonymous" // guest users are anonymous
       );
       console.log(`[purchase/guest-unlock] Started excavation job ${jobId} for @${normalizedUsername}`);
     } else {

@@ -141,7 +141,7 @@ export default function UserPage() {
     setAccountError(null);
 
     try {
-      const res = await fetch(
+      const res = await apiFetch(
         `/api/account?username=${encodeURIComponent(cleanUsername)}`,
       );
       const data = await res.json();
@@ -164,7 +164,7 @@ export default function UserPage() {
   };
 
   const loadTweets = async (accountId: string): Promise<TweetData[]> => {
-    const res = await fetch(`/api/tweets/${accountId}`);
+    const res = await apiFetch(`/api/tweets/${accountId}`);
     if (res.ok) {
       const data = await res.json();
       return data.tweets || [];
@@ -184,9 +184,7 @@ export default function UserPage() {
   useEffect(() => {
     if (user && accountData && !checkingUnlockStatus) {
       setCheckingUnlockStatus(true);
-      fetch(`/api/account/unlock-status?username=${encodeURIComponent(accountData.username)}`, {
-        credentials: 'include'
-      })
+      apiFetch(`/api/account/unlock-status?username=${encodeURIComponent(accountData.username)}`)
         .then(res => res.json())
         .then(data => {
           if (data.unlocked) {
@@ -231,7 +229,7 @@ export default function UserPage() {
       if (cancelled) return;
 
       try {
-        const res = await fetch(`/api/jobs/${activeJobId}`);
+        const res = await apiFetch(`/api/jobs/${activeJobId}`);
 
         if (cancelled) return;
 

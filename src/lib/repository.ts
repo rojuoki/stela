@@ -43,6 +43,31 @@ export function getTweetsByAccount(accountId: string): Tweet[] {
     .all(accountId) as Tweet[];
 }
 
+/** Get tweets by account with range-based pagination */
+export function getTweetsByAccountRange(accountId: string, offset: number, limit: number): Tweet[] {
+  const db = getDb();
+  return db
+    .prepare(
+      "SELECT * FROM tweets WHERE account_id = ? ORDER BY created_at ASC LIMIT ? OFFSET ?"
+    )
+    .all(accountId, limit, offset) as Tweet[];
+}
+
+/** Get tweets by account up to a specific boundary */
+export function getTweetsByAccountUpToBoundary(accountId: string, boundaryEnd: number): Tweet[] {
+  const db = getDb();
+  return db
+    .prepare(
+      "SELECT * FROM tweets WHERE account_id = ? ORDER BY created_at ASC LIMIT ?"
+    )
+    .all(accountId, boundaryEnd) as Tweet[];
+}
+
+/** Count total tweets for an account */
+export function getTweetCountByAccount(accountId: string): number {
+  return getCachedTweetCount(accountId);
+}
+
 /** Count cached tweets for an account */
 export function getCachedTweetCount(accountId: string): number {
   const db = getDb();
@@ -70,23 +95,52 @@ export function getUserHighestUnlockedStage(userId: string, accountId: string): 
   return row?.max_stage ?? 0;
 }
 
+/** Get user's current visibility boundary for an account (new boundary model) */
+export function getUserBoundaryEnd(userId: string, accountId: string): number {
+  const db = getDb();
+  const row = db
+    .prepare("SELECT MAX(boundary_end) as max_boundary FROM unlocks WHERE user_id = ? AND account_id = ?")
+    .get(userId, accountId) as { max_boundary: number | null } | undefined;
+  return row?.max_boundary ?? 0;
+}
+
+/** Get user's total unlocked count for an account (sum of all granted_count) */
+export function getUserTotalUnlockedCount(userId: string, accountId: string): number {
+  const db = getDb();
+  const row = db
+    .prepare("SELECT SUM(granted_count) as total_granted FROM unlocks WHERE user_id = ? AND account_id = ?")
+    .get(userId, accountId) as { total_granted: number | null } | undefined;
+  return row?.total_granted ?? 0;
+}
+
 /** Check if user already unlocked this account (backward compatibility - checks Stage 1) */
 export function hasUserUnlockedAccount(userId: string, accountId: string): boolean {
   return hasUserUnlockedStage(userId, accountId, 1);
 }
 
-/** Record stage unlock (idempotent via UNIQUE constraint) */
-export function recordStageUnlock(userId: string, accountId: string, stage: number, jobId: string): void {
+/** Record stage unlock with boundary data (idempotent via UNIQUE constraint) */
+export function recordStageUnlock(
+  userId: string, 
+  accountId: string, 
+  stage: number, 
+  boundaryEnd: number,
+  grantedCount: number,
+  jobId: string
+): void {
   const db = getDb();
   db.prepare(`
-    INSERT OR IGNORE INTO unlocks (user_id, account_id, stage, job_id, unlocked_at)
-    VALUES (?, ?, ?, ?, ?)
-  `).run(userId, accountId, stage, jobId, new Date().toISOString());
+    INSERT OR IGNORE INTO unlocks (user_id, account_id, stage, boundary_end, granted_count, job_id, unlocked_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+  `).run(userId, accountId, stage, boundaryEnd, grantedCount, jobId, new Date().toISOString());
 }
 
 /** Record unlock (backward compatibility - records Stage 1 unlock) */
 export function recordUnlock(userId: string, accountId: string, jobId: string): void {
-  recordStageUnlock(userId, accountId, 1, jobId);
+  // For backward compatibility, we need to calculate boundary_end and granted_count
+  // This is a transitional function - new code should use recordStageUnlock directly
+  const tweetCount = getCachedTweetCount(accountId);
+  const boundaryEnd = Math.min(100, tweetCount); // Stage 1 default boundary
+  recordStageUnlock(userId, accountId, 1, boundaryEnd, boundaryEnd, jobId);
 }
 
 /**
@@ -562,6 +616,8 @@ export function grantMonthlyCredits(): { processed: number; granted: number } {
 export interface DevUnlockEntry {
   account_id: string;
   stage: number;
+  boundary_end: number;
+  granted_count: number;
   job_id: string;
   unlocked_at: string;
   username: string | null;
@@ -578,14 +634,14 @@ export function getDevUnlocks(userId: string): DevUnlockEntry[] {
       `SELECT
          u.account_id,
          u.stage,
+         u.boundary_end,
+         u.granted_count,
          u.job_id,
          u.unlocked_at,
          a.username,
          a.created_at          AS account_created_at,
          j.requested_limit     AS cap,
-         MIN(CASE WHEN u.stage = 1 THEN 100 ELSE 999999 END, 
-             (SELECT COUNT(*) FROM tweets t WHERE t.account_id = u.account_id))
-                               AS unlocked_count
+         u.boundary_end        AS unlocked_count
        FROM unlocks u
        LEFT JOIN accounts a ON a.account_id = u.account_id
        LEFT JOIN jobs     j ON j.id          = u.job_id

@@ -21,6 +21,7 @@ CREATE TABLE IF NOT EXISTS jobs (
   id            TEXT PRIMARY KEY,
   account_username TEXT NOT NULL,
   account_id    TEXT,
+  user_id       TEXT NOT NULL DEFAULT 'anonymous', -- Requesting user ID for unlock recording
   requested_limit INTEGER NOT NULL DEFAULT 100,
   stage         INTEGER NOT NULL DEFAULT 1, -- Phase 4: Stage being excavated
   hold_id       TEXT, -- Phase 6: credit hold reference
@@ -67,6 +68,8 @@ CREATE TABLE IF NOT EXISTS unlocks (
   user_id       TEXT NOT NULL DEFAULT 'anonymous',
   account_id    TEXT NOT NULL,
   stage         INTEGER NOT NULL DEFAULT 1,  -- Stage unlocked (1, 2, 3, etc.)
+  boundary_end  INTEGER NOT NULL DEFAULT 0,  -- Cumulative visible end boundary for this unlock
+  granted_count INTEGER NOT NULL DEFAULT 0,  -- How many new posts this unlock added
   job_id        TEXT,
   unlocked_at   TEXT NOT NULL,
   UNIQUE(user_id, account_id, stage)  -- One unlock per user per account per stage

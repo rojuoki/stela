@@ -122,4 +122,22 @@ function runMigrations(db: Database.Database): void {
     `);
     console.log("[db] Migration M-007: added temporary_unlocks table for guest user results");
   }
+
+  // M-008: add boundary_end and granted_count columns to unlocks (Phase 6: boundary model)
+  const unlockCols3 = db.prepare("PRAGMA table_info(unlocks)").all() as Array<{ name: string }>;
+  if (!unlockCols3.some((c) => c.name === "boundary_end")) {
+    db.prepare("ALTER TABLE unlocks ADD COLUMN boundary_end INTEGER NOT NULL DEFAULT 0").run();
+    console.log("[db] Migration M-008a: added unlocks.boundary_end");
+  }
+  if (!unlockCols3.some((c) => c.name === "granted_count")) {
+    db.prepare("ALTER TABLE unlocks ADD COLUMN granted_count INTEGER NOT NULL DEFAULT 0").run();
+    console.log("[db] Migration M-008b: added unlocks.granted_count");
+  }
+
+  // M-009: add user_id column to jobs (fix unlock user_id bug)
+  const jobCols2 = db.prepare("PRAGMA table_info(jobs)").all() as Array<{ name: string }>;
+  if (!jobCols2.some((c) => c.name === "user_id")) {
+    db.prepare("ALTER TABLE jobs ADD COLUMN user_id TEXT NOT NULL DEFAULT 'anonymous'").run();
+    console.log("[db] Migration M-009: added jobs.user_id for unlock user tracking");
+  }
 }
