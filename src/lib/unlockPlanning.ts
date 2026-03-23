@@ -108,6 +108,29 @@ export interface GuestUnlockPlan {
   strategy: "cache-only" | "excavation";
 }
 
+export interface AdditionalExcavationPlan {
+  /** User making the request */
+  userId: string;
+  /** Account being requested */
+  accountId: string;
+  /** Requested stage (planning label) */
+  requestedStage: number;
+  /** Target count based on requested stage */
+  targetCount: number;
+  /** Posts currently cached in DB for this account (account progress) */
+  currentCachedCount: number;
+  /** Current user visibility boundary (user entitlement) */
+  currentVisibleBoundary: number;
+  /** Whether excavation is needed */
+  needToExcavate: boolean;
+  /** How many tweets are missing from cache */
+  missingCount: number;
+  /** Execution mode based on missing count */
+  executionMode: "grant_only" | "excavate_more";
+  /** Expected final boundary after execution */
+  expectedFinalBoundary: number;
+}
+
 // ─── Boundary Calculation ─────────────────────────────────────────────────
 
 /**
@@ -187,6 +210,92 @@ export function planGuestUnlock(
     excavationNeeded,
     guestBoundary,
     strategy: excavationNeeded ? "excavation" : "cache-only",
+  };
+}
+
+/**
+ * Plan additional excavation for user+account.
+ * This is the Phase 7 planning function for extend/additional excavation requests.
+ * Provides explicit and inspectable planning results following core data model rules.
+ */
+export function planAdditionalExcavation(
+  userId: string,
+  accountId: string, 
+  requestedStage: number
+): AdditionalExcavationPlan {
+  // Step 1: Determine target count from requested stage (stage as planning label)
+  const targetCount = requestedStage * 100; // Stage 2 = 200, Stage 3 = 300, etc.
+  
+  // Step 2: Current cached count (account progress from cached tweets only)
+  const currentCachedCount = getCachedTweetCount(accountId);
+  
+  // Step 3: Current visible boundary (user entitlement from boundary_end only)
+  const currentVisibleBoundary = getUserBoundaryEnd(userId, accountId);
+  
+  // Step 4: Calculate missing count based on target vs cached
+  const missingCount = Math.max(0, targetCount - currentCachedCount);
+  
+  // Step 5: Determine execution mode
+  const needToExcavate = missingCount > 0;
+  const executionMode: "grant_only" | "excavate_more" = needToExcavate ? "excavate_more" : "grant_only";
+  
+  // Step 6: Expected final boundary (user will see up to target count)
+  const expectedFinalBoundary = Math.min(targetCount, currentCachedCount + missingCount);
+  
+  return {
+    userId,
+    accountId,
+    requestedStage,
+    targetCount,
+    currentCachedCount,
+    currentVisibleBoundary,
+    needToExcavate,
+    missingCount,
+    executionMode,
+    expectedFinalBoundary,
+  };
+}
+
+/**
+ * Validate Phase 7 planning rules are correctly applied.
+ * This helps ensure the planning function follows the required constraints.
+ */
+export function validateAdditionalExcavationPlan(plan: AdditionalExcavationPlan): {
+  valid: boolean;
+  errors: string[];
+} {
+  const errors: string[] = [];
+
+  // Rule: targetCount comes from requestedStage
+  const expectedTargetCount = plan.requestedStage * 100;
+  if (plan.targetCount !== expectedTargetCount) {
+    errors.push(`targetCount (${plan.targetCount}) should be requestedStage * 100 (${expectedTargetCount})`);
+  }
+
+  // Rule: missingCount = max(0, targetCount - currentCachedCount) 
+  const expectedMissingCount = Math.max(0, plan.targetCount - plan.currentCachedCount);
+  if (plan.missingCount !== expectedMissingCount) {
+    errors.push(`missingCount (${plan.missingCount}) should be max(0, targetCount - currentCachedCount) (${expectedMissingCount})`);
+  }
+
+  // Rule: if missingCount == 0, executionMode = "grant_only"
+  if (plan.missingCount === 0 && plan.executionMode !== "grant_only") {
+    errors.push(`executionMode should be "grant_only" when missingCount is 0`);
+  }
+
+  // Rule: if missingCount > 0, executionMode = "excavate_more" 
+  if (plan.missingCount > 0 && plan.executionMode !== "excavate_more") {
+    errors.push(`executionMode should be "excavate_more" when missingCount > 0`);
+  }
+
+  // Rule: needToExcavate should match missingCount > 0
+  if (plan.needToExcavate !== (plan.missingCount > 0)) {
+    errors.push(`needToExcavate (${plan.needToExcavate}) should match missingCount > 0 (${plan.missingCount > 0})`);
+  }
+
+  return {
+    valid: errors.length === 0,
+    errors,
   };
 }
 

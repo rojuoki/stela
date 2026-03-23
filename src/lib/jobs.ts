@@ -481,6 +481,57 @@ export function createStageExpansionJob(
   return { jobId };
 }
 
+/**
+ * Create additional excavation job for Phase 8.
+ * Uses existing excavation engine with continuation-based approach.
+ * This is the "excavate_more" execution mode implementation.
+ */
+export async function createAdditionalExcavationJob(
+  username: string,
+  targetStage: number,
+  missingCount: number,
+  userId: string = "anonymous",
+): Promise<string | null> {
+  const db = getDb();
+  
+  // Check if account exists
+  const account = db
+    .prepare("SELECT account_id, created_at FROM accounts WHERE username = ?")
+    .get(username.toLowerCase()) as { account_id: string; created_at: string } | undefined;
+
+  if (!account) {
+    console.error(`[additional-excavation] Account not found for @${username}`);
+    return null;
+  }
+
+  // Create excavation job using existing engine
+  const jobId = createAndRunJob(
+    username, 
+    account.created_at,
+    undefined, // holdId will be set separately
+    targetStage, 
+    false, // not force
+    userId
+  );
+  
+  // Add additional excavation metadata to resume_state
+  const additionalExcavationMetadata = {
+    type: 'additional_excavation',
+    targetStage,
+    missingCount,
+    continuationBased: true,
+    created_at: new Date().toISOString(),
+  };
+  
+  db.prepare("UPDATE jobs SET resume_state = ? WHERE id = ?").run(
+    JSON.stringify(additionalExcavationMetadata),
+    jobId
+  );
+  
+  console.log(`[additional-excavation] Created job ${jobId} for @${username}: stage=${targetStage}, missing=${missingCount}`);
+  return jobId;
+}
+
 /** Read-only job lookup. Never triggers X API calls. */
 export function getJob(jobId: string): JobRecord | undefined {
   const db = getDb();
@@ -617,8 +668,49 @@ async function runJobAsync(jobId: string): Promise<void> {
 
     // Only run excavation if we don't have a cached stage result
     if (!result) {
+      // Check if this is an additional excavation job (Phase 8)
+      let isAdditionalExcavation = false;
+      let additionalExcavationData: any = null;
+      
+      if (jobRow.resume_state) {
+        try {
+          const resumeData = JSON.parse(jobRow.resume_state);
+          if (resumeData.type === 'additional_excavation') {
+            isAdditionalExcavation = true;
+            additionalExcavationData = resumeData;
+          }
+        } catch {
+          // Not JSON or invalid format, continue normally
+        }
+      }
+
       try {
-        if (jobStage === 1) {
+        if (isAdditionalExcavation) {
+          // Phase 8: Additional excavation mode - use missingCount as variable stop condition
+          console.log(
+            `[additional-excavation] @${username} Phase 8 mode: missing=${additionalExcavationData.missingCount} stage=${additionalExcavationData.targetStage}`
+          );
+          
+          if (!existingAccount) {
+            throw new Error(`Account not found for additional excavation`);
+          }
+
+          // Use the existing excavation engine but with the missingCount as limit
+          // This creates a variable stop condition based on how much we actually need
+          const dynamicLimit = additionalExcavationData.missingCount;
+          
+          result = await excavateEarliest(
+            username,
+            dynamicLimit, // Variable limit based on missing count
+            writeProgress,
+            token,
+            onRateLimit,
+            saveCheckpoint,
+            initialCheckpoint,
+            jobId,
+          );
+          
+        } else if (jobStage === 1) {
           // Stage 1: Use normal excavation
           result = await excavateEarliest(
             username,
@@ -784,14 +876,62 @@ async function runJobAsync(jobId: string): Promise<void> {
     );
 
     if (result.userId && result.fetchedCount > 0) {
-      // Calculate boundary_end and granted_count based on the excavation result
-      const boundaryEnd = result.fetchedCount;
-      const grantedCount = result.fetchedCount; // For now, simple case where all fetched posts are new
+      // Check if this was an additional excavation job (Phase 8)
+      let isAdditionalExcavation = false;
+      let additionalExcavationData: any = null;
       
-      // Use proper recordStageUnlock function with the requesting user_id
-      recordStageUnlock(requestingUserId, result.userId, jobStage, boundaryEnd, grantedCount, jobId);
-      
-      console.log(`[jobs] Recorded unlock: user=${requestingUserId}, account=${result.userId}, stage=${jobStage}, boundary=${boundaryEnd}, granted=${grantedCount}`);
+      try {
+        if (jobRow.resume_state) {
+          const resumeData = JSON.parse(jobRow.resume_state);
+          if (resumeData.type === 'additional_excavation') {
+            isAdditionalExcavation = true;
+            additionalExcavationData = resumeData;
+          }
+        }
+      } catch {
+        // Not additional excavation, continue with normal logic
+      }
+
+      if (isAdditionalExcavation) {
+        // Phase 8 post-execution behavior
+        console.log(`[additional-excavation] Phase 8 post-execution: excavated=${result.fetchedCount}, target=${additionalExcavationData.targetStage * 100}`);
+        
+        // Step 1: Re-read current cached tweet count
+        const { getCachedTweetCount } = await import("@/lib/repository");
+        const newCachedCount = getCachedTweetCount(result.userId);
+        
+        // Step 2: Compute finalBoundary = min(targetCount, newCachedCount)
+        const targetCount = additionalExcavationData.targetStage * 100;
+        const finalBoundary = Math.min(targetCount, newCachedCount);
+        
+        // Step 3: Update user entitlement using finalBoundary
+        // granted_count is only the newly accessible amount (not total cached)
+        const { getUserBoundaryEnd } = await import("@/lib/repository");
+        const previousBoundary = getUserBoundaryEnd(requestingUserId, result.userId);
+        const grantedCount = Math.max(0, finalBoundary - previousBoundary);
+        
+        recordStageUnlock(
+          requestingUserId, 
+          result.userId, 
+          additionalExcavationData.targetStage, 
+          finalBoundary,  // boundary_end reaches finalBoundary (may be less than targetCount)
+          grantedCount,   // newly granted amount only
+          "additional-excavation"
+        );
+        
+        console.log(`[additional-excavation] Phase 8 unlock recorded: user=${requestingUserId}, account=${result.userId}, ` +
+          `targetCount=${targetCount}, newCached=${newCachedCount}, finalBoundary=${finalBoundary}, ` +
+          `previousBoundary=${previousBoundary}, granted=${grantedCount}`);
+      } else {
+        // Normal excavation path (Stage 1, Stage 2+, etc.)
+        const boundaryEnd = result.fetchedCount;
+        const grantedCount = result.fetchedCount; // For now, simple case where all fetched posts are new
+        
+        // Use proper recordStageUnlock function with the requesting user_id
+        recordStageUnlock(requestingUserId, result.userId, jobStage, boundaryEnd, grantedCount, jobId);
+        
+        console.log(`[jobs] Recorded unlock: user=${requestingUserId}, account=${result.userId}, stage=${jobStage}, boundary=${boundaryEnd}, granted=${grantedCount}`);
+      }
     }
 
     console.log(

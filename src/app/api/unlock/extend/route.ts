@@ -16,6 +16,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { getUserId } from "@/lib/getUserId";
 import { 
   planExtension, 
+  planAdditionalExcavation,
   validateExtendRequest, 
   calculateResultRange,
   extractNewlyUnlockedPosts 
@@ -31,7 +32,7 @@ import {
   cleanupExpiredHolds 
 } from "@/lib/repository";
 import { normalizeUsername, checkRateLimit } from "@/lib/validation";
-import { createAndRunJob, createStageExpansionJob } from "@/lib/jobs";
+import { createAndRunJob, createStageExpansionJob, createAdditionalExcavationJob } from "@/lib/jobs";
 import { maybeInjectDevError } from "@/lib/devError";
 
 export async function POST(req: NextRequest) {
@@ -103,20 +104,23 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: validationError }, { status: 400 });
     }
 
-    // Plan the extension using centralized logic
-    const plan = planExtension(userId, account.account_id);
+    // Phase 8: Use additional excavation planning result for execution
+    const currentBoundary = account ? require("@/lib/repository").getUserBoundaryEnd(userId, account.account_id) : 0;
+    const nextStage = Math.ceil((currentBoundary + 100) / 100);
     
-    console.log(`[extend] @${username} planning:`, {
-      currentBoundary: plan.boundary.current,
-      nextBoundary: plan.boundary.next,
-      cachedTotal: plan.boundary.cachedTotal,
-      strategy: plan.strategy,
-      missingCount: plan.boundary.missingCount,
+    const plan = planAdditionalExcavation(userId, account.account_id, nextStage);
+    console.log(`[extend] @${username} Phase 8 execution plan:`, {
+      executionMode: plan.executionMode,
+      targetCount: plan.targetCount,
+      currentCachedCount: plan.currentCachedCount,
+      currentVisibleBoundary: plan.currentVisibleBoundary,
+      missingCount: plan.missingCount,
+      expectedFinalBoundary: plan.expectedFinalBoundary,
     });
 
-    // ── Cache-only path: sufficient posts already cached ──
-    if (plan.strategy === "cache-only") {
-      // Check credit balance for cache-hit extend
+    // Phase 8 Execution: Grant Only Path
+    if (plan.executionMode === "grant_only") {
+      // Check credit balance
       const currentBalance = getCreditBalance(userId);
       if (currentBalance.balance < 1) {
         return NextResponse.json({
@@ -126,8 +130,8 @@ export async function POST(req: NextRequest) {
         }, { status: 402 });
       }
 
-      // Spend credit immediately (synchronous cache operation)
-      const spent = spendCredits(userId, 1, `Cache extend to ${plan.boundary.next} posts for @${username}`);
+      // Spend credit immediately (no excavation needed)
+      const spent = spendCredits(userId, 1, `Grant access to ${plan.targetCount} posts for @${username} (no excavation)`);
       if (!spent) {
         return NextResponse.json({
           error: "Failed to deduct credits",
@@ -135,30 +139,32 @@ export async function POST(req: NextRequest) {
         }, { status: 500 });
       }
 
-      // Record unlock for next stage
+      // Phase 8: Update user entitlement to targetCount without excavating
+      // granted_count reflects newly granted amount (targetCount - currentVisibleBoundary)
+      const grantedCount = plan.targetCount - plan.currentVisibleBoundary;
       recordStageUnlock(
         userId, 
         account.account_id, 
-        plan.internal.nextStage, 
-        plan.boundary.next, 
-        plan.boundary.next - plan.boundary.current, 
-        "cache-extend"
+        plan.requestedStage, 
+        plan.targetCount,  // boundary_end reaches targetCount
+        grantedCount,      // newly granted amount only
+        "additional-grant-only"
       );
       
       // Calculate result range for newly unlocked block
-      const resultRange = calculateResultRange(plan.boundary.current, plan.boundary.next);
+      const resultRange = calculateResultRange(plan.currentVisibleBoundary, plan.targetCount);
       
-      // Extract ONLY the newly unlocked posts
+      // Extract posts from existing cache (no excavation occurred)
       const newlyUnlockedPosts = extractNewlyUnlockedPosts(account.account_id, resultRange);
 
-      console.log(`[extend] Cache-hit extend for @${username}: ${plan.boundary.current} → ${plan.boundary.next}, showing range ${resultRange.rangeString}`);
+      console.log(`[extend] Grant-only for @${username}: ${plan.currentVisibleBoundary} → ${plan.targetCount}, granted=${grantedCount} (no excavation)`);
 
       return NextResponse.json({
         success: true,
-        strategy: "cache-hit",
+        executionMode: "grant_only",
         boundary: {
-          previous: plan.boundary.current,
-          new: plan.boundary.next,
+          previous: plan.currentVisibleBoundary,
+          new: plan.targetCount,
         },
         range: {
           start: resultRange.start,
@@ -166,82 +172,72 @@ export async function POST(req: NextRequest) {
           count: resultRange.count,
           rangeString: resultRange.rangeString,
         },
-        posts: newlyUnlockedPosts, // Immediate posts for cache-hit
+        posts: newlyUnlockedPosts,
         accountId: account.account_id,
         creditConsumed: true,
+        excavated: false,
       });
     }
 
-    // ── Excavation path: need to excavate missing posts ──
-    
-    // Check credit balance for excavation
-    const creditBalance = getCreditBalance(userId);
-    if (creditBalance.balance < 1) {
+    // Phase 8 Execution: Excavate More Path
+    if (plan.executionMode === "excavate_more") {
+      // Check credit balance for excavation
+      const creditBalance = getCreditBalance(userId);
+      if (creditBalance.balance < 1) {
+        return NextResponse.json({
+          error: "Insufficient credits",
+          balance: creditBalance.balance,
+          required: 1,
+        }, { status: 402 });
+      }
+
+      // Create additional excavation job using existing excavation engine
+      const jobId = await createAdditionalExcavationJob(
+        username,
+        plan.requestedStage,
+        plan.missingCount, // How many tweets we need to excavate
+        userId
+      );
+      
+      if (!jobId) {
+        return NextResponse.json({
+          error: "Failed to create excavation job",
+        }, { status: 500 });
+      }
+      
+      // Hold credit for excavation job
+      const holdId = holdCredits(userId, jobId, 1);
+      if (!holdId) {
+        return NextResponse.json({
+          error: "Failed to hold credits",
+          balance: getCreditBalance(userId).balance,
+        }, { status: 500 });
+      }
+
+      console.log(`[extend] Created additional excavation job ${jobId} for @${username}: need ${plan.missingCount} more posts to reach ${plan.targetCount}`);
+
       return NextResponse.json({
-        error: "Insufficient credits",
-        balance: creditBalance.balance,
-        required: 1,
-      }, { status: 402 });
+        success: true,
+        executionMode: "excavate_more",
+        jobId,
+        holdId,
+        planning: {
+          currentCachedCount: plan.currentCachedCount,
+          currentVisibleBoundary: plan.currentVisibleBoundary,
+          targetCount: plan.targetCount,
+          missingCount: plan.missingCount,
+          expectedFinalBoundary: plan.expectedFinalBoundary,
+        },
+        accountId: account.account_id,
+        creditHeld: true,
+      }, { status: 202 });
     }
 
-    // Create extend job using normal job creation but with extend metadata
-    const jobId = createAndRunJob(
-      username, 
-      account.created_at,
-      undefined, // holdId will be set separately
-      plan.internal.nextStage, // Target stage
-      false, // not force
-      userId // requesting user
-    );
-    
-    // Add extend metadata to the job's resume_state
-    const extendMetadata = {
-      type: 'forward_continuation',
-      currentBoundary: plan.boundary.current,
-      targetBoundary: plan.boundary.next,
-      missingCount: plan.boundary.missingCount,
-    };
-    
-    const { getDb } = await import("@/lib/db");
-    const db = getDb();
-    db.prepare("UPDATE jobs SET resume_state = ? WHERE id = ?").run(
-      JSON.stringify(extendMetadata),
-      jobId
-    );
-    
-    // Hold credit for excavation job
-    const holdId = holdCredits(userId, jobId, 1);
-    if (!holdId) {
-      return NextResponse.json({
-        error: "Failed to hold credits",
-        balance: getCreditBalance(userId).balance,
-      }, { status: 500 });
-    }
-
-    console.log(`[extend] Created excavation job ${jobId} for @${username}: ${plan.boundary.current} → ${plan.boundary.next}, excavating ${plan.boundary.missingCount} posts`);
-
-    // Calculate the expected result range for frontend
-    const expectedResultRange = calculateResultRange(plan.boundary.current, plan.boundary.next);
-
+    // Should not reach here
     return NextResponse.json({
-      success: true,
-      strategy: "excavation",
-      jobId,
-      holdId,
-      boundary: {
-        previous: plan.boundary.current,
-        target: plan.boundary.next,
-        excavationTarget: plan.boundary.missingCount,
-      },
-      range: {
-        start: expectedResultRange.start,
-        end: expectedResultRange.end,
-        count: expectedResultRange.count,
-        rangeString: expectedResultRange.rangeString,
-      },
-      accountId: account.account_id,
-      creditHeld: true,
-    }, { status: 202 });
+      error: "Invalid execution mode",
+      executionMode: plan.executionMode,
+    }, { status: 500 });
 
   } catch (error) {
     console.error('[extend] Unexpected error:', error);
