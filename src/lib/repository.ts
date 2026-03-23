@@ -63,6 +63,11 @@ export function getTweetsByAccountUpToBoundary(accountId: string, boundaryEnd: n
     .all(accountId, boundaryEnd) as Tweet[];
 }
 
+/** Get tweets by account up to guest boundary (follows same boundary model) */
+export function getTweetsByAccountForGuest(accountId: string, guestBoundary: number): Tweet[] {
+  return getTweetsByAccountUpToBoundary(accountId, guestBoundary);
+}
+
 /** Count total tweets for an account */
 export function getTweetCountByAccount(accountId: string): number {
   return getCachedTweetCount(accountId);
@@ -113,9 +118,9 @@ export function getUserTotalUnlockedCount(userId: string, accountId: string): nu
   return row?.total_granted ?? 0;
 }
 
-/** Check if user already unlocked this account (backward compatibility - checks Stage 1) */
+/** Check if user already unlocked this account (boundary-based visibility check) */
 export function hasUserUnlockedAccount(userId: string, accountId: string): boolean {
-  return hasUserUnlockedStage(userId, accountId, 1);
+  return getUserBoundaryEnd(userId, accountId) > 0;
 }
 
 /** Record stage unlock with boundary data (idempotent via UNIQUE constraint) */

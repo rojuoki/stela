@@ -18,7 +18,32 @@
  */
 
 import { getDb } from "./db";
-import { getCachedTweetCount, getUserHighestUnlockedStage } from "./repository";
+import { getCachedTweetCount, getUserBoundaryEnd } from "./repository";
+
+// ─── Target Count Calculation ──────────────────────────────────────────────
+
+/** 
+ * Cutoff date for determining old vs new account excavation targets.
+ * Accounts created before this date are considered "old" (target = 50).
+ * Accounts created on or after this date are considered "new" (target = 100).
+ */
+const ACCOUNT_AGE_CUTOFF = "2016-01-01T00:00:00.000Z";
+
+/**
+ * Compute the target tweet count for a job based on the account's creation date.
+ *
+ *   created before 2016-01-01  →  50   (old accounts)
+ *   created on/after 2016-01-01 → 100  (new accounts)
+ *
+ * Exported so callers can display the value before job creation.
+ */
+export function computeTargetCount(accountCreatedAt: string | null | undefined): number {
+  if (!accountCreatedAt) return 100;
+  const accountDate = new Date(accountCreatedAt);
+  const cutoffDate = new Date(ACCOUNT_AGE_CUTOFF);
+  
+  return accountDate < cutoffDate ? 50 : 100;
+}
 
 // ─── Core Types ─────────────────────────────────────────────────────────────
 
@@ -53,6 +78,36 @@ export interface ExtendPlan {
   };
 }
 
+export interface InitialUnlockPlan {
+  /** Requested stage (planning label) */
+  requestedStage: number;
+  /** Target count based on account age and stage */
+  targetCount: number;
+  /** Posts currently cached in DB for this account */
+  currentCachedCount: number;
+  /** Current user boundary (0 for new unlock) */  
+  currentUserBoundary: number;
+  /** Whether excavation is needed */
+  excavationNeeded: boolean;
+  /** If cache hit: boundary to grant */
+  grantBoundary?: number;
+  /** Decision strategy */
+  strategy: "cache-only" | "excavation";
+}
+
+export interface GuestUnlockPlan {
+  /** Guest-specific target count (always Stage 1) */
+  targetCount: number;
+  /** Posts currently cached in DB for this account */
+  currentCachedCount: number;
+  /** Whether excavation is needed */
+  excavationNeeded: boolean;
+  /** If cache hit: boundary for guest access */
+  guestBoundary?: number;
+  /** Decision strategy */
+  strategy: "cache-only" | "excavation";
+}
+
 // ─── Boundary Calculation ─────────────────────────────────────────────────
 
 /**
@@ -65,8 +120,74 @@ export interface ExtendPlan {
  * Updated for Phase 6: Uses MAX(unlocks.boundary_end) instead of summing stage_results.
  */
 export function calculateUnlockedBoundary(userId: string, accountId: string): number {
-  const { getUserBoundaryEnd } = require("./repository");
   return getUserBoundaryEnd(userId, accountId);
+}
+
+/**
+ * Plan initial unlock for user+account.
+ * This is the master planning function - all initial unlock logic flows through here.
+ * Used by both cache-hit and fresh excavation flows to ensure consistent decisions.
+ */
+export function planInitialUnlock(
+  userId: string, 
+  accountId: string | null, 
+  requestedStage: number,
+  accountCreatedAt: string | null
+): InitialUnlockPlan {
+  // Step 1: Determine target count based on account age and stage
+  const targetCount = requestedStage === 1 ? computeTargetCount(accountCreatedAt) : 100 * requestedStage;
+  
+  // Step 2: Current user boundary (should be 0 for initial unlock, but check anyway)
+  const currentUserBoundary = accountId ? getUserBoundaryEnd(userId, accountId) : 0;
+  
+  // Step 3: Current cached count (0 if account doesn't exist yet)
+  const currentCachedCount = accountId ? getCachedTweetCount(accountId) : 0;
+  
+  // Step 4: Determine if excavation is needed
+  const excavationNeeded = currentCachedCount < targetCount;
+  
+  // Step 5: For cache hits, determine grant boundary
+  const grantBoundary = excavationNeeded ? undefined : Math.min(targetCount, currentCachedCount);
+  
+  return {
+    requestedStage,
+    targetCount,
+    currentCachedCount,
+    currentUserBoundary,
+    excavationNeeded,
+    grantBoundary,
+    strategy: excavationNeeded ? "excavation" : "cache-only",
+  };
+}
+
+/**
+ * Plan guest unlock for account.
+ * Follows the same core principles as logged-in users but for guest-specific access.
+ * Guests always get Stage 1 equivalent access.
+ */
+export function planGuestUnlock(
+  accountId: string | null,
+  accountCreatedAt: string | null
+): GuestUnlockPlan {
+  // Step 1: Determine target count based on account age (always Stage 1 for guests)
+  const targetCount = computeTargetCount(accountCreatedAt);
+  
+  // Step 2: Current cached count (0 if account doesn't exist yet)
+  const currentCachedCount = accountId ? getCachedTweetCount(accountId) : 0;
+  
+  // Step 3: Determine if excavation is needed
+  const excavationNeeded = currentCachedCount < targetCount;
+  
+  // Step 4: For cache hits, determine guest boundary (same as target for guests)
+  const guestBoundary = excavationNeeded ? undefined : Math.min(targetCount, currentCachedCount);
+  
+  return {
+    targetCount,
+    currentCachedCount,
+    excavationNeeded,
+    guestBoundary,
+    strategy: excavationNeeded ? "excavation" : "cache-only",
+  };
 }
 
 /**

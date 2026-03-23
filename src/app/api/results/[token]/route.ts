@@ -39,16 +39,20 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ toke
     );
 
     if (isPlaceholder) {
-      // Try to get actual excavated data
-      const { getAccountByUsername, getTweetsByAccount } = await import("@/lib/repository");
+      // Try to get actual excavated data with proper boundary logic
+      const { getAccountByUsername, getTweetsByAccountForGuest } = await import("@/lib/repository");
+      const { planGuestUnlock } = await import("@/lib/unlockPlanning");
       
       const account = getAccountByUsername(tempUnlock.username);
       if (account) {
-        const actualTweets = getTweetsByAccount(account.account_id);
-        if (actualTweets.length > 0) {
-          // Real data is available - return it instead of placeholder
-          console.log(`[results] Found actual excavated data for ${tempUnlock.username}: ${actualTweets.length} tweets`);
-          tweets = actualTweets;
+        const plan = planGuestUnlock(account.account_id, account.created_at);
+        if (plan.strategy === "cache-only" && plan.guestBoundary) {
+          // Real data is available - return it with proper boundary
+          const actualTweets = getTweetsByAccountForGuest(account.account_id, plan.guestBoundary);
+          if (actualTweets.length > 0) {
+            console.log(`[results] Found actual excavated data for ${tempUnlock.username}: ${actualTweets.length} tweets (boundary=${plan.guestBoundary})`);
+            tweets = actualTweets;
+          }
         }
       }
     }

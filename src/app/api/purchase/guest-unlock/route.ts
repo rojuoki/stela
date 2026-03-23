@@ -2,11 +2,12 @@ import { NextRequest, NextResponse } from "next/server";
 import { createAndRunJob } from "@/lib/jobs";
 import { 
   getAccountByUsername, 
-  getTweetsByAccount, 
+  getTweetsByAccountForGuest, 
   createTemporaryUnlock,
   cleanupExpiredTemporaryUnlocks,
   findActiveJobForUsername 
 } from "@/lib/repository";
+import { planGuestUnlock } from "@/lib/unlockPlanning";
 import { normalizeUsername } from "@/lib/validation";
 
 export async function POST(req: NextRequest) {
@@ -36,7 +37,7 @@ export async function POST(req: NextRequest) {
       }, { status: 402 });
     }
 
-    // Check if account exists and has cached data
+    // Check if account exists and plan guest unlock
     const account = getAccountByUsername(normalizedUsername);
     
     if (account) {
@@ -47,13 +48,14 @@ export async function POST(req: NextRequest) {
         }, { status: 403 });
       }
 
-      // Check for existing cached tweets
-      const tweets = getTweetsByAccount(account.account_id);
+      // Use unified guest planning logic
+      const plan = planGuestUnlock(account.account_id, account.created_at);
       
-      if (tweets.length > 0) {
-        // Path 3: Cached result already exists - use it immediately
+      if (plan.strategy === "cache-only" && plan.guestBoundary) {
+        // Path 3: Cached result already exists - use it with proper boundary
+        const tweets = getTweetsByAccountForGuest(account.account_id, plan.guestBoundary);
         const token = createTemporaryUnlock(account.account_id, normalizedUsername, tweets);
-        console.log(`[purchase/guest-unlock] Using cached data for @${normalizedUsername}: ${token}`);
+        console.log(`[purchase/guest-unlock] Using cached data for @${normalizedUsername}: ${token} (boundary=${plan.guestBoundary})`);
         
         const response = NextResponse.json({
           success: true,

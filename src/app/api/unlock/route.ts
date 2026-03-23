@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
-import { createAndRunJob, createStageExpansionJob, computeTargetCount } from "@/lib/jobs";
+import { createAndRunJob, createStageExpansionJob } from "@/lib/jobs";
 import { getStageResult } from "@/lib/stageResults";
+import { planInitialUnlock } from "@/lib/unlockPlanning";
 import {
   getAccountByUsername,
   getCachedTweetCount,
@@ -86,70 +87,73 @@ export async function POST(req: NextRequest) {
       giveCredits(userId, 3, "Initial allocation");
     }
 
-    // ── Cache check: skipped entirely when force=true, Stage 1 only ──
-    if (!force && requestedStage === 1) {
-      const account = getAccountByUsername(username);
-      if (account) {
-        const cachedCount = getCachedTweetCount(account.account_id);
-        if (cachedCount > 0) {
-          const alreadyUnlockedStage1 = hasUserUnlockedStage(userId, account.account_id, 1);
-          
-          if (alreadyUnlockedStage1) {
-            // Free re-unlock for same user (Stage 1 already unlocked)
-            const boundaryEnd = Math.min(100, cachedCount); // Stage 1 boundary
-            recordStageUnlock(userId, account.account_id, 1, boundaryEnd, boundaryEnd, "cache-hit-free");
-            recordApiCall("cache/unlock", true); // saved: no excavation needed
-            console.log(`[unlock] Free cache hit for @${username} Stage 1: ${cachedCount} tweets, user already unlocked`);
-            
-            return NextResponse.json({
-              jobId: null,
-              status: "cache-hit",
-              stage: 1,
-              accountId: account.account_id,
-              cachedCount,
-              freeReUnlock: true,
-              creditConsumed: false,
-            });
-          } else {
-            // First time unlock from cache - still consumes credit
-            const currentBalance = getCreditBalance(userId);
-            if (currentBalance.balance < 1) {
-              return NextResponse.json({
-                error: "Insufficient credits",
-                balance: currentBalance.balance,
-                required: 1,
-              }, { status: 402 });
-            }
-            
-            // Cache-hit is synchronous — spend directly (no async job → no hold needed).
-            // holdCredits requires a real jobs row (FK) and is not appropriate here.
-            const spent = spendCredits(userId, 1, `Cache hit unlock Stage 1 for @${username}`);
-            if (!spent) {
-              return NextResponse.json({
-                error: "Failed to deduct credits",
-                balance: currentBalance.balance,
-              }, { status: 500 });
-            }
-            const boundaryEnd = Math.min(100, cachedCount); // Stage 1 boundary  
-            recordStageUnlock(userId, account.account_id, 1, boundaryEnd, boundaryEnd, "cache-hit-paid");
-            recordApiCall("cache/unlock", true); // saved: tweets already in DB
+    // ── Unified decision planning: cache-hit and fresh excavation use same logic ──
+    const account = getAccountByUsername(username);
+    const plan = planInitialUnlock(userId, account?.account_id || null, requestedStage, account?.created_at || null);
+    
+    console.log(`[unlock] @${username} Stage ${requestedStage} plan:`, {
+      targetCount: plan.targetCount,
+      currentCachedCount: plan.currentCachedCount,
+      strategy: plan.strategy,
+      force: force
+    });
 
-            console.log(`[unlock] Paid cache hit for @${username} Stage 1: ${cachedCount} tweets, 1 credit consumed`);
-            
-            return NextResponse.json({
-              jobId: null,
-              status: "cache-hit",
-              stage: 1,
-              accountId: account.account_id,
-              cachedCount,
-              freeReUnlock: false,
-              creditConsumed: true,
-            });
-          }
+    // ── Cache-only path: sufficient posts already cached, not forced ──
+    if (!force && plan.strategy === "cache-only" && account && plan.grantBoundary) {
+      const alreadyUnlocked = hasUserUnlockedAccount(userId, account.account_id);
+      
+      if (alreadyUnlocked) {
+        // Free re-unlock for same user (already unlocked)
+        recordStageUnlock(userId, account.account_id, requestedStage, plan.grantBoundary, plan.grantBoundary, "cache-hit-free");
+        recordApiCall("cache/unlock", true); // saved: no excavation needed
+        console.log(`[unlock] Free cache hit for @${username} Stage ${requestedStage}: ${plan.currentCachedCount} tweets, user already unlocked`);
+        
+        return NextResponse.json({
+          jobId: null,
+          status: "cache-hit",
+          stage: requestedStage,
+          accountId: account.account_id,
+          cachedCount: plan.currentCachedCount,
+          freeReUnlock: true,
+          creditConsumed: false,
+        });
+      } else {
+        // First time unlock from cache - still consumes credit
+        const currentBalance = getCreditBalance(userId);
+        if (currentBalance.balance < 1) {
+          return NextResponse.json({
+            error: "Insufficient credits",
+            balance: currentBalance.balance,
+            required: 1,
+          }, { status: 402 });
         }
+        
+        // Cache-hit is synchronous — spend directly (no async job → no hold needed).
+        const spent = spendCredits(userId, 1, `Cache hit unlock Stage ${requestedStage} for @${username}`);
+        if (!spent) {
+          return NextResponse.json({
+            error: "Failed to deduct credits",
+            balance: currentBalance.balance,
+          }, { status: 500 });
+        }
+        
+        recordStageUnlock(userId, account.account_id, requestedStage, plan.grantBoundary, plan.grantBoundary, "cache-hit-paid");
+        recordApiCall("cache/unlock", true); // saved: tweets already in DB
+
+        console.log(`[unlock] Paid cache hit for @${username} Stage ${requestedStage}: ${plan.currentCachedCount} tweets, 1 credit consumed`);
+        
+        return NextResponse.json({
+          jobId: null,
+          status: "cache-hit",
+          stage: requestedStage,
+          accountId: account.account_id,
+          cachedCount: plan.currentCachedCount,
+          freeReUnlock: false,
+          creditConsumed: true,
+        });
       }
     } else {
-      console.log(`[unlock] force=true or Stage ${requestedStage} for @${username} — skipping cache, creating new excavation job`);
+      console.log(`[unlock] force=${force} or excavation needed for @${username} Stage ${requestedStage} — creating excavation job`);
     }
 
     // ── Check credit balance for new excavation ──
@@ -189,13 +193,12 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    // ── Hold credit and create new excavation job ──
+    // ── Hold credit and create new excavation job using planned target ──
     let jobId: string;
     
     if (requestedStage === 1) {
-      // Stage 1: Use normal job creation
-      const knownAccount = getAccountByUsername(username);
-      jobId = createAndRunJob(username, knownAccount?.created_at, undefined, 1, force, userId);
+      // Stage 1: Use normal job creation with planned target
+      jobId = createAndRunJob(username, account?.created_at, undefined, 1, force, userId);
     } else {
       // Stage 2+: Use expansion job creation with prerequisite checking
       const expansionResult = createStageExpansionJob(username, requestedStage, undefined, userId);

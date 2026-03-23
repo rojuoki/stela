@@ -34,9 +34,9 @@ import {
   getStageResult, 
   storeStageResult, 
   createSyntheticExcavationResult,
-  checkStagePrerequisites,
-  calculateStageTarget
+  checkStagePrerequisites
 } from "./stageResults";
+import { computeTargetCount } from "./unlockPlanning";
 
 export interface JobRecord {
   id: string;
@@ -397,30 +397,6 @@ if (!_g.__stelaQueue) {
 export const globalQueue: GlobalJobQueue = _g.__stelaQueue;
 
 // ─── Public API ───────────────────────────────────────────────────────────────
-
-/** 
- * Cutoff date for determining old vs new account excavation targets.
- * Accounts created before this date are considered "old" (target = 50).
- * Accounts created on or after this date are considered "new" (target = 100).
- */
-const ACCOUNT_AGE_CUTOFF = "2016-01-01T00:00:00.000Z";
-
-/**
- * Compute the target tweet count for a job based on the account's creation date.
- *
- *   created before 2016-01-01  →  50   (old accounts)
- *   created on/after 2016-01-01 → 100  (new accounts)
- *
- * Exported so callers can display the value before job creation.
- */
-export function computeTargetCount(accountCreatedAt: string | null | undefined): number {
-  if (!accountCreatedAt) return 100;
-  const accountDate = new Date(accountCreatedAt);
-  const cutoffDate = new Date(ACCOUNT_AGE_CUTOFF);
-  
-  // TODO: Phase 2 will implement account-level Stage 1 persistence and reuse
-  return accountDate < cutoffDate ? 50 : 100;
-}
 
 /**
  * Create a new excavation job and hand it to the global queue.

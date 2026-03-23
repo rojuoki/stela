@@ -1,10 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
 import { 
   getAccountByUsername, 
-  getTweetsByAccount, 
+  getTweetsByAccountForGuest, 
   createTemporaryUnlock,
   cleanupExpiredTemporaryUnlocks 
 } from "@/lib/repository";
+import { planGuestUnlock } from "@/lib/unlockPlanning";
 import { normalizeUsername } from "@/lib/validation";
 
 export async function POST(req: NextRequest) {
@@ -23,7 +24,7 @@ export async function POST(req: NextRequest) {
     // Clean up expired temporary unlocks
     cleanupExpiredTemporaryUnlocks();
 
-    // Check if account exists and has cached data
+    // Check if account exists
     const account = getAccountByUsername(normalizedUsername);
     if (!account) {
       return NextResponse.json({ 
@@ -37,13 +38,24 @@ export async function POST(req: NextRequest) {
       }, { status: 403 });
     }
 
-    // Get cached tweets
-    const tweets = getTweetsByAccount(account.account_id);
+    // Use unified guest planning logic
+    const plan = planGuestUnlock(account.account_id, account.created_at);
+    
+    if (plan.strategy !== "cache-only" || !plan.guestBoundary) {
+      return NextResponse.json({ 
+        error: "No sufficient cached data available for this account" 
+      }, { status: 404 });
+    }
+
+    // Get tweets respecting guest boundary (follows same model as logged-in users)
+    const tweets = getTweetsByAccountForGuest(account.account_id, plan.guestBoundary);
     if (tweets.length === 0) {
       return NextResponse.json({ 
         error: "No cached data available for this account" 
       }, { status: 404 });
     }
+
+    console.log(`[unlock/guest] Guest plan for @${normalizedUsername}: boundary=${plan.guestBoundary}, cached=${plan.currentCachedCount}`);
 
     // Create temporary unlock
     const token = createTemporaryUnlock(account.account_id, normalizedUsername, tweets);
