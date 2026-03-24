@@ -113,6 +113,11 @@ export default function UserPage() {
   const [isAlreadyUnlocked, setIsAlreadyUnlocked] = useState(false);
   const [checkingUnlockStatus, setCheckingUnlockStatus] = useState(false);
 
+  // Additional excavation state
+  const [showExtendModal, setShowExtendModal] = useState(false);
+  const [isExtending, setIsExtending] = useState(false);
+  const [currentBoundary, setCurrentBoundary] = useState<number | null>(null);
+
   // Basic validation
   if (!username || typeof username !== "string") {
     notFound();
@@ -124,6 +129,85 @@ export default function UserPage() {
       refreshCredits();
     } catch (e) {
       console.error("Failed to fetch credits:", e);
+    }
+  };
+
+  const handleExcavateMore = async () => {
+    if (!accountData || !user || credits <= 0) return;
+
+    setShowExtendModal(false);
+    setIsExtending(true);
+    setActiveJobId(null);
+    setStatus("running");
+    setError(null);
+    setJobInfo("Starting additional excavation...");
+    setJobPhase("running");
+    setResumeAt(null);
+    setUiPhase("excavating");
+
+    try {
+      const res = await apiFetch("/api/unlock/extend", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ username: accountData.username }),
+      });
+
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        setStatus("failed");
+        setError(data.error || `HTTP ${res.status}`);
+        setJobPhase(null);
+        setUiPhase("results");
+        setIsExtending(false);
+        return;
+      }
+
+      const extendResponse = await res.json();
+
+      if (extendResponse.executionMode === "grant_only") {
+        // Grant-only path: immediate completion
+        const previousBoundary = extendResponse.boundary.previous;
+        const newBoundary = extendResponse.boundary.new;
+        
+        setJobInfo(`${extendResponse.range.count} posts · ${extendResponse.range.rangeString}`);
+        setStatus("done");
+        setCacheHit(false);
+        setJobPhase(null);
+        setCurrentBoundary(newBoundary);
+        
+        // Load newly unlocked posts only
+        if (extendResponse.posts && extendResponse.posts.length > 0) {
+          setTweets(extendResponse.posts);
+        } else {
+          // Fallback: load using range API
+          const rangeStart = previousBoundary + 1;
+          const rangeEnd = newBoundary;
+          const loadedTweets = await loadTweets(accountData.account_id, rangeStart, rangeEnd);
+          setTweets(loadedTweets);
+        }
+        
+        fetchCredits();
+        setUiPhase("results");
+        
+        // Update URL to show range mode
+        const rangeStart = previousBoundary + 1;
+        const rangeEnd = newBoundary;
+        router.replace(`/user/${username}?rangeStart=${rangeStart}&rangeEnd=${rangeEnd}`, { scroll: false });
+        
+      } else if (extendResponse.executionMode === "excavate_more") {
+        // Excavate path: start polling job
+        setJobInfo("Excavating additional posts...");
+        setActiveJobId(extendResponse.jobId);
+        // uiPhase will be managed by polling logic
+      }
+
+      setIsExtending(false);
+    } catch {
+      setStatus("failed");
+      setError("Network error");
+      setJobPhase(null);
+      setUiPhase("results");
+      setIsExtending(false);
     }
   };
 
@@ -163,8 +247,12 @@ export default function UserPage() {
     }
   };
 
-  const loadTweets = async (accountId: string): Promise<TweetData[]> => {
-    const res = await apiFetch(`/api/tweets/${accountId}`);
+  const loadTweets = async (accountId: string, rangeStart?: number, rangeEnd?: number): Promise<TweetData[]> => {
+    let url = `/api/tweets/${accountId}`;
+    if (rangeStart && rangeEnd) {
+      url += `?rangeStart=${rangeStart}&rangeEnd=${rangeEnd}`;
+    }
+    const res = await apiFetch(url);
     if (res.ok) {
       const data = await res.json();
       return data.tweets || [];
@@ -172,13 +260,38 @@ export default function UserPage() {
     return [];
   };
 
-  // Load account on mount
+  // Load account on mount and check for range mode
   useEffect(() => {
     if (username) {
       loadAccount();
       fetchCredits();
     }
   }, [username]);
+
+  // Check for range mode on mount
+  useEffect(() => {
+    const searchParams = new URLSearchParams(window.location.search);
+    const rangeStart = searchParams.get('rangeStart');
+    const rangeEnd = searchParams.get('rangeEnd');
+    
+    if (rangeStart && rangeEnd && accountData) {
+      const start = parseInt(rangeStart, 10);
+      const end = parseInt(rangeEnd, 10);
+      
+      if (!isNaN(start) && !isNaN(end) && start > 0 && end >= start) {
+        // Load range-specific tweets
+        loadTweets(accountData.account_id, start, end).then(loadedTweets => {
+          if (loadedTweets.length > 0) {
+            setTweets(loadedTweets);
+            setStatus("done");
+            setUiPhase("results");
+            setCurrentBoundary(end);
+            setJobInfo(`${loadedTweets.length} posts · showing ${start}–${end}`);
+          }
+        });
+      }
+    }
+  }, [accountData]);
 
   // Check unlock status and load existing tweets when user and account are available
   useEffect(() => {
@@ -189,13 +302,23 @@ export default function UserPage() {
         .then(data => {
           if (data.unlocked) {
             setIsAlreadyUnlocked(true);
-            // Load existing tweets if available
-            loadTweets(data.accountId).then(loadedTweets => {
+            setCurrentBoundary(data.boundaryEnd || data.count || 100); // Store current boundary
+            // Load existing tweets if available, respecting any range params in the URL
+            const urlParams = new URLSearchParams(window.location.search);
+            const rangeStartParam = urlParams.get('rangeStart');
+            const rangeEndParam = urlParams.get('rangeEnd');
+            const hasRange = rangeStartParam && rangeEndParam;
+            const rangeStart = hasRange ? parseInt(rangeStartParam, 10) : undefined;
+            const rangeEnd = hasRange ? parseInt(rangeEndParam, 10) : undefined;
+            loadTweets(data.accountId, rangeStart, rangeEnd).then(loadedTweets => {
               if (loadedTweets.length > 0) {
                 setTweets(loadedTweets);
                 setStatus("done");
                 setUiPhase("results");
-                setJobInfo(`${loadedTweets.length} posts • previously unlocked`);
+                setJobInfo(hasRange
+                  ? `${loadedTweets.length} posts · showing ${rangeStart}–${rangeEnd}`
+                  : `${loadedTweets.length} posts • previously unlocked`
+                );
               }
             });
           }
@@ -266,7 +389,14 @@ export default function UserPage() {
           );
           const accountId = job.result?.accountId;
           if (accountId) {
-            const loaded = await loadTweets(accountId);
+            let loaded;
+            if (isExtending && currentBoundary) {
+              // For extend operations, check if we have range info and load only new posts
+              // For now, load all tweets and let the user decide what to show
+              loaded = await loadTweets(accountId);
+            } else {
+              loaded = await loadTweets(accountId);
+            }
             if (!cancelled) setTweets(loaded);
           }
           if (!cancelled) {
@@ -279,6 +409,7 @@ export default function UserPage() {
             setResumeAt(null);
             fetchCredits();
             setActiveJobId(null);
+            setIsExtending(false);
             setUiPhase("results"); // Phase 5: Switch to results view
           }
           return;
@@ -535,6 +666,23 @@ export default function UserPage() {
   
   // Determine if user can unlock (has credits OR basic subscription)
   const canUnlock = isLoggedIn && (credits > 0 || subscription.plan === 'basic');
+
+  // Check if we're in range mode
+  const searchParams = new URLSearchParams(window.location.search);
+  const isRangeMode = !!(searchParams.get('rangeStart') && searchParams.get('rangeEnd'));
+
+  // Function to show full range (clear range params)
+  const showFullRange = () => {
+    if (accountData) {
+      router.replace(`/user/${username}`, { scroll: false });
+      // Reload full tweet set
+      loadTweets(accountData.account_id).then(loadedTweets => {
+        setTweets(loadedTweets);
+        const boundary = currentBoundary || loadedTweets.length;
+        setJobInfo(`${loadedTweets.length} posts • showing 1–${boundary}`);
+      });
+    }
+  };
 
   return (
     <main className="max-w-2xl mx-auto px-4 py-12">
@@ -802,6 +950,43 @@ export default function UserPage() {
             resumeAt={resumeAt}
           />
 
+          {/* Range Mode Indicator */}
+          {isRangeMode && (
+            <div className="mb-4 flex items-center justify-center">
+              <div className="bg-blue-950/30 border border-blue-800/50 rounded-lg px-4 py-2 text-sm">
+                <span className="text-blue-400">Showing newly unlocked range</span>
+                <button
+                  onClick={showFullRange}
+                  className="ml-3 text-blue-300 hover:text-blue-200 underline text-xs"
+                >
+                  Show all posts
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* Excavate 100 More Button */}
+          {isLoggedIn && hasResults && !activeJobId && (
+            <div className="mb-6 flex justify-center">
+              <button
+                onClick={() => setShowExtendModal(true)}
+                disabled={credits <= 0 || isExtending}
+                className={`
+                  inline-flex items-center gap-2 px-4 py-2 rounded-lg font-medium text-sm transition-colors
+                  ${credits > 0 && !isExtending
+                    ? 'bg-blue-600 text-white hover:bg-blue-700'
+                    : 'bg-zinc-800 text-zinc-500 cursor-not-allowed'
+                  }
+                `}
+              >
+                <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+                </svg>
+                Excavate 100 more
+              </button>
+            </div>
+          )}
+
           {/* Guest Account Creation Prompt - only for guest users with results */}
           {!user && hasResults && (
             <div className="mb-6 bg-gradient-to-r from-blue-900/20 to-purple-900/20 border border-blue-800/50 rounded-xl p-6">
@@ -865,6 +1050,35 @@ export default function UserPage() {
             </div>
           )}
         </>
+      )}
+
+      {/* Excavate More Confirmation Modal */}
+      {showExtendModal && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 px-4">
+          <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-6 max-w-md w-full">
+            <h3 className="text-lg font-semibold mb-4">Excavate 100 more posts?</h3>
+            <p className="text-sm text-zinc-400 mb-6">
+              Use 1 credit to excavate up to 100 more posts from @{accountData?.username}'s timeline.
+            </p>
+            
+            <div className="flex gap-3">
+              <button
+                onClick={handleExcavateMore}
+                disabled={isExtending}
+                className="flex-1 bg-blue-600 text-white font-medium px-4 py-2 rounded-lg hover:bg-blue-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {isExtending ? 'Starting...' : 'Confirm'}
+              </button>
+              <button
+                onClick={() => setShowExtendModal(false)}
+                disabled={isExtending}
+                className="flex-1 bg-zinc-800 text-zinc-300 font-medium px-4 py-2 rounded-lg hover:bg-zinc-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </main>
   );

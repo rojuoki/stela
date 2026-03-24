@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getTweetsByAccountUpToBoundary, getUserBoundaryEnd } from "@/lib/repository";
+import { getTweetsByAccountUpToBoundary, getTweetsByAccountRange, getUserBoundaryEnd } from "@/lib/repository";
 import { getUserId } from "@/lib/getUserId";
 
 export async function GET(
@@ -23,7 +23,34 @@ export async function GET(
     return NextResponse.json({ tweets: [] });
   }
 
-  // Return tweets up to user's boundary
+  // Check for range parameters
+  const url = new URL(req.url);
+  const rangeStart = url.searchParams.get('rangeStart');
+  const rangeEnd = url.searchParams.get('rangeEnd');
+
+  if (rangeStart && rangeEnd) {
+    // Range mode - return specific range
+    const start = parseInt(rangeStart, 10);
+    const end = parseInt(rangeEnd, 10);
+    
+    if (isNaN(start) || isNaN(end) || start < 1 || end < start) {
+      return NextResponse.json({ error: "Invalid range parameters" }, { status: 400 });
+    }
+    
+    // Ensure range doesn't exceed user's boundary
+    if (end > userBoundary) {
+      return NextResponse.json({ error: "Range exceeds user boundary" }, { status: 403 });
+    }
+    
+    // Convert to 0-indexed offset and limit for database query
+    const offset = start - 1;
+    const limit = end - start + 1;
+    
+    const tweets = getTweetsByAccountRange(accountId, offset, limit);
+    return NextResponse.json({ tweets });
+  }
+
+  // Default behavior - return tweets up to user's boundary
   const tweets = getTweetsByAccountUpToBoundary(accountId, userBoundary);
   return NextResponse.json({ tweets });
 }
