@@ -830,10 +830,10 @@ async function runJobAsync(jobId: string): Promise<void> {
     // 1. This was a real excavation (not a cached result reuse)
     // 2. We have a valid userId (account was found/created)
     // 3. We don't already have this stage for this account
-    if (result.userId && result.apiCalls > 0) {
-      const existingStageResult = getStageResult(result.userId, jobStage);
+    if (result.accountId && result.apiCalls > 0) {
+      const existingStageResult = getStageResult(result.accountId, jobStage);
       if (!existingStageResult) {
-        storeStageResult(result.userId, jobStage, result, jobId);
+        storeStageResult(result.accountId, jobStage, result, jobId);
       }
     }
 
@@ -867,7 +867,7 @@ async function runJobAsync(jobId: string): Promise<void> {
           finished_at = ?
       WHERE id = ?
     `).run(
-      result.userId || null,
+      result.accountId || null,
       result.apiCalls,
       result.fetchedCount,
       JSON.stringify(result),
@@ -875,7 +875,7 @@ async function runJobAsync(jobId: string): Promise<void> {
       jobId,
     );
 
-    if (result.userId && result.fetchedCount > 0) {
+    if (result.accountId && result.fetchedCount > 0) {
       // Check if this was an additional excavation job (Phase 8)
       let isAdditionalExcavation = false;
       let additionalExcavationData: any = null;
@@ -898,7 +898,7 @@ async function runJobAsync(jobId: string): Promise<void> {
         
         // Step 1: Re-read current cached tweet count
         const { getCachedTweetCount } = await import("@/lib/repository");
-        const newCachedCount = getCachedTweetCount(result.userId);
+        const newCachedCount = getCachedTweetCount(result.accountId);
         
         // Step 2: Compute finalBoundary = min(targetCount, newCachedCount)
         const targetCount = additionalExcavationData.targetStage * 100;
@@ -907,19 +907,19 @@ async function runJobAsync(jobId: string): Promise<void> {
         // Step 3: Update user entitlement using finalBoundary
         // granted_count is only the newly accessible amount (not total cached)
         const { getUserBoundaryEnd } = await import("@/lib/repository");
-        const previousBoundary = getUserBoundaryEnd(requestingUserId, result.userId);
+        const previousBoundary = getUserBoundaryEnd(requestingUserId, result.accountId);
         const grantedCount = Math.max(0, finalBoundary - previousBoundary);
         
         recordStageUnlock(
           requestingUserId, 
-          result.userId, 
+          result.accountId, 
           additionalExcavationData.targetStage, 
           finalBoundary,  // boundary_end reaches finalBoundary (may be less than targetCount)
           grantedCount,   // newly granted amount only
           "additional-excavation"
         );
         
-        console.log(`[additional-excavation] Phase 8 unlock recorded: user=${requestingUserId}, account=${result.userId}, ` +
+        console.log(`[additional-excavation] Phase 8 unlock recorded: user=${requestingUserId}, account=${result.accountId}, ` +
           `targetCount=${targetCount}, newCached=${newCachedCount}, finalBoundary=${finalBoundary}, ` +
           `previousBoundary=${previousBoundary}, granted=${grantedCount}`);
       } else {
@@ -928,9 +928,9 @@ async function runJobAsync(jobId: string): Promise<void> {
         const grantedCount = result.fetchedCount; // For now, simple case where all fetched posts are new
         
         // Use proper recordStageUnlock function with the requesting user_id
-        recordStageUnlock(requestingUserId, result.userId, jobStage, boundaryEnd, grantedCount, jobId);
+        recordStageUnlock(requestingUserId, result.accountId, jobStage, boundaryEnd, grantedCount, jobId);
         
-        console.log(`[jobs] Recorded unlock: user=${requestingUserId}, account=${result.userId}, stage=${jobStage}, boundary=${boundaryEnd}, granted=${grantedCount}`);
+        console.log(`[jobs] Recorded unlock: user=${requestingUserId}, account=${result.accountId}, stage=${jobStage}, boundary=${boundaryEnd}, granted=${grantedCount}`);
       }
     }
 

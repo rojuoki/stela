@@ -42,7 +42,7 @@ interface JobResponse {
   queuePosition?: number | null;
   runningJobId?: string | null;
   error?: { code: string; message: string };
-  result?: { userId: string; fetchedCount: number; stopReason: string };
+  result?: { accountId: string; fetchedCount: number; stopReason: string };
 }
 
 /** True only when the dev panel is enabled at build time. */
@@ -264,7 +264,7 @@ export default function UserPage() {
           console.log(
             `[poll] stop jobId=${activeJobId} reason=succeeded fetched=${job.fetchedCount}`,
           );
-          const accountId = job.result?.userId;
+          const accountId = job.result?.accountId;
           if (accountId) {
             const loaded = await loadTweets(accountId);
             if (!cancelled) setTweets(loaded);

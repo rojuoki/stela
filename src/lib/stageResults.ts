@@ -93,7 +93,7 @@ export function createSyntheticExcavationResult(
 ): ExcavationResult {
   return {
     username,
-    userId: stageResult.account_id,
+    accountId: stageResult.account_id,
     createdAt: accountCreatedAt,
     requestedLimit: stageResult.target_count,
     fetchedCount: stageResult.collected_count,

@@ -41,6 +41,16 @@ import {
 } from "./xclient";
 import { getDb } from "./db";
 
+// ─── Custom Errors ─────────────────────────────────────
+
+/** Thrown when whole-collect detects pagination and needs to abort to normal collect/split flow */
+class WholeCollectPaginationAbort extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "WholeCollectPaginationAbort";
+  }
+}
+
 // ─── Constants ─────────────────────────────────────────
 
 /** Absolute call ceiling per excavation (explore + collect combined). */
@@ -126,7 +136,7 @@ interface SplitWindow {
 
 export interface ExcavationResult {
   username: string;
-  userId: string;
+  accountId: string; // Twitter account ID (formerly userId)
   createdAt: string;
   requestedLimit: number;
   fetchedCount: number;
@@ -485,7 +495,7 @@ async function excavateFullArchive(
         // ── Apply explicit probe thresholds ──
         const yearTweetCount = yPage.tweets.length;
         if (yearTweetCount >= 1 && yearTweetCount <= 9) {
-          // found 1-9 → treat as fully visible → whole-collect
+          // found 1-9 → attempt whole-collect (abort if pagination detected)
           console.log(
             `[explore] year probe window=[${yearStart.toISOString().slice(0, 10)}, ${yEndStr.slice(0, 10)}] found=${yearTweetCount} → whole-collect (fully visible)`,
           );
@@ -493,24 +503,56 @@ async function excavateFullArchive(
           const wholeCollectEnd = minDate(yearEnd, now);
           
           // Use the EXACT probe window for whole-collect (NOT start year only)
-          await wholeCollectFromProbe(
-            query,
-            yearStart,
-            wholeCollectEnd,
-            stats,
-            collected,
-            MAX_API_CALLS,
-            user.username,
-            yPage,
-            onProgress,
-            user.id,
-          );
-          
-          // Mark this range as fully collected to avoid duplicate probes
-          wholeCollectedRanges.push({ start: yearStart, end: wholeCollectEnd });
-          console.log(
-            `[explore] marked range [${yearStart.toISOString().slice(0, 10)}, ${wholeCollectEnd.toISOString().slice(0, 10)}] as whole-collected`,
-          );
+          try {
+            await wholeCollectFromProbe(
+              query,
+              yearStart,
+              wholeCollectEnd,
+              stats,
+              collected,
+              MAX_API_CALLS,
+              user.username,
+              yPage,
+              onProgress,
+              user.id,
+            );
+            
+            // Mark this range as fully collected to avoid duplicate probes (only if whole-collect succeeded)
+            wholeCollectedRanges.push({ start: yearStart, end: wholeCollectEnd });
+            console.log(
+              `[explore] marked range [${yearStart.toISOString().slice(0, 10)}, ${wholeCollectEnd.toISOString().slice(0, 10)}] as whole-collected`,
+            );
+          } catch (e) {
+            if (e instanceof WholeCollectPaginationAbort) {
+              console.log(
+                `[explore] ${e.message}, treating year probe window as dense/unknown → start collect phase`,
+              );
+              
+              // Set aborted year window as earliest region and go directly to collect phase
+              earliestRegionStart = yearStart;
+              
+              // Checkpoint: found the earliest region (aborted window), about to enter collect.
+              saveCheckpoint?.({
+                phase: "collect",
+                next_year: year,
+                month_scan_year: year,
+                next_month: 0, // Not relevant for year-level abort
+                earliest_hit_year: year,
+                zero_streak: 0, // Not relevant for year-level abort
+                deep_triggered: deepTriggered,
+                allow_deep: allowDeep,
+                earliest_region_start: earliestRegionStart.toISOString(),
+                collect_window_start: earliestRegionStart.toISOString(),
+                collect_span_days: COLLECT_INITIAL_SPAN_DAYS,
+                collected_ids: [...collected.keys()],
+              });
+              
+              await sleep(EXPLORE_INTER_REQUEST_DELAY_MS);
+              break yearLoop; // Exit exploration, go to collect phase for aborted window
+            } else {
+              throw e;
+            }
+          }
           
           // Continue year scanning (don't break) - this was just an optimization
           // Save checkpoint for next year
@@ -679,29 +721,61 @@ async function excavateFullArchive(
           // ── Apply explicit probe thresholds ──
           const monthTweetCount = mPage.tweets.length;
           if (monthTweetCount >= 1 && monthTweetCount <= 9) {
-            // found 1-9 → treat as fully visible → whole-collect
+            // found 1-9 → attempt whole-collect (abort if pagination detected)
             console.log(
               `[explore] month probe window=[${mStart.toISOString().slice(0, 10)}, ${monthEndBounded.toISOString().slice(0, 10)}] found=${monthTweetCount} → whole-collect (fully visible)`,
             );
             
-            await wholeCollectFromProbe(
-              query,
-              mStart,
-              monthEndBounded,
-              stats,
-              collected,
-              MAX_API_CALLS,
-              user.username,
-              mPage,
-              onProgress,
-              user.id,
-            );
-            
-            // Mark this month range as fully collected
-            wholeCollectedRanges.push({ start: mStart, end: monthEndBounded });
-            console.log(
-              `[explore] marked month range [${mStart.toISOString().slice(0, 10)}, ${monthEndBounded.toISOString().slice(0, 10)}] as whole-collected`,
-            );
+            try {
+              await wholeCollectFromProbe(
+                query,
+                mStart,
+                monthEndBounded,
+                stats,
+                collected,
+                MAX_API_CALLS,
+                user.username,
+                mPage,
+                onProgress,
+                user.id,
+              );
+              
+              // Mark this month range as fully collected (only if whole-collect succeeded)
+              wholeCollectedRanges.push({ start: mStart, end: monthEndBounded });
+              console.log(
+                `[explore] marked month range [${mStart.toISOString().slice(0, 10)}, ${monthEndBounded.toISOString().slice(0, 10)}] as whole-collected`,
+              );
+            } catch (e) {
+              if (e instanceof WholeCollectPaginationAbort) {
+                console.log(
+                  `[explore] ${e.message}, treating month probe window as dense/unknown → start collect phase`,
+                );
+                
+                // Set aborted month window as earliest region and go directly to collect phase
+                earliestRegionStart = mStart;
+                
+                // Checkpoint: found the earliest region (aborted window), about to enter collect.
+                saveCheckpoint?.({
+                  phase: "collect",
+                  next_year: scanYear,
+                  month_scan_year: scanYear,
+                  next_month: m,
+                  earliest_hit_year: scanYear,
+                  zero_streak: zeroStreak,
+                  deep_triggered: deepTriggered,
+                  allow_deep: allowDeep,
+                  earliest_region_start: earliestRegionStart.toISOString(),
+                  collect_window_start: earliestRegionStart.toISOString(),
+                  collect_span_days: COLLECT_INITIAL_SPAN_DAYS,
+                  collected_ids: [...collected.keys()],
+                });
+                
+                await sleep(EXPLORE_INTER_REQUEST_DELAY_MS);
+                break yearLoop; // Exit exploration, go to collect phase for aborted window
+              } else {
+                throw e;
+              }
+            }
             
             // Continue month scanning to find the absolute earliest region
             // Set earliest region to this month for reference
@@ -778,7 +852,7 @@ async function excavateFullArchive(
     console.log(`[explore] @${user.username} no tweets found — stopReason=${reason}`);
     return {
       username: user.username,
-      userId: user.id,
+      accountId: user.id,
       createdAt: user.created_at,
       requestedLimit: limit,
       fetchedCount: 0,
@@ -810,7 +884,7 @@ async function excavateFullArchive(
     
     return {
       username: user.username,
-      userId: user.id,
+      accountId: user.id,
       createdAt: user.created_at,
       requestedLimit: limit,
       fetchedCount: sorted.length,
@@ -893,7 +967,7 @@ async function excavateFullArchive(
     user.username,
     onProgress,
     {
-      userId: user.id,
+      userId: user.id, // Keep as userId for internal checkpoint operations
       resumeFrom: collectResumeFrom,
       initialSpanDays: collectInitialSpan,
       initialStagnationCount: collectStagnationCount,
@@ -938,7 +1012,7 @@ async function excavateFullArchive(
 
   return {
     username: user.username,
-    userId: user.id,
+    accountId: user.id,
     createdAt: user.created_at,
     requestedLimit: limit,
     fetchedCount: sorted.length,
@@ -1062,6 +1136,22 @@ async function wholeCollectFromProbe(
 
   // Continue from page 2 if next_token exists
   let nextToken = probeResponse.nextToken;
+  
+  // ABORT: If pagination detected, clean up parent tweets and throw error
+  if (nextToken) {
+    // Remove parent tweets from collected map (apply parent-discard principle)
+    for (const tweet of probeResponse.tweets) {
+      collected.delete(tweet.id);
+    }
+    console.log(
+      `[whole-collect] discarding ${probeResponse.tweets.length} parent tweets from collection (parent-discard principle)`
+    );
+    
+    throw new WholeCollectPaginationAbort(
+      `[whole-collect] pagination detected after page 1, aborting to normal collect/split flow`
+    );
+  }
+  
   while (nextToken && stats.totalCalls < callCeiling && totalPages < MAX_COLLECT_PAGES_PER_WINDOW) {
     let page: TimelinePage;
     try {
@@ -1368,9 +1458,10 @@ async function collectWindowPass(
         
         // Store parent page1 tweets for historical record only (NOT collected)
         // Parent data is discarded; only child windows contribute to collection
-        if (checkpointOpts?.userId && page.tweets.length > 0) {
-          storeTweets(checkpointOpts.userId, page.tweets, page.media);
-        }
+        // DISABLED: Do not store parent sample tweets (pollutes tweets table)
+        // if (checkpointOpts?.userId && page.tweets.length > 0) {
+        //   storeTweets(checkpointOpts.userId, page.tweets, page.media);
+        // }
         
         console.log(
           `[split][parent] Discarding ${page.tweets.length} parent tweets (split sample only) — child windows will handle collection`,
@@ -1836,7 +1927,7 @@ async function excavateTimeline(
 
   return {
     username: user.username,
-    userId: user.id,
+    accountId: user.id,
     createdAt: user.created_at,
     requestedLimit: limit,
     fetchedCount: sorted.length,
@@ -2032,7 +2123,7 @@ async function excavateStageExpansionInternal(
     additionalNeeded,
     user.username,
     onProgress,
-    { userId: user.id }
+    { userId: user.id } // Keep as userId for internal excavation operations
   );
 
   console.log(
@@ -2204,7 +2295,7 @@ function createExpansionResult(
 
   return {
     username: user.username,
-    userId: user.id,
+    accountId: user.id,
     createdAt: user.created_at,
     requestedLimit: targetLimit,
     fetchedCount: sorted.length,
@@ -2297,7 +2388,7 @@ function errorResult(
 ): ExcavationResult {
   return {
     username,
-    userId: "",
+    accountId: "",
     createdAt: "",
     requestedLimit: limit,
     fetchedCount: 0,
