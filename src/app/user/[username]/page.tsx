@@ -42,7 +42,13 @@ interface JobResponse {
   queuePosition?: number | null;
   runningJobId?: string | null;
   error?: { code: string; message: string };
-  result?: { accountId: string; fetchedCount: number; stopReason: string };
+  result?: {
+    accountId: string;
+    fetchedCount: number;
+    stopReason: string;
+    previousBoundary?: number;
+    finalBoundary?: number;
+  };
 }
 
 /** True only when the dev panel is enabled at build time. */
@@ -135,14 +141,18 @@ export default function UserPage() {
   const handleExcavateMore = async () => {
     if (!accountData || !user || credits <= 0) return;
 
+    console.log("[DEBUG] handleExcavateMore: Starting excavate more flow");
     setShowExtendModal(false);
+    console.log("[DEBUG] handleExcavateMore: About to setIsExtending(true)");
     setIsExtending(true);
+    console.log("[DEBUG] handleExcavateMore: About to setActiveJobId(null)");
     setActiveJobId(null);
     setStatus("running");
     setError(null);
     setJobInfo("Starting additional excavation...");
     setJobPhase("running");
     setResumeAt(null);
+    console.log("[DEBUG] handleExcavateMore: About to setUiPhase('excavating')");
     setUiPhase("excavating");
 
     try {
@@ -165,38 +175,24 @@ export default function UserPage() {
       const extendResponse = await res.json();
 
       if (extendResponse.executionMode === "grant_only") {
-        // Grant-only path: immediate completion
+        // Grant-only path: immediate completion using shared helper
         const previousBoundary = extendResponse.boundary.previous;
         const newBoundary = extendResponse.boundary.new;
         
-        setJobInfo(`${extendResponse.range.count} posts · ${extendResponse.range.rangeString}`);
-        setStatus("done");
         setCacheHit(false);
         setJobPhase(null);
-        setCurrentBoundary(newBoundary);
         
-        // Load newly unlocked posts only
-        if (extendResponse.posts && extendResponse.posts.length > 0) {
-          setTweets(extendResponse.posts);
-        } else {
-          // Fallback: load using range API
-          const rangeStart = previousBoundary + 1;
-          const rangeEnd = newBoundary;
-          const loadedTweets = await loadTweets(accountData.account_id, rangeStart, rangeEnd);
-          setTweets(loadedTweets);
-        }
+        // Use shared helper for consistent newly unlocked range display
+        const jobInfoText = `${extendResponse.range.count} posts · ${extendResponse.range.rangeString}`;
+        await showNewlyUnlockedRange(accountData.account_id, previousBoundary, newBoundary, jobInfoText);
         
         fetchCredits();
-        setUiPhase("results");
-        
-        // Update URL to show range mode
-        const rangeStart = previousBoundary + 1;
-        const rangeEnd = newBoundary;
-        router.replace(`/user/${username}?rangeStart=${rangeStart}&rangeEnd=${rangeEnd}`, { scroll: false });
         
       } else if (extendResponse.executionMode === "excavate_more") {
         // Excavate path: start polling job
+        console.log("[DEBUG] handleExcavateMore: Switching to excavate_more mode, jobId:", extendResponse.jobId);
         setJobInfo("Excavating additional posts...");
+        console.log("[DEBUG] handleExcavateMore: About to setActiveJobId for polling:", extendResponse.jobId);
         setActiveJobId(extendResponse.jobId);
         // uiPhase will be managed by polling logic
       }
@@ -258,6 +254,44 @@ export default function UserPage() {
       return data.tweets || [];
     }
     return [];
+  };
+
+  /**
+   * Shared helper for displaying newly unlocked range after successful unlock operations
+   */
+  const showNewlyUnlockedRange = async (accountId: string, previousBoundary: number, finalBoundary: number, jobInfo?: string) => {
+    console.log("[DEBUG] showNewlyUnlockedRange: Called with:", {
+      accountId,
+      previousBoundary,
+      finalBoundary,
+      jobInfo
+    });
+    
+    const rangeStart = previousBoundary + 1;
+    const rangeEnd = finalBoundary;
+    console.log("[DEBUG] showNewlyUnlockedRange: Calculated range:", { rangeStart, rangeEnd });
+    
+    // Load tweets for the newly unlocked range
+    console.log("[DEBUG] showNewlyUnlockedRange: Loading tweets for range...");
+    const loadedTweets = await loadTweets(accountId, rangeStart, rangeEnd);
+    console.log("[DEBUG] showNewlyUnlockedRange: Loaded tweets count:", loadedTweets.length);
+    
+    // Update UI state
+    console.log("[DEBUG] showNewlyUnlockedRange: About to setTweets with", loadedTweets.length, "tweets");
+    setTweets(loadedTweets);
+    setCurrentBoundary(finalBoundary);
+    const finalJobInfo = jobInfo || `${loadedTweets.length} posts · ${rangeStart}–${rangeEnd}`;
+    console.log("[DEBUG] showNewlyUnlockedRange: Setting jobInfo to:", finalJobInfo);
+    setJobInfo(finalJobInfo);
+    setStatus("done");
+    console.log("[DEBUG] showNewlyUnlockedRange: About to setUiPhase('results')");
+    setUiPhase("results");
+    
+    // Update URL with range parameters
+    const newUrl = `/user/${username}?rangeStart=${rangeStart}&rangeEnd=${rangeEnd}`;
+    console.log("[DEBUG] showNewlyUnlockedRange: Updating URL to:", newUrl);
+    router.replace(newUrl, { scroll: false });
+    console.log("[DEBUG] showNewlyUnlockedRange: Complete");
   };
 
   // Load account on mount and check for range mode
@@ -341,9 +375,13 @@ export default function UserPage() {
 
   // ── Polling driven by activeJobId ──────────────────────────────────────────
   useEffect(() => {
-    if (!activeJobId) return;
+    if (!activeJobId) {
+      console.log("[DEBUG] Polling effect: No activeJobId, returning");
+      return;
+    }
 
     console.log(`[poll] start jobId=${activeJobId}`);
+    console.log("[DEBUG] Polling effect: Starting with isExtending =", isExtending);
 
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout> | null = null;
@@ -387,30 +425,68 @@ export default function UserPage() {
           console.log(
             `[poll] stop jobId=${activeJobId} reason=succeeded fetched=${job.fetchedCount}`,
           );
+          
+          // DEBUG: Log all the values we need to check
+          console.log("[DEBUG] Polling success - checking conditions:");
+          console.log("[DEBUG] - isExtending:", isExtending);
+          console.log("[DEBUG] - job.result:", job.result);
+          console.log("[DEBUG] - job.result?.previousBoundary:", job.result?.previousBoundary);
+          console.log("[DEBUG] - job.result?.finalBoundary:", job.result?.finalBoundary);
+          console.log("[DEBUG] - cancelled:", cancelled);
+          
           const accountId = job.result?.accountId;
-          if (accountId) {
-            let loaded;
-            if (isExtending && currentBoundary) {
-              // For extend operations, check if we have range info and load only new posts
-              // For now, load all tweets and let the user decide what to show
-              loaded = await loadTweets(accountId);
+          console.log("[DEBUG] - accountId:", accountId);
+          
+          if (accountId && !cancelled) {
+            console.log("[DEBUG] Passed accountId && !cancelled check");
+            
+            if (isExtending && job.result?.previousBoundary != null && job.result?.finalBoundary != null) {
+              console.log("[DEBUG] ✓ ENTERED newly unlocked range helper path");
+              console.log("[DEBUG] - previousBoundary:", job.result.previousBoundary);
+              console.log("[DEBUG] - finalBoundary:", job.result.finalBoundary);
+              
+              // Use shared helper for newly unlocked range display (excavate_more success)
+              const jobInfoText = `${job.fetchedCount} posts · ${job.apiCalls} API calls`;
+              console.log("[DEBUG] About to call showNewlyUnlockedRange with:", {
+                accountId,
+                previousBoundary: job.result.previousBoundary,
+                finalBoundary: job.result.finalBoundary,
+                jobInfoText
+              });
+              await showNewlyUnlockedRange(accountId, job.result.previousBoundary, job.result.finalBoundary, jobInfoText);
+              console.log("[DEBUG] showNewlyUnlockedRange completed");
             } else {
-              loaded = await loadTweets(accountId);
+              console.log("[DEBUG] ✗ FELL BACK to normal full-results path");
+              console.log("[DEBUG] - Condition breakdown:");
+              console.log("[DEBUG]   - isExtending:", isExtending);
+              console.log("[DEBUG]   - previousBoundary != null:", job.result?.previousBoundary != null);
+              console.log("[DEBUG]   - finalBoundary != null:", job.result?.finalBoundary != null);
+              
+              // Fallback for regular excavation (non-extending)
+              const loaded = await loadTweets(accountId);
+              console.log("[DEBUG] Full-results fallback: About to setTweets with loaded data, length:", loaded.length);
+              setTweets(loaded);
+              setJobInfo(`${job.fetchedCount} posts · ${job.apiCalls} API calls`);
+              setStatus("done");
+              setCurrentBoundary(job.result?.finalBoundary || loaded.length);
+              console.log("[DEBUG] Full-results fallback: About to setUiPhase('results')");
+              setUiPhase("results");
             }
-            if (!cancelled) setTweets(loaded);
+          } else {
+            console.log("[DEBUG] Failed accountId && !cancelled check:");
+            console.log("[DEBUG] - accountId truthy:", !!accountId);
+            console.log("[DEBUG] - !cancelled:", !cancelled);
           }
+          
           if (!cancelled) {
-            setJobInfo(
-              `${job.fetchedCount} posts · ${job.apiCalls} API calls`,
-            );
-            setStatus("done");
+            console.log("[DEBUG] Cleaning up polling state");
             setCacheHit(false);
             setJobPhase(null);
             setResumeAt(null);
             fetchCredits();
             setActiveJobId(null);
+            console.log("[DEBUG] About to setIsExtending(false)");
             setIsExtending(false);
-            setUiPhase("results"); // Phase 5: Switch to results view
           }
           return;
         }
@@ -481,10 +557,11 @@ export default function UserPage() {
 
     return () => {
       console.log(`[poll] cleanup jobId=${activeJobId}`);
+      console.log("[DEBUG] Polling cleanup: isExtending was", isExtending);
       cancelled = true;
       if (timer) clearTimeout(timer);
     };
-  }, [activeJobId]);
+  }, [activeJobId, isExtending]);
 
   const handleExcavate = async (force = false) => {
     if (!accountData || accountData.protected) return;
@@ -492,14 +569,17 @@ export default function UserPage() {
     const raw = username.trim().replace(/^@/, "");
     if (!raw) return;
 
+    console.log("[DEBUG] handleExcavate: Starting excavation, force =", force);
     setActiveJobId(null);
     setStatus("running");
     setError(null);
+    console.log("[DEBUG] handleExcavate: About to setTweets([]) - clearing tweets");
     setTweets([]);
     setCacheHit(false);
     setJobInfo(force ? "Re-running excavation…" : "Starting…");
     setJobPhase("running");
     setResumeAt(null);
+    console.log("[DEBUG] handleExcavate: About to setUiPhase('excavating')");
     setUiPhase("excavating"); // Phase 5: Switch to excavating view immediately
 
     try {

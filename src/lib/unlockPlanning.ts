@@ -402,7 +402,7 @@ export function validateExtendRequest(userId: string, accountId: string): string
   }
   
   // Check reasonable limits (prevent abuse)
-  const maxBoundary = 1000; // Allow up to 1000 posts total
+  const maxBoundary = 100000000; // Allow up to 100000000 posts total
   if (currentBoundary >= maxBoundary) {
     return `Maximum unlock limit reached (${maxBoundary} posts)`;
   }
