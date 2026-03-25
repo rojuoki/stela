@@ -82,6 +82,15 @@ export function getCachedTweetCount(accountId: string): number {
   return row?.cnt ?? 0;
 }
 
+/** Get the newest cached tweet timestamp for continuation point */
+export function getNewestCachedTweetTimestamp(accountId: string): string | null {
+  const db = getDb();
+  const row = db
+    .prepare("SELECT MAX(created_at) as newest_created_at FROM tweets WHERE account_id = ?")
+    .get(accountId) as { newest_created_at: string | null } | undefined;
+  return row?.newest_created_at ?? null;
+}
+
 /** Check if user has unlocked a specific stage for an account */
 export function hasUserUnlockedStage(userId: string, accountId: string, stage: number): boolean {
   const db = getDb();

@@ -26,15 +26,14 @@
 
 import { randomUUID } from "crypto";
 import { getDb } from "./db";
-import { excavateEarliest, excavateStageExpansion, type ExcavationCheckpoint, type ExcavationResult } from "./excavate";
+import { excavateEarliest, type ExcavationCheckpoint, type ExcavationResult } from "./excavate";
 import { captureHeld, releaseHeld, recordStageUnlock } from "./repository";
 import { tokenPool } from "./tokenPool";
 import { XApiStop } from "./xclient";
 import { 
   getStageResult, 
   storeStageResult, 
-  createSyntheticExcavationResult,
-  checkStagePrerequisites
+  createSyntheticExcavationResult
 } from "./stageResults";
 import { computeTargetCount } from "./unlockPlanning";
 
@@ -440,8 +439,11 @@ export function createAndRunJob(
 }
 
 /**
+ * @deprecated This function is deprecated in Phase 8 architecture.
+ * Use createAdditionalExcavationJob for boundary-based additional excavation instead.
+ * 
  * Create a stage expansion job (Stage 2, Stage 3).
- * Validates prerequisites before creating the job.
+ * Uses boundary-based validation instead of stage-based validation.
  */
 export function createStageExpansionJob(
   username: string,
@@ -449,41 +451,32 @@ export function createStageExpansionJob(
   holdId?: string,
   userId: string = "anonymous",
 ): { jobId: string; error?: never } | { error: string; jobId?: never } {
+  console.warn(`[DEPRECATED] createStageExpansionJob called for Stage ${targetStage}. Use createAdditionalExcavationJob instead.`);
+  
   if (targetStage <= 1) {
     return { error: "Use createAndRunJob for Stage 1" };
   }
 
-  const db = getDb();
+  // For now, redirect to additional excavation job
+  // Calculate missing count as 100 posts per stage
+  const missingCount = 100;
   
-  // Check if account exists
-  const account = db
-    .prepare("SELECT account_id, created_at FROM accounts WHERE username = ?")
-    .get(username.toLowerCase()) as { account_id: string; created_at: string } | undefined;
+  createAdditionalExcavationJob(username, targetStage, missingCount, userId)
+    .then(jobId => {
+      if (jobId) {
+        console.log(`[DEPRECATED] Redirected Stage ${targetStage} expansion to additional excavation job ${jobId}`);
+      }
+    })
+    .catch(err => {
+      console.error(`[DEPRECATED] Failed to redirect to additional excavation:`, err);
+    });
 
-  if (!account) {
-    return { error: "Account not found - must complete Stage 1 first" };
-  }
-
-  // Check prerequisites
-  const missingPrerequisite = checkStagePrerequisites(account.account_id, targetStage);
-  if (missingPrerequisite !== null) {
-    return { error: `Stage ${missingPrerequisite} must be completed first` };
-  }
-
-  // Check if target stage already exists
-  const existingStage = getStageResult(account.account_id, targetStage);
-  if (existingStage) {
-    return { error: `Stage ${targetStage} already completed for this account` };
-  }
-
-  // All checks passed - create the expansion job
-  const jobId = createAndRunJob(username, account.created_at, holdId, targetStage, false, userId);
-  return { jobId };
+  return { error: "createStageExpansionJob is deprecated. Use createAdditionalExcavationJob via /api/unlock/extend endpoint instead." };
 }
 
 /**
  * Create additional excavation job for Phase 8.
- * Uses existing excavation engine with continuation-based approach.
+ * Uses normal excavation engine with continuation-based approach.
  * This is the "excavate_more" execution mode implementation.
  */
 export async function createAdditionalExcavationJob(
@@ -504,31 +497,48 @@ export async function createAdditionalExcavationJob(
     return null;
   }
 
-  // Create excavation job using existing engine
-  const jobId = createAndRunJob(
-    username, 
-    account.created_at,
-    undefined, // holdId will be set separately
-    targetStage, 
-    false, // not force
-    userId
-  );
+  // Create job record first WITHOUT starting execution
+  const jobId = randomUUID();
+  const now = new Date().toISOString();
   
-  // Add additional excavation metadata to resume_state
+  // Calculate continuation point (start after newest cached tweet)
+  const { getNewestCachedTweetTimestamp } = await import("@/lib/repository");
+  const newestTweetTimestamp = getNewestCachedTweetTimestamp(account.account_id);
+  
+  // If no tweets cached, fall back to account creation (shouldn't happen for additional excavation)
+  const continuationStartTime = newestTweetTimestamp || account.created_at;
+  
+  console.log(`[additional-excavation] Continuation point: ${continuationStartTime} (${newestTweetTimestamp ? 'from newest tweet' : 'from account creation'})`);
+  
+  // Prepare additional excavation metadata BEFORE job creation
   const additionalExcavationMetadata = {
     type: 'additional_excavation',
     targetStage,
     missingCount,
     continuationBased: true,
-    created_at: new Date().toISOString(),
+    continuationStartTime,
+    created_at: now,
   };
   
-  db.prepare("UPDATE jobs SET resume_state = ? WHERE id = ?").run(
+  // Create job record with resume_state already set
+  db.prepare(`
+    INSERT INTO jobs (id, account_username, user_id, requested_limit, stage, hold_id, status, resume_state, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, 'queued', ?, ?)
+  `).run(
+    jobId, 
+    username.toLowerCase(), 
+    userId, 
+    missingCount, // Use missingCount as limit
+    1, // Always use Stage 1 to avoid stage expansion confusion
+    null, // holdId will be set separately
     JSON.stringify(additionalExcavationMetadata),
-    jobId
+    now
   );
   
-  console.log(`[additional-excavation] Created job ${jobId} for @${username}: stage=${targetStage}, missing=${missingCount}`);
+  // NOW register with queue to start execution
+  globalQueue.register(jobId);
+  
+  console.log(`[additional-excavation] Created job ${jobId} for @${username}: targetStage=${targetStage}, missing=${missingCount} (stored as stage=1 with metadata)`);
   return jobId;
 }
 
@@ -634,17 +644,40 @@ async function runJobAsync(jobId: string): Promise<void> {
     let result: ExcavationResult | null = null;
     let rateLimitResumeAtMs: number | null = null;
 
-    // ── Phase 4: Check for existing stage result and handle stage-specific excavation ──
+    // ── CRITICAL: Check Additional Excavation FIRST ──────────────────────────────
     
+    // Check if this is an additional excavation job (Phase 8)
+    let isAdditionalExcavation = false;
+    let missingCount = limit; // Default to requested limit for normal jobs
+    let additionalExcavationData: any = null;
+    
+    if (jobRow.resume_state) {
+      try {
+        const resumeData = JSON.parse(jobRow.resume_state);
+        if (resumeData.type === 'additional_excavation') {
+          isAdditionalExcavation = true;
+          missingCount = resumeData.missingCount || limit;
+          additionalExcavationData = resumeData;
+          console.log(
+            `[additional-excavation] @${username} IDENTIFIED as Phase 8: missing=${missingCount} targetStage=${resumeData.targetStage}`
+          );
+        }
+      } catch (e) {
+        console.warn(`[jobs] Job ${jobId} corrupt resume_state — treating as normal excavation, error:`, e);
+      }
+    }
+
     // Check if this is a force rerun (admin bypass)
     const isForceRerun = globalQueue.hasForceFlag(jobId);
     
-    // First, we need to get the account info to check for existing stage results.
+    // Get account info
     const existingAccount = db
       .prepare("SELECT account_id, created_at FROM accounts WHERE username = ?")
       .get(username.toLowerCase()) as { account_id: string; created_at: string } | undefined;
 
-    if (existingAccount && !isForceRerun) {
+    // ── Stage Reuse Logic (BYPASS for Additional Excavation) ─────────────────────
+    
+    if (!isAdditionalExcavation && existingAccount && !isForceRerun) {
       const existingStageResult = getStageResult(existingAccount.account_id, jobStage);
       if (existingStageResult) {
         console.log(
@@ -664,54 +697,44 @@ async function runJobAsync(jobId: string): Promise<void> {
       console.log(
         `[stage] Force rerun detected for job ${jobId} (@${username} Stage ${jobStage}) - bypassing existing stage result reuse`
       );
+    } else if (isAdditionalExcavation) {
+      console.log(
+        `[additional-excavation] @${username} BYPASSING stage reuse logic - must excavate missing=${missingCount} posts`
+      );
     }
 
     // Only run excavation if we don't have a cached stage result
     if (!result) {
-      // Check if this is an additional excavation job (Phase 8)
-      let isAdditionalExcavation = false;
-      let additionalExcavationData: any = null;
-      
-      if (jobRow.resume_state) {
-        try {
-          const resumeData = JSON.parse(jobRow.resume_state);
-          if (resumeData.type === 'additional_excavation') {
-            isAdditionalExcavation = true;
-            additionalExcavationData = resumeData;
-          }
-        } catch {
-          // Not JSON or invalid format, continue normally
-        }
-      }
 
       try {
         if (isAdditionalExcavation) {
-          // Phase 8: Additional excavation mode - use missingCount as variable stop condition
-          console.log(
-            `[additional-excavation] @${username} Phase 8 mode: missing=${additionalExcavationData.missingCount} stage=${additionalExcavationData.targetStage}`
-          );
-          
+          // ── Additional Excavation: Normal engine with continuation ──
           if (!existingAccount) {
             throw new Error(`Account not found for additional excavation`);
           }
 
-          // Use the existing excavation engine but with the missingCount as limit
-          // This creates a variable stop condition based on how much we actually need
-          const dynamicLimit = additionalExcavationData.missingCount;
+          console.log(
+            `[additional-excavation] @${username} Using NORMAL excavation engine: missingCount=${missingCount}, continuationPoint=${additionalExcavationData.continuationStartTime}`
+          );
           
+          // Use normal excavation with continuation point and dynamic stop
           result = await excavateEarliest(
             username,
-            dynamicLimit, // Variable limit based on missing count
+            limit, // Keep original limit for compatibility
             writeProgress,
             token,
             onRateLimit,
             saveCheckpoint,
             initialCheckpoint,
             jobId,
+            additionalExcavationData.continuationStartTime, // Start from continuation point
+            missingCount, // Pass missingCount as the actual stop target
           );
           
         } else if (jobStage === 1) {
-          // Stage 1: Use normal excavation
+          // ── Normal Stage 1 Excavation ──
+          console.log(`[stage] Stage 1 normal excavation: limit=${limit}`);
+          
           result = await excavateEarliest(
             username,
             limit,
@@ -723,30 +746,9 @@ async function runJobAsync(jobId: string): Promise<void> {
             jobId,
           );
         } else {
-          // Stage 2+: Use expansion excavation
-          if (!existingAccount) {
-            throw new Error(`Account not found for Stage ${jobStage} expansion`);
-          }
-
-          // Get the previous stage result as baseline
-          const previousStageResult = getStageResult(existingAccount.account_id, jobStage - 1);
-          if (!previousStageResult) {
-            throw new Error(`Stage ${jobStage - 1} must be completed before Stage ${jobStage}`);
-          }
-
-          console.log(
-            `[stage] Starting Stage ${jobStage} expansion from Stage ${jobStage - 1} baseline: ${previousStageResult.collected_count} tweets`
-          );
-
-          result = await excavateStageExpansion(
-            username,
-            jobStage,
-            { collected_count: previousStageResult.collected_count, account_id: existingAccount.account_id },
-            writeProgress,
-            token,
-            onRateLimit,
-            jobId,
-          );
+          // ── Deprecated Stage 2+ Jobs ──
+          console.error(`[jobs] Unexpected Stage ${jobStage} job for @${username} - Phase 8 should use additional excavation instead`);
+          throw new Error(`Stage ${jobStage} jobs are deprecated in favor of boundary-based additional excavation`);
         }
       } catch (e: unknown) {
         // If xfetch threw XApiStop("RATE_LIMIT") and it wasn't caught inside
@@ -855,26 +857,6 @@ async function runJobAsync(jobId: string): Promise<void> {
       );
     }
 
-    db.prepare(`
-      UPDATE jobs
-      SET status = 'succeeded',
-          account_id = ?,
-          api_calls = ?,
-          fetched_count = ?,
-          result_json = ?,
-          resume_at = NULL,
-          resume_state = NULL,
-          finished_at = ?
-      WHERE id = ?
-    `).run(
-      result.accountId || null,
-      result.apiCalls,
-      result.fetchedCount,
-      JSON.stringify(result),
-      new Date().toISOString(),
-      jobId,
-    );
-
     if (result.accountId && result.fetchedCount > 0) {
       // Check if this was an additional excavation job (Phase 8)
       let isAdditionalExcavation = false;
@@ -894,9 +876,9 @@ async function runJobAsync(jobId: string): Promise<void> {
 
       if (isAdditionalExcavation) {
         // Phase 8 post-execution behavior
-        console.log(`[additional-excavation] Phase 8 post-execution: excavated=${result.fetchedCount}, target=${additionalExcavationData.targetStage * 100}`);
+        console.log(`[additional-excavation] Phase 8 post-execution: storedNew=${result.storedNewCount}, fetchedCount=${result.fetchedCount}, target=${additionalExcavationData.targetStage * 100}`);
         
-        // Step 1: Re-read current cached tweet count
+        // Step 1: Re-read current cached tweet count to get the ACTUAL count after excavation
         const { getCachedTweetCount } = await import("@/lib/repository");
         const newCachedCount = getCachedTweetCount(result.accountId);
         
@@ -905,23 +887,32 @@ async function runJobAsync(jobId: string): Promise<void> {
         const finalBoundary = Math.min(targetCount, newCachedCount);
         
         // Step 3: Update user entitlement using finalBoundary
-        // granted_count is only the newly accessible amount (not total cached)
+        // CRITICAL: granted_count MUST equal storedNewCount (actual new tweets stored)
         const { getUserBoundaryEnd } = await import("@/lib/repository");
         const previousBoundary = getUserBoundaryEnd(requestingUserId, result.accountId);
-        const grantedCount = Math.max(0, finalBoundary - previousBoundary);
+        
+        // FIXED: Ensure storedNewCount is preserved and used correctly
+        const grantedCount = result.storedNewCount; // This is the actual number of new tweets stored
+        
+        console.log(`[additional-excavation] Boundary calculation: storedNewCount=${result.storedNewCount}, fetchedCount=${result.fetchedCount}, newCachedCount=${newCachedCount}, previousBoundary=${previousBoundary}, targetCount=${targetCount}, finalBoundary=${finalBoundary}`);
         
         recordStageUnlock(
           requestingUserId, 
           result.accountId, 
           additionalExcavationData.targetStage, 
-          finalBoundary,  // boundary_end reaches finalBoundary (may be less than targetCount)
-          grantedCount,   // newly granted amount only
+          finalBoundary,  // boundary_end reaches finalBoundary (MUST reflect actual cache)
+          grantedCount,   // newly granted amount (MUST equal storedNewCount)
           "additional-excavation"
         );
         
+        // Add boundary info to result for frontend polling
+        (result as any).previousBoundary = previousBoundary;
+        (result as any).finalBoundary = finalBoundary;
+        (result as any).newCachedCount = newCachedCount;
+        
         console.log(`[additional-excavation] Phase 8 unlock recorded: user=${requestingUserId}, account=${result.accountId}, ` +
-          `targetCount=${targetCount}, newCached=${newCachedCount}, finalBoundary=${finalBoundary}, ` +
-          `previousBoundary=${previousBoundary}, granted=${grantedCount}`);
+          `targetCount=${targetCount}, newCachedCount=${newCachedCount}, finalBoundary=${finalBoundary}, ` +
+          `previousBoundary=${previousBoundary}, granted=${grantedCount} (storedNewCount preserved)`);
       } else {
         // Normal excavation path (Stage 1, Stage 2+, etc.)
         const boundaryEnd = result.fetchedCount;
@@ -933,6 +924,27 @@ async function runJobAsync(jobId: string): Promise<void> {
         console.log(`[jobs] Recorded unlock: user=${requestingUserId}, account=${result.accountId}, stage=${jobStage}, boundary=${boundaryEnd}, granted=${grantedCount}`);
       }
     }
+
+    // Update DB with result (including boundary info for additional excavation)
+    db.prepare(`
+      UPDATE jobs
+      SET status = 'succeeded',
+          account_id = ?,
+          api_calls = ?,
+          fetched_count = ?,
+          result_json = ?,
+          resume_at = NULL,
+          resume_state = NULL,
+          finished_at = ?
+      WHERE id = ?
+    `).run(
+      result.accountId || null,
+      result.apiCalls,
+      result.fetchedCount,
+      JSON.stringify(result),
+      new Date().toISOString(),
+      jobId,
+    );
 
     console.log(
       `[jobs] Job ${jobId} SUCCEEDED token_idx=${tokenIdx}: ${result.fetchedCount} tweets, ${result.apiCalls} API calls`,

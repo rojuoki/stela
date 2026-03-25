@@ -314,6 +314,10 @@ export async function excavateEarliest(
   initialCheckpoint?: ExcavationCheckpoint | null,
   /** Job ID for token switching (optional). */
   jobId?: string,
+  /** Continuation point: start from this timestamp instead of account_created (for additional excavation) */
+  continuationStartTime?: string,
+  /** For additional excavation: the actual number of tweets needed (overrides limit for stop conditions) */
+  missingCount?: number,
 ): Promise<ExcavationResult> {
   const stats = createStats(token, onRateLimit, jobId);
   const effectiveLimit = Math.min(limit, 100);
@@ -351,13 +355,15 @@ export async function excavateEarliest(
       onProgress,
       saveCheckpoint,
       initialCheckpoint,
+      continuationStartTime,
+      missingCount,
     );
   } catch (e) {
     if (e instanceof XApiStop && e.statusCode === 403) {
       console.log(
         `[excavate] Full-archive unavailable (403) for @${username} — switching to timeline fallback`,
       );
-      return await excavateTimeline(user, effectiveLimit, stats, onProgress);
+      return await excavateTimeline(user, effectiveLimit, stats, onProgress, missingCount);
     }
     throw e;
   }
@@ -373,27 +379,31 @@ async function excavateFullArchive(
   onProgress?: (apiCalls: number) => void,
   saveCheckpoint?: (cp: ExcavationCheckpoint) => void,
   cp?: ExcavationCheckpoint | null,
+  continuationStartTime?: string,
+  missingCount?: number,
 ): Promise<ExcavationResult> {
-  const accountCreated = new Date(user.created_at);
+  // Use continuation point if provided (for additional excavation), otherwise use account_created
+  const startTime = continuationStartTime ? new Date(continuationStartTime) : new Date(user.created_at);
   const now = new Date(Date.now() - END_TIME_SAFETY_MS);
-  const startYear = accountCreated.getUTCFullYear();
+  const startYear = startTime.getUTCFullYear();
   const endYear = now.getUTCFullYear();
 
   console.log(
-    `[explore] @${user.username} account_created=${user.created_at} query="${query}"${cp ? ` (resuming from phase=${cp.phase})` : ""}`,
+    `[explore] @${user.username} start_time=${startTime.toISOString()} query="${query}"${continuationStartTime ? ' (continuation mode)' : ' (normal mode)'}${cp ? ` (resuming from phase=${cp.phase})` : ""}`,
   );
 
   // ── Restore from checkpoint ─────────────────────────
 
   const allowDeep: boolean =
-    cp?.allow_deep ?? (accountCreated.getUTCFullYear() <= 2018);
-  console.log(`[deep] account_created=${accountCreated.getUTCFullYear()} allowDeep=${allowDeep}`);
+    cp?.allow_deep ?? (startTime.getUTCFullYear() <= 2018);
+  console.log(`[deep] start_time=${startTime.getUTCFullYear()} allowDeep=${allowDeep}`);
 
   let earliestRegionStart: Date | null = null;
   let deepTriggered: boolean = cp?.deep_triggered ?? false;
   let earliestHitYear: number = cp?.earliest_hit_year ?? -1;
 
   const collected = new Map<string, XTweet>();
+  let totalStoredNew = 0;
 
   // Track whole-collected ranges to avoid duplicate probing
   interface CollectedRange {
@@ -439,7 +449,7 @@ async function excavateFullArchive(
       year++ // Simple 1-year steps
     ) {
       const yearStart =
-        year === startYear ? accountCreated : new Date(Date.UTC(year, 0, 1));
+        year === startYear ? startTime : new Date(Date.UTC(year, 0, 1));
       const yearEnd = new Date(Date.UTC(year + 1, 0, 1)); // Always 1-year window
       const yEndStr = minDate(yearEnd, now).toISOString();
 
@@ -504,7 +514,7 @@ async function excavateFullArchive(
           
           // Use the EXACT probe window for whole-collect (NOT start year only)
           try {
-            await wholeCollectFromProbe(
+            const wcResult = await wholeCollectFromProbe(
               query,
               yearStart,
               wholeCollectEnd,
@@ -516,6 +526,7 @@ async function excavateFullArchive(
               onProgress,
               user.id,
             );
+            totalStoredNew += wcResult.storedNew;
             
             // Mark this range as fully collected to avoid duplicate probes (only if whole-collect succeeded)
             wholeCollectedRanges.push({ start: yearStart, end: wholeCollectEnd });
@@ -589,7 +600,7 @@ async function excavateFullArchive(
           phase: "explore_month",
           next_year: year,
           month_scan_year: year,
-          next_month: year === startYear ? accountCreated.getUTCMonth() : 0,
+          next_month: year === startYear ? startTime.getUTCMonth() : 0,
           earliest_hit_year: year,
           zero_streak: 0,
           deep_triggered: deepTriggered,
@@ -619,7 +630,7 @@ async function excavateFullArchive(
         scanYear === skipYearProbeFor && cp?.next_month !== undefined
           ? cp.next_month
           : scanYear === startYear
-            ? accountCreated.getUTCMonth()
+            ? startTime.getUTCMonth()
             : 0;
 
       let zeroStreak =
@@ -653,8 +664,8 @@ async function excavateFullArchive(
         // This avoids requesting dates before the account (or Twitter itself)
         // existed — which the API rejects with 400.
         const mStart =
-          scanYear === startYear && m === accountCreated.getUTCMonth()
-            ? accountCreated
+          scanYear === startYear && m === startTime.getUTCMonth()
+            ? startTime
             : new Date(Date.UTC(scanYear, m, 1));
         const mEnd = new Date(Date.UTC(scanYear, m + 1, 1));
         if (mStart >= now) break;
@@ -727,7 +738,7 @@ async function excavateFullArchive(
             );
             
             try {
-              await wholeCollectFromProbe(
+              const wcResult = await wholeCollectFromProbe(
                 query,
                 mStart,
                 monthEndBounded,
@@ -739,6 +750,7 @@ async function excavateFullArchive(
                 onProgress,
                 user.id,
               );
+              totalStoredNew += wcResult.storedNew;
               
               // Mark this month range as fully collected (only if whole-collect succeeded)
               wholeCollectedRanges.push({ start: mStart, end: monthEndBounded });
@@ -869,18 +881,23 @@ async function excavateFullArchive(
     `[explore] @${user.username} earliest region: ${earliestRegionStart.toISOString().slice(0, 10)} (${stats.totalCalls} calls so far, collected=${collected.size})`,
   );
 
-  // ── Early completion check: Skip collect phase if whole-collect already satisfied limit ──
-  if (collected.size >= limit) {
+  // ── Early completion check: Skip collect phase if whole-collect already satisfied target ──
+  // Use missingCount if provided (additional excavation), otherwise use limit (normal excavation)
+  const effectiveTargetCount = missingCount ?? limit;
+  const earlyTargetMet = missingCount != null
+    ? totalStoredNew >= effectiveTargetCount
+    : collected.size >= effectiveTargetCount;
+  if (earlyTargetMet) {
     console.log(
-      `[explore] @${user.username} target already satisfied by whole-collect optimizations (${collected.size} >= ${limit})`,
+      `[explore] @${user.username} target already satisfied by whole-collect optimizations (collected=${collected.size} storedNew=${totalStoredNew} target=${effectiveTargetCount})`,
     );
     
     // Sort and finalize the results
     const sorted = [...collected.values()]
       .sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime())
-      .slice(0, limit);
+      .slice(0, effectiveTargetCount);
 
-    const storedNewCount = storeTweets(user.id, sorted, []); // Tweets already stored during whole-collect
+    storeTweets(user.id, sorted, []); // Safety net — tweets already stored during whole-collect
     
     return {
       username: user.username,
@@ -890,7 +907,7 @@ async function excavateFullArchive(
       fetchedCount: sorted.length,
       stopReason: "OK_LIMIT_REACHED",
       apiCalls: stats.totalCalls,
-      storedNewCount,
+      storedNewCount: totalStoredNew,
       errors: stats.errors,
       acquisitionMode: "full_archive",
       deepTriggered: false,
@@ -956,14 +973,14 @@ async function excavateFullArchive(
     split_window_queue: splitQueue ?? [],
   });
 
-  const standardStop = await collectWindowPass(
+  const collectResult = await collectWindowPass(
     query,
     earliestRegionStart,
     now,
     stats,
     collected,
     MAX_API_CALLS,
-    limit,
+    effectiveTargetCount, // Use effective target count instead of limit
     user.username,
     onProgress,
     {
@@ -976,6 +993,7 @@ async function excavateFullArchive(
       resumeNextToken: collectResumeNextToken,
       resumePagesFetched: collectResumePagesFetched,
       resumeCheckpoint: cp || undefined, // Pass full checkpoint for split queue access
+      storedNewTarget: missingCount != null ? Math.max(0, missingCount - totalStoredNew) : undefined,
       // Window-level checkpoint: clears page-level fields (collect_next_token = null).
       saveWindowCheckpoint: saveCheckpoint
         ? (ws, sd, ids, stag, splitQ) => saveCheckpoint(makeCollectCp(ws, sd, ids, undefined, stag, splitQ))
@@ -987,7 +1005,8 @@ async function excavateFullArchive(
         : undefined,
     },
   );
-  let stopReason: StopReason = standardStop;
+  totalStoredNew += collectResult.storedNewCount;
+  let stopReason: StopReason = collectResult.stopReason;
 
   // ── Phase C: Deep backfill (DISABLED) ──
   // Disabled: Main explore→collect pipeline already guarantees earliest region coverage.
@@ -999,15 +1018,15 @@ async function excavateFullArchive(
     stopReason = "MAX_API_CALLS_REACHED";
   }
 
-  // Merge all phases: sort ascending, take earliest `limit`.
+  // Merge all phases: sort ascending, take earliest `effectiveTargetCount`.
   const sorted = [...collected.values()]
     .sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime())
-    .slice(0, limit);
+    .slice(0, effectiveTargetCount);
 
-  const storedNewCount = storeTweets(user.id, sorted, []); // Media already stored during incremental saves
+  storeTweets(user.id, sorted, []); // Safety net — tweets already stored during incremental saves
 
   console.log(
-    `[excavate] @${user.username} done: fetched=${sorted.length} stored_new=${storedNewCount} api_calls=${stats.totalCalls} mode=full_archive stop=${stopReason}`,
+    `[excavate] @${user.username} done: fetched=${sorted.length} stored_new=${totalStoredNew} api_calls=${stats.totalCalls} mode=full_archive stop=${stopReason}`,
   );
 
   return {
@@ -1018,7 +1037,7 @@ async function excavateFullArchive(
     fetchedCount: sorted.length,
     stopReason,
     apiCalls: stats.totalCalls,
-    storedNewCount,
+    storedNewCount: totalStoredNew,
     errors: stats.errors,
     acquisitionMode: "full_archive",
     deepTriggered: false, // Deep backfill is disabled
@@ -1074,6 +1093,13 @@ interface CollectCheckpointOpts {
     currentSpanDays: number,
     stag: { count: number; lastWindowKey: string | null },
   ) => void;
+
+  /**
+   * When set, stop collect when storedNewAccumulated reaches this value
+   * instead of when collected.size reaches collectLimit.
+   * Used for additional excavation where the goal is N genuinely new DB inserts.
+   */
+  storedNewTarget?: number;
 }
 
 /**
@@ -1104,9 +1130,9 @@ async function wholeCollectFromProbe(
   probeResponse: TimelinePage,
   onProgress?: (apiCalls: number) => void,
   userId?: string,
-): Promise<number> {
+): Promise<{ uniqueNew: number; storedNew: number }> {
   if (stats.totalCalls >= callCeiling) {
-    return 0; // No budget left
+    return { uniqueNew: 0, storedNew: 0 };
   }
 
   console.log(
@@ -1115,12 +1141,13 @@ async function wholeCollectFromProbe(
 
   const sizeBefore = collected.size;
   let totalPages = 0;
+  let storedNew = 0;
 
   // Page 1: Reuse probe response (avoid duplicate API call)
   if (probeResponse.tweets.length > 0) {
     // Store tweets immediately for persistence
     if (userId) {
-      storeTweets(userId, probeResponse.tweets, probeResponse.media);
+      storedNew += storeTweets(userId, probeResponse.tweets, probeResponse.media);
     }
 
     // Add to collection (Map handles deduplication)
@@ -1203,10 +1230,10 @@ async function wholeCollectFromProbe(
 
   const uniqueNew = collected.size - sizeBefore;
   console.log(
-    `[whole-collect] @${username} completed: pages=${totalPages} uniqueNew=${uniqueNew} total_calls=${stats.totalCalls}`,
+    `[whole-collect] @${username} completed: pages=${totalPages} uniqueNew=${uniqueNew} storedNew=${storedNew} total_calls=${stats.totalCalls}`,
   );
 
-  return uniqueNew;
+  return { uniqueNew, storedNew };
 }
 
 /**
@@ -1227,7 +1254,7 @@ async function collectWindowPass(
   username: string,
   onProgress?: (apiCalls: number) => void,
   checkpointOpts?: CollectCheckpointOpts,
-): Promise<StopReason> {
+): Promise<{ stopReason: StopReason; storedNewCount: number }> {
   // ── Separated state management ──────────────────────────────────────────
   
   // Normal window progression (independent of splits)
@@ -1246,6 +1273,13 @@ async function collectWindowPass(
   // Note: Split parent tweets are no longer tracked - each window processes independently
   
   let stopReason: StopReason = "ACCOUNT_HAS_LESS_THAN_LIMIT";
+  let storedNewAccumulated = 0;
+
+  // For additional excavation: stop on actual DB-new count, not fetched count
+  const useStoredNewStop = checkpointOpts?.storedNewTarget != null;
+  const targetReached = () => useStoredNewStop
+    ? storedNewAccumulated >= checkpointOpts!.storedNewTarget!
+    : collected.size >= collectLimit;
 
   // True only for the very first window when a mid-window pagination token was saved.
   // After the first window completes (or if no token was saved), this is always false.
@@ -1281,7 +1315,7 @@ async function collectWindowPass(
     console.log(
       `[collect] @${username} collect phase already complete (resumeFrom=${normalWindowStart.toISOString().slice(0, 10)} >= end=${end.toISOString().slice(0, 10)})`,
     );
-    return "ACCOUNT_HAS_LESS_THAN_LIMIT";
+    return { stopReason: "ACCOUNT_HAS_LESS_THAN_LIMIT", storedNewCount: 0 };
   }
 
   if (checkpointOpts?.resumeFrom || splitQueue.length > 0) {
@@ -1297,7 +1331,7 @@ async function collectWindowPass(
   }
 
   while (
-    collected.size < collectLimit &&
+    !targetReached() &&
     stats.totalCalls < callCeiling &&
     (splitQueue.length > 0 || normalWindowStart < end)
   ) {
@@ -1326,10 +1360,10 @@ async function collectWindowPass(
       if (pendingNormalWindowAdvancement && splitQueue.length === 0) {
         // ── STOP CHECK BEFORE PENDING ADVANCEMENT APPLICATION ─────────────────
         // Final validation before applying queued normal window advancement
-        if (collected.size >= collectLimit) {
+        if (targetReached()) {
           stopReason = "OK_LIMIT_REACHED";
           console.log(
-            `[collect] @${username} target reached before pending advancement (${collected.size} >= ${collectLimit}) — canceling future window advance`,
+            `[collect] @${username} target reached before pending advancement (collected=${collected.size} storedNew=${storedNewAccumulated} limit=${collectLimit}) — canceling future window advance`,
           );
           break;
         }
@@ -1482,7 +1516,7 @@ async function collectWindowPass(
 
       // Store page 1 tweets immediately so they survive a 429 on the next call.
       if (checkpointOpts?.userId && page.tweets.length > 0) {
-        storeTweets(checkpointOpts.userId, page.tweets, page.media);
+        storedNewAccumulated += storeTweets(checkpointOpts.userId, page.tweets, page.media);
       }
 
       // Save page checkpoint BEFORE making the next API call (if more pages remain).
@@ -1543,7 +1577,7 @@ async function collectWindowPass(
 
       // Store this page's tweets immediately for the same reason.
       if (checkpointOpts?.userId && nextPage.tweets.length > 0) {
-        storeTweets(checkpointOpts.userId, nextPage.tweets, nextPage.media);
+        storedNewAccumulated += storeTweets(checkpointOpts.userId, nextPage.tweets, nextPage.media);
       }
 
       // Save page checkpoint when more pages remain.
@@ -1719,10 +1753,10 @@ async function collectWindowPass(
     // ── STOP CHECK AFTER EACH SPLIT CHILD WINDOW ───────────────────────────
     // Check after each split child completes to prevent unnecessary processing
     if (isProcessingSplit) {
-      if (collected.size >= collectLimit) {
+      if (targetReached()) {
         stopReason = "OK_LIMIT_REACHED";
         console.log(
-          `[collect][split] @${username} target reached after child window (${collected.size} >= ${collectLimit}) — stopping split processing`,
+          `[collect][split] @${username} target reached after child window (collected=${collected.size} storedNew=${storedNewAccumulated} limit=${collectLimit}) — stopping split processing`,
         );
         break;
       }
@@ -1775,7 +1809,7 @@ async function collectWindowPass(
     }
 
     // ── STOP CHECK BEFORE ANY ADVANCEMENT ───────────────────────────────────
-    if (collected.size >= collectLimit) {
+    if (targetReached()) {
       stopReason = "OK_LIMIT_REACHED";
       break;
     }
@@ -1790,7 +1824,7 @@ async function collectWindowPass(
     stopReason = "MAX_API_CALLS_REACHED";
   }
 
-  return stopReason;
+  return { stopReason, storedNewCount: storedNewAccumulated };
 }
 
 // ─── Fallback (timeline) ────────────────────────────────
@@ -1800,14 +1834,19 @@ async function excavateTimeline(
   limit: number,
   stats: ApiCallStats,
   onProgress?: (apiCalls: number) => void,
+  missingCount?: number,
 ): Promise<ExcavationResult> {
+  // Use missingCount if provided (additional excavation), otherwise use limit (normal excavation)
+  const effectiveTargetCount = missingCount ?? limit;
+  
   console.log(
-    `[excavate] @${user.username} timeline fallback — note: limited to ~3200 most recent tweets; 'earliest' is not guaranteed`,
+    `[excavate] @${user.username} timeline fallback — note: limited to ~3200 most recent tweets; 'earliest' is not guaranteed; target=${effectiveTargetCount}`,
   );
 
   const accountCreated = new Date(user.created_at);
   const now = new Date();
   const collected = new Map<string, XTweet>();
+  let totalStoredNew = 0;
   let spanDays = FALLBACK_INITIAL_SPAN_DAYS;
   let windowStart = accountCreated;
   let stopReason: StopReason = "ACCOUNT_HAS_LESS_THAN_LIMIT";
@@ -1845,7 +1884,7 @@ async function excavateTimeline(
 
     // Store tweets with media immediately
     if (page.tweets.length > 0) {
-      storeTweets(user.id, page.tweets, page.media);
+      totalStoredNew += storeTweets(user.id, page.tweets, page.media);
     }
 
     // Sort tweets by created_at (earliest first) for consistent processing
@@ -1859,7 +1898,7 @@ async function excavateTimeline(
     }
 
     let nextToken = page.nextToken;
-    while (nextToken && collected.size < limit && stats.totalCalls < MAX_API_CALLS) {
+    while (nextToken && collected.size < effectiveTargetCount && stats.totalCalls < MAX_API_CALLS) {
       try {
         page = await getUserTweetsInWindow(
           user.id,
@@ -1879,7 +1918,7 @@ async function excavateTimeline(
       
       // Store paginated tweets with media immediately  
       if (page.tweets.length > 0) {
-        storeTweets(user.id, page.tweets, page.media);
+        totalStoredNew += storeTweets(user.id, page.tweets, page.media);
       }
       
       // Sort paginated tweets by created_at (earliest first) for consistent processing
@@ -1894,7 +1933,7 @@ async function excavateTimeline(
       nextToken = page.nextToken;
     }
 
-    if (collected.size >= limit) {
+    if (collected.size >= effectiveTargetCount) {
       stopReason = "OK_LIMIT_REACHED";
       break;
     }
@@ -1917,12 +1956,12 @@ async function excavateTimeline(
 
   const sorted = [...collected.values()]
     .sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime())
-    .slice(0, limit);
+    .slice(0, effectiveTargetCount);
 
-  const storedNewCount = storeTweets(user.id, sorted, []); // Media already stored during incremental saves
+  storeTweets(user.id, sorted, []); // Safety net — tweets already stored during incremental saves
 
   console.log(
-    `[excavate] @${user.username} done (fallback): fetched=${sorted.length} stored_new=${storedNewCount} api_calls=${stats.totalCalls} stop=${stopReason}`,
+    `[excavate] @${user.username} done (fallback): fetched=${sorted.length} stored_new=${totalStoredNew} api_calls=${stats.totalCalls} stop=${stopReason}`,
   );
 
   return {
@@ -1933,7 +1972,7 @@ async function excavateTimeline(
     fetchedCount: sorted.length,
     stopReason,
     apiCalls: stats.totalCalls,
-    storedNewCount,
+    storedNewCount: totalStoredNew,
     errors: stats.errors,
     acquisitionMode: "fallback",
   };

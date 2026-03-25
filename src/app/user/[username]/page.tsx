@@ -175,26 +175,38 @@ export default function UserPage() {
       const extendResponse = await res.json();
 
       if (extendResponse.executionMode === "grant_only") {
-        // Grant-only path: immediate completion using shared helper
+        // Grant-only path: show excavating screen briefly for consistent UX
         const previousBoundary = extendResponse.boundary.previous;
         const newBoundary = extendResponse.boundary.new;
         
+        console.log("[DEBUG] handleExcavateMore: grant_only - showing excavating screen briefly");
+        setUiPhase("excavating");
+        setJobInfo("Processing additional posts...");
+        setJobPhase("running");
         setCacheHit(false);
-        setJobPhase(null);
+        
+        // Brief delay for consistent UX (both grant_only and excavate_more show excavating screen)
+        await sleep(ARTIFICIAL_DELAY_MS);
         
         // Use shared helper for consistent newly unlocked range display
         const jobInfoText = `${extendResponse.range.count} posts · ${extendResponse.range.rangeString}`;
         await showNewlyUnlockedRange(accountData.account_id, previousBoundary, newBoundary, jobInfoText);
         
+        setJobPhase(null);
         fetchCredits();
         
       } else if (extendResponse.executionMode === "excavate_more") {
         // Excavate path: start polling job
         console.log("[DEBUG] handleExcavateMore: Switching to excavate_more mode, jobId:", extendResponse.jobId);
+        
+        // 即座に採掘中画面に遷移（grant_onlyと統一されたUX）
+        setUiPhase("excavating");
         setJobInfo("Excavating additional posts...");
+        setJobPhase("running");
+        
         console.log("[DEBUG] handleExcavateMore: About to setActiveJobId for polling:", extendResponse.jobId);
         setActiveJobId(extendResponse.jobId);
-        // uiPhase will be managed by polling logic
+        // ポーリングで採掘完了まで採掘中画面を維持
       }
 
       setIsExtending(false);
@@ -426,56 +438,26 @@ export default function UserPage() {
             `[poll] stop jobId=${activeJobId} reason=succeeded fetched=${job.fetchedCount}`,
           );
           
-          // DEBUG: Log all the values we need to check
-          console.log("[DEBUG] Polling success - checking conditions:");
-          console.log("[DEBUG] - isExtending:", isExtending);
-          console.log("[DEBUG] - job.result:", job.result);
-          console.log("[DEBUG] - job.result?.previousBoundary:", job.result?.previousBoundary);
-          console.log("[DEBUG] - job.result?.finalBoundary:", job.result?.finalBoundary);
-          console.log("[DEBUG] - cancelled:", cancelled);
-          
           const accountId = job.result?.accountId;
-          console.log("[DEBUG] - accountId:", accountId);
           
           if (accountId && !cancelled) {
-            console.log("[DEBUG] Passed accountId && !cancelled check");
-            
             if (isExtending && job.result?.previousBoundary != null && job.result?.finalBoundary != null) {
-              console.log("[DEBUG] ✓ ENTERED newly unlocked range helper path");
-              console.log("[DEBUG] - previousBoundary:", job.result.previousBoundary);
-              console.log("[DEBUG] - finalBoundary:", job.result.finalBoundary);
+              console.log(`[additional-excavation] Using newly unlocked range: ${job.result.previousBoundary} → ${job.result.finalBoundary}`);
               
               // Use shared helper for newly unlocked range display (excavate_more success)
               const jobInfoText = `${job.fetchedCount} posts · ${job.apiCalls} API calls`;
-              console.log("[DEBUG] About to call showNewlyUnlockedRange with:", {
-                accountId,
-                previousBoundary: job.result.previousBoundary,
-                finalBoundary: job.result.finalBoundary,
-                jobInfoText
-              });
               await showNewlyUnlockedRange(accountId, job.result.previousBoundary, job.result.finalBoundary, jobInfoText);
-              console.log("[DEBUG] showNewlyUnlockedRange completed");
             } else {
-              console.log("[DEBUG] ✗ FELL BACK to normal full-results path");
-              console.log("[DEBUG] - Condition breakdown:");
-              console.log("[DEBUG]   - isExtending:", isExtending);
-              console.log("[DEBUG]   - previousBoundary != null:", job.result?.previousBoundary != null);
-              console.log("[DEBUG]   - finalBoundary != null:", job.result?.finalBoundary != null);
+              console.log(`[excavation] Fallback to full results display: fetched=${job.fetchedCount}`);
               
               // Fallback for regular excavation (non-extending)
               const loaded = await loadTweets(accountId);
-              console.log("[DEBUG] Full-results fallback: About to setTweets with loaded data, length:", loaded.length);
               setTweets(loaded);
               setJobInfo(`${job.fetchedCount} posts · ${job.apiCalls} API calls`);
               setStatus("done");
               setCurrentBoundary(job.result?.finalBoundary || loaded.length);
-              console.log("[DEBUG] Full-results fallback: About to setUiPhase('results')");
               setUiPhase("results");
             }
-          } else {
-            console.log("[DEBUG] Failed accountId && !cancelled check:");
-            console.log("[DEBUG] - accountId truthy:", !!accountId);
-            console.log("[DEBUG] - !cancelled:", !cancelled);
           }
           
           if (!cancelled) {

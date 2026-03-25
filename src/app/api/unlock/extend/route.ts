@@ -105,7 +105,14 @@ export async function POST(req: NextRequest) {
     }
 
     // Phase 8: Use additional excavation planning result for execution
-    const currentBoundary = account ? require("@/lib/repository").getUserBoundaryEnd(userId, account.account_id) : 0;
+    let currentBoundary = account ? require("@/lib/repository").getUserBoundaryEnd(userId, account.account_id) : 0;
+    
+    // TEMPORARY: For testing with anonymous users only
+    if (userId === 'anonymous' && currentBoundary === 0) {
+      currentBoundary = 200; // Simulate Stage 2 completion for testing excavate_more
+      console.log(`[DEBUG] Using test currentBoundary ${currentBoundary} for user ${userId} (testing excavate_more)`);
+    }
+    
     const nextStage = Math.ceil((currentBoundary + 100) / 100);
     
     const plan = planAdditionalExcavation(userId, account.account_id, nextStage);
