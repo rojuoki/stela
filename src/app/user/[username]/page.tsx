@@ -54,8 +54,8 @@ interface JobResponse {
 /** True only when the dev panel is enabled at build time. */
 const DEV_PANEL = process.env.NEXT_PUBLIC_DEV_PANEL === "1";
 
-/** Artificial delay (0.5–1.0s) for UX consistency */
-const ARTIFICIAL_DELAY_MS = 750;
+/** Minimum time the excavating screen stays visible before transitioning to results. */
+const MIN_EXCAVATING_MS = 3000;
 
 /** Fixed polling interval — does NOT change based on job status. */
 const POLL_INTERVAL_MS = 2500;
@@ -124,14 +124,30 @@ export default function UserPage() {
   const [isExtending, setIsExtending] = useState(false);
   const [currentBoundary, setCurrentBoundary] = useState<number | null>(null);
 
+  // Extend flow context — survives across React state batching and polling closures.
+  // Set when extend starts, read on polling completion, cleared after finalize.
+  const extendContextRef = useRef<{
+    previousBoundary: number;
+    accountId: string;
+  } | null>(null);
+
+  // Timestamp when the excavating screen first appeared (for minimum display duration)
+  const excavatingStartedAtRef = useRef<number>(0);
+
   // Basic validation
   if (!username || typeof username !== "string") {
     notFound();
   }
 
+  const ensureMinExcavatingTime = async () => {
+    const elapsed = Date.now() - excavatingStartedAtRef.current;
+    if (elapsed < MIN_EXCAVATING_MS) {
+      await sleep(MIN_EXCAVATING_MS - elapsed);
+    }
+  };
+
   const fetchCredits = async () => {
     try {
-      // Use UserContext's refreshCredits instead of direct API call
       refreshCredits();
     } catch (e) {
       console.error("Failed to fetch credits:", e);
@@ -153,6 +169,7 @@ export default function UserPage() {
     setJobPhase("running");
     setResumeAt(null);
     console.log("[DEBUG] handleExcavateMore: About to setUiPhase('excavating')");
+    excavatingStartedAtRef.current = Date.now();
     setUiPhase("excavating");
 
     try {
@@ -180,36 +197,30 @@ export default function UserPage() {
         const newBoundary = extendResponse.boundary.new;
         
         console.log("[DEBUG] handleExcavateMore: grant_only - showing excavating screen briefly");
-        setUiPhase("excavating");
         setJobInfo("Processing additional posts...");
         setJobPhase("running");
         setCacheHit(false);
         
-        // Brief delay for consistent UX (both grant_only and excavate_more show excavating screen)
-        await sleep(ARTIFICIAL_DELAY_MS);
-        
-        // Use shared helper for consistent newly unlocked range display
+        await ensureMinExcavatingTime();
         const jobInfoText = `${extendResponse.range.count} posts · ${extendResponse.range.rangeString}`;
         await showNewlyUnlockedRange(accountData.account_id, previousBoundary, newBoundary, jobInfoText);
         
         setJobPhase(null);
+        setIsExtending(false);
         fetchCredits();
         
       } else if (extendResponse.executionMode === "excavate_more") {
-        // Excavate path: start polling job
-        console.log("[DEBUG] handleExcavateMore: Switching to excavate_more mode, jobId:", extendResponse.jobId);
-        
-        // 即座に採掘中画面に遷移（grant_onlyと統一されたUX）
         setUiPhase("excavating");
         setJobInfo("Excavating additional posts...");
         setJobPhase("running");
         
-        console.log("[DEBUG] handleExcavateMore: About to setActiveJobId for polling:", extendResponse.jobId);
+        extendContextRef.current = {
+          previousBoundary: extendResponse.planning.currentVisibleBoundary,
+          accountId: extendResponse.accountId,
+        };
         setActiveJobId(extendResponse.jobId);
-        // ポーリングで採掘完了まで採掘中画面を維持
+        // isExtending stays true as UI guard; cleared on polling completion
       }
-
-      setIsExtending(false);
     } catch {
       setStatus("failed");
       setError("Network error");
@@ -393,7 +404,6 @@ export default function UserPage() {
     }
 
     console.log(`[poll] start jobId=${activeJobId}`);
-    console.log("[DEBUG] Polling effect: Starting with isExtending =", isExtending);
 
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout> | null = null;
@@ -441,16 +451,17 @@ export default function UserPage() {
           const accountId = job.result?.accountId;
           
           if (accountId && !cancelled) {
-            if (isExtending && job.result?.previousBoundary != null && job.result?.finalBoundary != null) {
-              console.log(`[additional-excavation] Using newly unlocked range: ${job.result.previousBoundary} → ${job.result.finalBoundary}`);
+            await ensureMinExcavatingTime();
+
+            if (extendContextRef.current) {
+              const ctx = extendContextRef.current;
+              const finalBoundary = job.result?.finalBoundary ?? ctx.previousBoundary;
+              console.log(`[extend-finalize] ${ctx.previousBoundary} → ${finalBoundary}`);
               
-              // Use shared helper for newly unlocked range display (excavate_more success)
               const jobInfoText = `${job.fetchedCount} posts · ${job.apiCalls} API calls`;
-              await showNewlyUnlockedRange(accountId, job.result.previousBoundary, job.result.finalBoundary, jobInfoText);
+              await showNewlyUnlockedRange(ctx.accountId, ctx.previousBoundary, finalBoundary, jobInfoText);
+              extendContextRef.current = null;
             } else {
-              console.log(`[excavation] Fallback to full results display: fetched=${job.fetchedCount}`);
-              
-              // Fallback for regular excavation (non-extending)
               const loaded = await loadTweets(accountId);
               setTweets(loaded);
               setJobInfo(`${job.fetchedCount} posts · ${job.apiCalls} API calls`);
@@ -461,13 +472,11 @@ export default function UserPage() {
           }
           
           if (!cancelled) {
-            console.log("[DEBUG] Cleaning up polling state");
             setCacheHit(false);
             setJobPhase(null);
             setResumeAt(null);
             fetchCredits();
             setActiveJobId(null);
-            console.log("[DEBUG] About to setIsExtending(false)");
             setIsExtending(false);
           }
           return;
@@ -482,7 +491,9 @@ export default function UserPage() {
           setJobPhase(null);
           setResumeAt(null);
           setActiveJobId(null);
-          setUiPhase("preview"); // Phase 5: Return to preview on failure
+          setIsExtending(false);
+          extendContextRef.current = null;
+          setUiPhase("preview");
           return;
         }
 
@@ -495,7 +506,9 @@ export default function UserPage() {
           setJobPhase(null);
           setResumeAt(null);
           setActiveJobId(null);
-          setUiPhase("preview"); // Phase 5: Return to preview on cancel
+          setIsExtending(false);
+          extendContextRef.current = null;
+          setUiPhase("preview");
           return;
         }
 
@@ -539,11 +552,10 @@ export default function UserPage() {
 
     return () => {
       console.log(`[poll] cleanup jobId=${activeJobId}`);
-      console.log("[DEBUG] Polling cleanup: isExtending was", isExtending);
       cancelled = true;
       if (timer) clearTimeout(timer);
     };
-  }, [activeJobId, isExtending]);
+  }, [activeJobId]);
 
   const handleExcavate = async (force = false) => {
     if (!accountData || accountData.protected) return;
@@ -562,7 +574,8 @@ export default function UserPage() {
     setJobPhase("running");
     setResumeAt(null);
     console.log("[DEBUG] handleExcavate: About to setUiPhase('excavating')");
-    setUiPhase("excavating"); // Phase 5: Switch to excavating view immediately
+    excavatingStartedAtRef.current = Date.now();
+    setUiPhase("excavating");
 
     try {
       const res = await apiFetch("/api/unlock", {
@@ -584,7 +597,7 @@ export default function UserPage() {
 
       if (!force && unlock.status === "cache-hit" && unlock.accountId) {
         setJobInfo("Unlocking…");
-        await sleep(ARTIFICIAL_DELAY_MS);
+        await ensureMinExcavatingTime();
         const loaded = await loadTweets(unlock.accountId);
         setTweets(loaded);
         setJobInfo(`${loaded.length} posts · cached`);
