@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect } from "react";
 import { useParams, useRouter } from "next/navigation";
 import Link from "next/link";
 import { notFound } from "next/navigation";
@@ -8,8 +8,6 @@ import type {
   TweetData,
   AccountData,
   AccountStatus,
-  Status,
-  JobPhase,
 } from "../../../components/types";
 import { EngagementChart } from "../../../components/EngagementChart";
 import { TweetCard } from "../../../components/TweetCard";
@@ -18,47 +16,8 @@ import { JobStatus } from "../../../components/JobStatus";
 import { apiFetch } from "../../../lib/apiFetch";
 import { useUser } from "../../../contexts/UserContext";
 
-interface UnlockResponse {
-  jobId: string | null;
-  status: "queued" | "attached" | "cache-hit";
-  accountId?: string;
-  cachedCount?: number;
-  freeReUnlock?: boolean;
-}
-
-interface JobResponse {
-  jobId: string;
-  status:
-    | "queued"
-    | "running"
-    | "waiting_rate_limit"
-    | "succeeded"
-    | "failed"
-    | "canceled";
-  username: string;
-  fetchedCount: number;
-  apiCalls: number;
-  resumeAt?: string | null;
-  queuePosition?: number | null;
-  runningJobId?: string | null;
-  error?: { code: string; message: string };
-  result?: {
-    accountId: string;
-    fetchedCount: number;
-    stopReason: string;
-    previousBoundary?: number;
-    finalBoundary?: number;
-  };
-}
-
 /** True only when the dev panel is enabled at build time. */
 const DEV_PANEL = process.env.NEXT_PUBLIC_DEV_PANEL === "1";
-
-/** Minimum time the excavating screen stays visible before transitioning to results. */
-const MIN_EXCAVATING_MS = 3000;
-
-/** Fixed polling interval — does NOT change based on job status. */
-const POLL_INTERVAL_MS = 2500;
 
 const DUMMY_CHART_HEIGHTS = [35, 62, 48, 75, 30, 88, 55, 42, 70, 25, 60, 45, 82, 38, 67, 52, 90, 33, 58, 44];
 
@@ -70,27 +29,6 @@ const DUMMY_TWEET_STATS = [
   { likes: 9, retweets: 1, replies: 3 },
 ];
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((r) => setTimeout(r, ms));
-}
-
-/**
- * Format the account creation date for display.
- */
-function formatJoinDate(createdAt: string | null): string {
-  if (!createdAt) return "Date unknown";
-  
-  try {
-    const date = new Date(createdAt);
-    return date.toLocaleDateString("en-US", { 
-      year: "numeric", 
-      month: "long" 
-    });
-  } catch {
-    return "Date unknown";
-  }
-}
-
 export default function UserPage() {
   const params = useParams();
   const router = useRouter();
@@ -99,78 +37,29 @@ export default function UserPage() {
   // User context - MUST be called before any early returns
   const { user, credits, subscription, refreshCredits } = useUser();
 
-  // UI State for different phases
-  const [uiPhase, setUiPhase] = useState<"preview" | "excavating" | "results">("preview");
-  
   // Account state
   const [accountStatus, setAccountStatus] = useState<AccountStatus>("loading");
   const [accountData, setAccountData] = useState<AccountData | null>(null);
   const [accountError, setAccountError] = useState<string | null>(null);
 
-  // Excavation state
-  const [status, setStatus] = useState<Status>("idle");
   const [error, setError] = useState<string | null>(null);
   const [tweets, setTweets] = useState<TweetData[]>([]);
   const [jobInfo, setJobInfo] = useState<string>("");
-  const [cacheHit, setCacheHit] = useState(false);
-  const [activeJobId, setActiveJobId] = useState<string | null>(null);
-  const [jobPhase, setJobPhase] = useState<JobPhase>(null);
-  const [resumeAt, setResumeAt] = useState<string | null>(null);
   const [isAlreadyUnlocked, setIsAlreadyUnlocked] = useState(false);
   const [checkingUnlockStatus, setCheckingUnlockStatus] = useState(false);
 
-  // Additional excavation state
   const [showExtendModal, setShowExtendModal] = useState(false);
-  const [isExtending, setIsExtending] = useState(false);
   const [currentBoundary, setCurrentBoundary] = useState<number | null>(null);
 
-  // Extend flow context — survives across React state batching and polling closures.
-  // Set when extend starts, read on polling completion, cleared after finalize.
-  const extendContextRef = useRef<{
-    previousBoundary: number;
-    accountId: string;
-  } | null>(null);
-
-  // Timestamp when the excavating screen first appeared (for minimum display duration)
-  const excavatingStartedAtRef = useRef<number>(0);
-
-  // Basic validation
   if (!username || typeof username !== "string") {
     notFound();
   }
 
-  const ensureMinExcavatingTime = async () => {
-    const elapsed = Date.now() - excavatingStartedAtRef.current;
-    if (elapsed < MIN_EXCAVATING_MS) {
-      await sleep(MIN_EXCAVATING_MS - elapsed);
-    }
-  };
-
-  const fetchCredits = async () => {
-    try {
-      refreshCredits();
-    } catch (e) {
-      console.error("Failed to fetch credits:", e);
-    }
-  };
-
   const handleExcavateMore = async () => {
     if (!accountData || !user || credits <= 0) return;
 
-    console.log("[DEBUG] handleExcavateMore: Starting excavate more flow");
     setShowExtendModal(false);
-    console.log("[DEBUG] handleExcavateMore: About to setIsExtending(true)");
-    setIsExtending(true);
-    console.log("[DEBUG] handleExcavateMore: About to setActiveJobId(null)");
-    setActiveJobId(null);
-    setStatus("running");
     setError(null);
-    setJobInfo("Starting additional excavation...");
-    setJobPhase("running");
-    setResumeAt(null);
-    console.log("[DEBUG] handleExcavateMore: About to setUiPhase('excavating')");
-    excavatingStartedAtRef.current = Date.now();
-    setUiPhase("excavating");
 
     try {
       const res = await apiFetch("/api/unlock/extend", {
@@ -181,52 +70,26 @@ export default function UserPage() {
 
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
-        setStatus("failed");
         setError(data.error || `HTTP ${res.status}`);
-        setJobPhase(null);
-        setUiPhase("results");
-        setIsExtending(false);
         return;
       }
 
       const extendResponse = await res.json();
 
       if (extendResponse.executionMode === "grant_only") {
-        // Grant-only path: show excavating screen briefly for consistent UX
-        const previousBoundary = extendResponse.boundary.previous;
-        const newBoundary = extendResponse.boundary.new;
-        
-        console.log("[DEBUG] handleExcavateMore: grant_only - showing excavating screen briefly");
-        setJobInfo("Processing additional posts...");
-        setJobPhase("running");
-        setCacheHit(false);
-        
-        await ensureMinExcavatingTime();
-        const jobInfoText = `${extendResponse.range.count} posts · ${extendResponse.range.rangeString}`;
-        await showNewlyUnlockedRange(accountData.account_id, previousBoundary, newBoundary, jobInfoText);
-        
-        setJobPhase(null);
-        setIsExtending(false);
-        fetchCredits();
-        
+        sessionStorage.setItem("stela-extend-result", JSON.stringify({
+          boundary: extendResponse.boundary,
+          range: extendResponse.range,
+        }));
+        router.push(`/excavating?flow=extend-granted&username=${encodeURIComponent(accountData.username)}`);
       } else if (extendResponse.executionMode === "excavate_more") {
-        setUiPhase("excavating");
-        setJobInfo("Excavating additional posts...");
-        setJobPhase("running");
-        
-        extendContextRef.current = {
+        sessionStorage.setItem("stela-extend-result", JSON.stringify({
           previousBoundary: extendResponse.planning.currentVisibleBoundary,
-          accountId: extendResponse.accountId,
-        };
-        setActiveJobId(extendResponse.jobId);
-        // isExtending stays true as UI guard; cleared on polling completion
+        }));
+        router.push(`/excavating?flow=extend&username=${encodeURIComponent(accountData.username)}&jobId=${extendResponse.jobId}`);
       }
     } catch {
-      setStatus("failed");
       setError("Network error");
-      setJobPhase(null);
-      setUiPhase("results");
-      setIsExtending(false);
     }
   };
 
@@ -279,49 +142,11 @@ export default function UserPage() {
     return [];
   };
 
-  /**
-   * Shared helper for displaying newly unlocked range after successful unlock operations
-   */
-  const showNewlyUnlockedRange = async (accountId: string, previousBoundary: number, finalBoundary: number, jobInfo?: string) => {
-    console.log("[DEBUG] showNewlyUnlockedRange: Called with:", {
-      accountId,
-      previousBoundary,
-      finalBoundary,
-      jobInfo
-    });
-    
-    const rangeStart = previousBoundary + 1;
-    const rangeEnd = finalBoundary;
-    console.log("[DEBUG] showNewlyUnlockedRange: Calculated range:", { rangeStart, rangeEnd });
-    
-    // Load tweets for the newly unlocked range
-    console.log("[DEBUG] showNewlyUnlockedRange: Loading tweets for range...");
-    const loadedTweets = await loadTweets(accountId, rangeStart, rangeEnd);
-    console.log("[DEBUG] showNewlyUnlockedRange: Loaded tweets count:", loadedTweets.length);
-    
-    // Update UI state
-    console.log("[DEBUG] showNewlyUnlockedRange: About to setTweets with", loadedTweets.length, "tweets");
-    setTweets(loadedTweets);
-    setCurrentBoundary(finalBoundary);
-    const finalJobInfo = jobInfo || `${loadedTweets.length} posts · ${rangeStart}–${rangeEnd}`;
-    console.log("[DEBUG] showNewlyUnlockedRange: Setting jobInfo to:", finalJobInfo);
-    setJobInfo(finalJobInfo);
-    setStatus("done");
-    console.log("[DEBUG] showNewlyUnlockedRange: About to setUiPhase('results')");
-    setUiPhase("results");
-    
-    // Update URL with range parameters
-    const newUrl = `/user/${username}?rangeStart=${rangeStart}&rangeEnd=${rangeEnd}`;
-    console.log("[DEBUG] showNewlyUnlockedRange: Updating URL to:", newUrl);
-    router.replace(newUrl, { scroll: false });
-    console.log("[DEBUG] showNewlyUnlockedRange: Complete");
-  };
-
   // Load account on mount and check for range mode
   useEffect(() => {
     if (username) {
       loadAccount();
-      fetchCredits();
+      refreshCredits();
     }
   }, [username]);
 
@@ -340,8 +165,6 @@ export default function UserPage() {
         loadTweets(accountData.account_id, start, end).then(loadedTweets => {
           if (loadedTweets.length > 0) {
             setTweets(loadedTweets);
-            setStatus("done");
-            setUiPhase("results");
             setCurrentBoundary(end);
             setJobInfo(`${loadedTweets.length} posts · showing ${start}–${end}`);
           }
@@ -370,8 +193,6 @@ export default function UserPage() {
             loadTweets(data.accountId, rangeStart, rangeEnd).then(loadedTweets => {
               if (loadedTweets.length > 0) {
                 setTweets(loadedTweets);
-                setStatus("done");
-                setUiPhase("results");
                 setJobInfo(hasRange
                   ? `${loadedTweets.length} posts · showing ${rangeStart}–${rangeEnd}`
                   : `${loadedTweets.length} posts • previously unlocked`
@@ -389,193 +210,13 @@ export default function UserPage() {
     }
   }, [user, accountData, checkingUnlockStatus]);
 
-  // Refresh credits after successful excavation
-  useEffect(() => {
-    if (status === "done" && user) {
-      refreshCredits();
-    }
-  }, [status, user, refreshCredits]);
-
-  // ── Polling driven by activeJobId ──────────────────────────────────────────
-  useEffect(() => {
-    if (!activeJobId) {
-      console.log("[DEBUG] Polling effect: No activeJobId, returning");
-      return;
-    }
-
-    console.log(`[poll] start jobId=${activeJobId}`);
-
-    let cancelled = false;
-    let timer: ReturnType<typeof setTimeout> | null = null;
-
-    const poll = async () => {
-      if (cancelled) return;
-
-      try {
-        const res = await apiFetch(`/api/jobs/${activeJobId}`);
-
-        if (cancelled) return;
-
-        if (res.status === 404) {
-          console.log(
-            `[poll] 404 jobId=${activeJobId} — resetting to idle`,
-          );
-          setStatus("idle");
-          setJobInfo("Job not found — may have expired");
-          setError(null);
-          setJobPhase(null);
-          setResumeAt(null);
-          setActiveJobId(null);
-          setUiPhase("preview");
-          return;
-        }
-
-        if (!res.ok) {
-          console.warn(
-            `[poll] HTTP ${res.status} jobId=${activeJobId} — retrying`,
-          );
-          setJobInfo(`Polling error (HTTP ${res.status}) — retrying…`);
-          timer = setTimeout(poll, POLL_INTERVAL_MS);
-          return;
-        }
-
-        const job: JobResponse = await res.json();
-
-        // ── Terminal states → stop polling ────────────────────────────────
-
-        if (job.status === "succeeded") {
-          console.log(
-            `[poll] stop jobId=${activeJobId} reason=succeeded fetched=${job.fetchedCount}`,
-          );
-          
-          const accountId = job.result?.accountId;
-          
-          if (accountId && !cancelled) {
-            await ensureMinExcavatingTime();
-
-            if (extendContextRef.current) {
-              const ctx = extendContextRef.current;
-              const finalBoundary = job.result?.finalBoundary ?? ctx.previousBoundary;
-              console.log(`[extend-finalize] ${ctx.previousBoundary} → ${finalBoundary}`);
-              
-              const jobInfoText = `${job.fetchedCount} posts · ${job.apiCalls} API calls`;
-              await showNewlyUnlockedRange(ctx.accountId, ctx.previousBoundary, finalBoundary, jobInfoText);
-              extendContextRef.current = null;
-            } else {
-              const loaded = await loadTweets(accountId);
-              setTweets(loaded);
-              setJobInfo(`${job.fetchedCount} posts · ${job.apiCalls} API calls`);
-              setStatus("done");
-              setCurrentBoundary(job.result?.finalBoundary || loaded.length);
-              setUiPhase("results");
-            }
-          }
-          
-          if (!cancelled) {
-            setCacheHit(false);
-            setJobPhase(null);
-            setResumeAt(null);
-            fetchCredits();
-            setActiveJobId(null);
-            setIsExtending(false);
-          }
-          return;
-        }
-
-        if (job.status === "failed") {
-          console.log(
-            `[poll] stop jobId=${activeJobId} reason=failed error=${job.error?.code}`,
-          );
-          setStatus("failed");
-          setError(job.error?.message || "Excavation failed");
-          setJobPhase(null);
-          setResumeAt(null);
-          setActiveJobId(null);
-          setIsExtending(false);
-          extendContextRef.current = null;
-          setUiPhase("preview");
-          return;
-        }
-
-        if (job.status === "canceled") {
-          console.log(
-            `[poll] stop jobId=${activeJobId} reason=canceled`,
-          );
-          setStatus("failed");
-          setError("Job was canceled");
-          setJobPhase(null);
-          setResumeAt(null);
-          setActiveJobId(null);
-          setIsExtending(false);
-          extendContextRef.current = null;
-          setUiPhase("preview");
-          return;
-        }
-
-        // ── Non-terminal → update UI and schedule next tick ──────────────
-
-        if (job.status === "waiting_rate_limit") {
-          setJobPhase("waiting_rate_limit");
-          setResumeAt(job.resumeAt ?? null);
-          setJobInfo(`API calls: ${job.apiCalls}`);
-          setUiPhase("excavating"); // Phase 5: Stay in excavating view
-        } else if (job.status === "queued") {
-          setJobPhase("queued");
-          setResumeAt(null);
-          const pos = job.queuePosition;
-          setJobInfo(
-            pos != null
-              ? `Position ${pos} in queue — waiting for slot…`
-              : `Waiting for slot…`,
-          );
-          setUiPhase("excavating"); // Phase 5: Stay in excavating view
-        } else {
-          setJobPhase("running");
-          setResumeAt(null);
-          setJobInfo(`Excavating… (API calls: ${job.apiCalls})`);
-          setUiPhase("excavating"); // Phase 5: Switch to excavating view
-        }
-
-        timer = setTimeout(poll, POLL_INTERVAL_MS);
-      } catch {
-        if (!cancelled) {
-          console.warn(
-            `[poll] network error jobId=${activeJobId} — retrying`,
-          );
-          setJobInfo("Network error — retrying…");
-          timer = setTimeout(poll, POLL_INTERVAL_MS);
-        }
-      }
-    };
-
-    poll();
-
-    return () => {
-      console.log(`[poll] cleanup jobId=${activeJobId}`);
-      cancelled = true;
-      if (timer) clearTimeout(timer);
-    };
-  }, [activeJobId]);
-
   const handleExcavate = async (force = false) => {
     if (!accountData || accountData.protected) return;
 
     const raw = username.trim().replace(/^@/, "");
     if (!raw) return;
 
-    console.log("[DEBUG] handleExcavate: Starting excavation, force =", force);
-    setActiveJobId(null);
-    setStatus("running");
     setError(null);
-    console.log("[DEBUG] handleExcavate: About to setTweets([]) - clearing tweets");
-    setTweets([]);
-    setCacheHit(false);
-    setJobInfo(force ? "Re-running excavation…" : "Starting…");
-    setJobPhase("running");
-    setResumeAt(null);
-    console.log("[DEBUG] handleExcavate: About to setUiPhase('excavating')");
-    excavatingStartedAtRef.current = Date.now();
-    setUiPhase("excavating");
 
     try {
       const res = await apiFetch("/api/unlock", {
@@ -586,39 +227,20 @@ export default function UserPage() {
 
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
-        setStatus("failed");
         setError(data.error || `HTTP ${res.status}`);
-        setJobPhase(null);
-        setUiPhase("preview"); // Phase 5: Return to preview on failure
         return;
       }
 
-      const unlock: UnlockResponse = await res.json();
+      const unlock = await res.json();
+      const encodedUsername = encodeURIComponent(raw);
 
       if (!force && unlock.status === "cache-hit" && unlock.accountId) {
-        setJobInfo("Unlocking…");
-        await ensureMinExcavatingTime();
-        const loaded = await loadTweets(unlock.accountId);
-        setTweets(loaded);
-        setJobInfo(`${loaded.length} posts · cached`);
-        setStatus("done");
-        setCacheHit(true);
-        setJobPhase(null);
-        fetchCredits();
-        setUiPhase("results"); // Phase 5: Switch to results view
-        return;
-      }
-
-      if (unlock.jobId) {
-        setJobInfo("Excavating…");
-        setActiveJobId(unlock.jobId);
-        // uiPhase will be set to "excavating" by the polling logic
+        router.push(`/excavating?flow=initial-cached&username=${encodedUsername}`);
+      } else if (unlock.jobId) {
+        router.push(`/excavating?flow=initial&username=${encodedUsername}&jobId=${unlock.jobId}`);
       }
     } catch {
-      setStatus("failed");
       setError("Network error");
-      setJobPhase(null);
-      setUiPhase("preview"); // Phase 5: Return to preview on error
     }
   };
 
@@ -734,7 +356,6 @@ export default function UserPage() {
   }
 
   const displayName = accountData.display_name || `@${accountData.username}`;
-  const joinDate = formatJoinDate(accountData.created_at);
   const hasResults = tweets.length > 0;
 
   const isLoggedIn = !!user; // Check if user is authenticated
@@ -783,10 +404,8 @@ export default function UserPage() {
         />
       </div>
 
-      {/* Phase 5: Dynamic content based on UI phase */}
-
       {/* Preview Phase */}
-      {uiPhase === "preview" && (
+      {!hasResults && (
         <>
           {/* Simple CTA buttons directly under account header */}
           <div className="flex flex-col items-center mb-6">
@@ -988,42 +607,27 @@ export default function UserPage() {
         </>
       )}
 
-      {/* Excavating Phase */}
-      {uiPhase === "excavating" && (
-        <>
-          <JobStatus
-            status={status}
-            jobPhase={jobPhase}
-            jobInfo={jobInfo}
-            error={error}
-            credits={credits}
-            cacheHit={cacheHit}
-            resumeAt={resumeAt}
-          />
-          
-          <div className="border border-zinc-800 rounded-xl min-h-[200px] flex items-center justify-center">
-            <div className="text-center">
-              <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-white mx-auto mb-4"></div>
-              <p className="text-zinc-400 text-sm">
-                {jobInfo || "Excavating earliest posts..."}
-              </p>
-            </div>
-          </div>
-        </>
-      )}
-
       {/* Results Phase */}
-      {uiPhase === "results" && (
+      {hasResults && (
         <>
           <JobStatus
-            status={status}
-            jobPhase={jobPhase}
+            status="done"
+            jobPhase={null}
             jobInfo={jobInfo}
-            error={error}
+            error={null}
             credits={credits}
-            cacheHit={cacheHit}
-            resumeAt={resumeAt}
+            cacheHit={false}
+            resumeAt={null}
           />
+
+          {error && (
+            <div className="mb-4 flex items-center gap-2 text-red-300 text-sm px-4 py-3 bg-red-900/20 border border-red-800/50 rounded-lg">
+              <svg className="w-4 h-4 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">
+                <path fillRule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7 4a1 1 0 11-2 0 1 1 0 012 0zm-1-9a1 1 0 00-1 1v4a1 1 0 102 0V6a1 1 0 00-1-1z" clipRule="evenodd" />
+              </svg>
+              {error}
+            </div>
+          )}
 
           {/* Range Mode Indicator */}
           {isRangeMode && (
@@ -1041,14 +645,14 @@ export default function UserPage() {
           )}
 
           {/* Excavate 100 More Button */}
-          {isLoggedIn && hasResults && !activeJobId && (
+          {isLoggedIn && hasResults && (
             <div className="mb-6 flex justify-center">
               <button
                 onClick={() => setShowExtendModal(true)}
-                disabled={credits <= 0 || isExtending}
+                disabled={credits <= 0}
                 className={`
                   inline-flex items-center gap-2 px-4 py-2 rounded-lg font-medium text-sm transition-colors
-                  ${credits > 0 && !isExtending
+                  ${credits > 0
                     ? 'bg-blue-600 text-white hover:bg-blue-700'
                     : 'bg-zinc-800 text-zinc-500 cursor-not-allowed'
                   }
@@ -1110,7 +714,7 @@ export default function UserPage() {
             </div>
           )}
 
-          {/* Expansion options - placeholder for Phase 5 */}
+          {/* Dev-only: Re-run excavation */}
           {hasResults && DEV_PANEL && (
             <div className="mt-8 text-center">
               <button
@@ -1139,15 +743,13 @@ export default function UserPage() {
             <div className="flex gap-3">
               <button
                 onClick={handleExcavateMore}
-                disabled={isExtending}
-                className="flex-1 bg-blue-600 text-white font-medium px-4 py-2 rounded-lg hover:bg-blue-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                className="flex-1 bg-blue-600 text-white font-medium px-4 py-2 rounded-lg hover:bg-blue-700 transition-colors"
               >
-                {isExtending ? 'Starting...' : 'Confirm'}
+                Confirm
               </button>
               <button
                 onClick={() => setShowExtendModal(false)}
-                disabled={isExtending}
-                className="flex-1 bg-zinc-800 text-zinc-300 font-medium px-4 py-2 rounded-lg hover:bg-zinc-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                className="flex-1 bg-zinc-800 text-zinc-300 font-medium px-4 py-2 rounded-lg hover:bg-zinc-700 transition-colors"
               >
                 Cancel
               </button>
