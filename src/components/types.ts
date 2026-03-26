@@ -14,9 +14,11 @@ export interface AccountData {
   username: string;
   display_name: string | null;
   avatar_url: string | null;
+  description: string | null;
   created_at: string | null;
   protected: boolean;
   source: "cache" | "api";
+  fetched_at: string | null;
 }
 
 export type AccountStatus = "idle" | "loading" | "found" | "error";

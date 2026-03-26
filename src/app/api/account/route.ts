@@ -59,9 +59,11 @@ export async function GET(req: NextRequest) {
         username: cachedAccount.username,
         display_name: cachedAccount.display_name,
         avatar_url: cachedAccount.avatar_url,
+        description: cachedAccount.description,
         created_at: cachedAccount.created_at,
         protected: cachedAccount.protected === 1,
-        source: "cache"
+        source: "cache",
+        fetched_at: cachedAccount.fetched_at
       });
     }
 
@@ -75,13 +77,14 @@ export async function GET(req: NextRequest) {
       // Store in DB for future cache hits
       const db = getDb();
       db.prepare(`
-        INSERT OR REPLACE INTO accounts (account_id, username, display_name, avatar_url, created_at, protected, fetched_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+        INSERT OR REPLACE INTO accounts (account_id, username, display_name, avatar_url, description, created_at, protected, fetched_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         user.id,
         user.username.toLowerCase(),
         user.name,
-        null, // avatar_url not returned by getUserByUsername
+        user.profile_image_url || null,
+        user.description || null,
         user.created_at,
         user.protected ? 1 : 0,
         new Date().toISOString()
@@ -93,10 +96,12 @@ export async function GET(req: NextRequest) {
         account_id: user.id,
         username: user.username,
         display_name: user.name,
-        avatar_url: null,
+        avatar_url: user.profile_image_url || null,
+        description: user.description || null,
         created_at: user.created_at,
         protected: user.protected,
-        source: "api"
+        source: "api",
+        fetched_at: new Date().toISOString()
       });
 
     } catch (error) {

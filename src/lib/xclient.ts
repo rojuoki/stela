@@ -59,6 +59,8 @@ export interface XUser {
   name: string;
   created_at: string; // ISO 8601
   protected: boolean;
+  description?: string;
+  profile_image_url?: string;
   public_metrics?: {
     followers_count: number;
     following_count: number;
@@ -485,7 +487,7 @@ export async function getUserByUsername(
   const json = (await xfetch(
     `/users/by/username/${encodeURIComponent(username)}`,
     {
-      "user.fields": "created_at,protected,public_metrics",
+      "user.fields": "created_at,protected,public_metrics,description,profile_image_url",
     },
     stats,
   )) as { data?: XUser; errors?: Array<{ title: string; detail: string; type: string }> };

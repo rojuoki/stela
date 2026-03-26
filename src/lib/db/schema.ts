@@ -11,6 +11,7 @@ CREATE TABLE IF NOT EXISTS accounts (
   username      TEXT NOT NULL UNIQUE,
   display_name  TEXT,
   avatar_url    TEXT,
+  description   TEXT,
   created_at    TEXT,
   protected     INTEGER NOT NULL DEFAULT 0,
   fetched_at    TEXT NOT NULL

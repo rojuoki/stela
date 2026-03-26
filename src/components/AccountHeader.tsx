@@ -51,9 +51,22 @@ export function AccountHeader({
         })
       : null;
 
+    const fetchedDate = data.fetched_at
+      ? new Date(data.fetched_at).toLocaleDateString("en-US", {
+          month: "2-digit",
+          day: "2-digit",
+          year: "2-digit",
+        })
+      : null;
+
+    // Limit description to ~280 characters with ellipsis
+    const truncatedDescription = data.description && data.description.length > 280
+      ? data.description.slice(0, 280).trim() + "…"
+      : data.description;
+
     return (
       <div
-        className={`flex items-center gap-4 p-4 border rounded-xl ${
+        className={`relative flex items-start gap-4 p-4 border rounded-xl ${
           data.protected
             ? "bg-orange-950/20 border-orange-900/40"
             : "bg-zinc-900/80 border-zinc-800"
@@ -100,6 +113,11 @@ export function AccountHeader({
               </>
             )}
           </div>
+          {truncatedDescription && (
+            <p className="text-sm text-zinc-300 mt-2 leading-relaxed">
+              {truncatedDescription}
+            </p>
+          )}
           {data.protected && (
             <p className="text-xs text-orange-400/80 mt-1.5">
               This account is protected — unlock is not available.
@@ -123,6 +141,14 @@ export function AccountHeader({
               </svg>
               Excavate 100 more
             </button>
+          </div>
+        )}
+
+        {fetchedDate && (
+          <div className="absolute bottom-2 right-2">
+            <span className="text-[10px] text-zinc-600">
+              Profile snapshot at {fetchedDate}
+            </span>
           </div>
         )}
       </div>

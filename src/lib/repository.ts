@@ -10,6 +10,7 @@ export interface Account {
   username: string;
   display_name: string | null;
   avatar_url: string | null;
+  description: string | null;
   created_at: string | null;
   protected: number;
   fetched_at: string;
