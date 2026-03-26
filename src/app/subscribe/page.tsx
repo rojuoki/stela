@@ -154,7 +154,7 @@ export default function SubscribePage() {
               <p className="text-sm text-zinc-300">Perfect for regular users</p>
             </div>
             <div className="text-right">
-              <div className="text-2xl font-bold">$9</div>
+              <div className="text-2xl font-bold">$12</div>
               <div className="text-sm text-zinc-400">/month</div>
             </div>
           </div>
@@ -164,7 +164,7 @@ export default function SubscribePage() {
               <svg className="w-4 h-4 text-emerald-400 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">
                 <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" />
               </svg>
-              <span>3 unlock credits per month</span>
+              <span>4 unlock credits per month</span>
             </div>
             <div className="flex items-center gap-2 text-sm">
               <svg className="w-4 h-4 text-emerald-400 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">
@@ -201,7 +201,7 @@ export default function SubscribePage() {
             <span className="font-medium">Great Value</span>
           </div>
           <p className="text-sm text-blue-100">
-            Save $3 vs. buying individual unlocks. Perfect if you excavate 2+ accounts per month.
+            Save $4 vs. buying individual unlocks. Perfect if you excavate 3+ accounts per month.
           </p>
         </div>
 
@@ -259,7 +259,7 @@ export default function SubscribePage() {
                   disabled={loading}
                   className="w-full bg-gradient-to-r from-blue-600 to-purple-600 text-white font-semibold py-3 px-6 rounded-lg hover:from-blue-700 hover:to-purple-700 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
                 >
-                  {loading ? 'Creating Account & Subscribing...' : 'Create Account & Subscribe for $9/month'}
+                  {loading ? 'Creating Account & Subscribing...' : 'Create Account & Subscribe for $12/month'}
                 </button>
               </div>
             </form>
@@ -297,7 +297,7 @@ export default function SubscribePage() {
               ? 'Processing...' 
               : isCurrentlySubscribed 
                 ? 'Already Subscribed' 
-                : 'Subscribe for $9/month'
+                : 'Subscribe for $12/month'
             }
           </button>
         )}
@@ -319,7 +319,7 @@ export default function SubscribePage() {
           <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
           </svg>
-          Buy single unlock for $3
+          Buy single unlock for $4
         </Link>
       </div>
     </main>

@@ -1,12 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getUserId } from "@/lib/getUserId";
-import { getDevUnlocks } from "@/lib/repository";
+import { getUserUnlockedAccounts } from "@/lib/repository";
 import { withDevMeasure } from "@/lib/devMeasure";
 
 export async function GET(req: NextRequest) {
   const userId = await getUserId(req);
   return withDevMeasure("other", async () => {
-    // Require authentication
     if (userId === "anonymous") {
       return NextResponse.json(
         { error: "Authentication required" },
@@ -15,14 +14,13 @@ export async function GET(req: NextRequest) {
     }
 
     try {
-      const unlocks = getDevUnlocks(userId);
-      
+      const accounts = getUserUnlockedAccounts(userId);
+
       return NextResponse.json({
         userId,
-        unlocks,
-        count: unlocks.length,
+        accounts,
+        count: accounts.length,
       });
-
     } catch (error) {
       console.error("[account/unlocks] Error:", error);
       return NextResponse.json(

@@ -374,7 +374,7 @@ export default function ResultsPage() {
             <h3 className="text-lg font-semibold mb-2 text-white">Create a free account to save your unlock</h3>
             <p className="text-sm text-zinc-400 mb-4 max-w-md mx-auto">
               This unlock will be saved to your account so you can access it anytime. 
-              Plus you'll get 3 free credits to unlock more accounts.
+              Plus you'll get 4 free credits to unlock more accounts.
             </p>
             <div className="flex items-center justify-center gap-3">
               <Link

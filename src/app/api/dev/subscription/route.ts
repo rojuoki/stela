@@ -20,7 +20,7 @@ export async function POST(req: NextRequest) {
     }
 
     const body = await req.json();
-    const { action, plan = 'basic', creditsPerCycle = 3 } = body;
+    const { action, plan = 'basic', creditsPerCycle = 4 } = body;
 
     if (action === 'create') {
       const subscription = createOrUpdateSubscription(user.id, plan, creditsPerCycle);

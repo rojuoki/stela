@@ -5,41 +5,35 @@ import Link from "next/link";
 import { useUser } from "@/contexts/UserContext";
 import { useRouter } from "next/navigation";
 
-interface UnlockEntry {
+interface UnlockedAccount {
   account_id: string;
-  stage: number;
-  job_id: string;
-  unlocked_at: string;
   username: string | null;
   account_created_at: string | null;
-  cap: number | null;
-  unlocked_count: number;
+  boundary_end: number;
+  unlocked_at: string;
 }
 
 interface UnlocksResponse {
   userId: string;
-  unlocks: UnlockEntry[];
+  accounts: UnlockedAccount[];
   count: number;
 }
 
 export default function MyUnlocksPage() {
   const { user, loading: userLoading } = useUser();
   const router = useRouter();
-  const [unlocks, setUnlocks] = useState<UnlockEntry[]>([]);
+  const [accounts, setAccounts] = useState<UnlockedAccount[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [sortBy, setSortBy] = useState<"date" | "username" | "stage">("date");
+  const [sortBy, setSortBy] = useState<"date" | "username" | "posts">("date");
   const [sortOrder, setSortOrder] = useState<"asc" | "desc">("desc");
-  const [filterStage, setFilterStage] = useState<"all" | "1" | "2" | "3">("all");
 
-  // Redirect if not logged in
   useEffect(() => {
     if (!userLoading && !user) {
       router.push("/login");
     }
   }, [user, userLoading, router]);
 
-  // Fetch unlocks when user is available
   useEffect(() => {
     if (user) {
       fetchUnlocks();
@@ -66,40 +60,31 @@ export default function MyUnlocksPage() {
       }
 
       const data: UnlocksResponse = await response.json();
-      setUnlocks(data.unlocks);
-    } catch (err) {
-      setError("Failed to load unlock history");
-      console.error("Fetch unlocks error:", err);
+      setAccounts(data.accounts);
+    } catch {
+      setError("Failed to load unlocked accounts");
     } finally {
       setLoading(false);
     }
   };
 
-  // Filter and sort unlocks
-  const processedUnlocks = unlocks
-    .filter((unlock) => {
-      if (filterStage === "all") return true;
-      return unlock.stage.toString() === filterStage;
-    })
-    .sort((a, b) => {
-      let comparison = 0;
-      
-      switch (sortBy) {
-        case "date":
-          comparison = new Date(a.unlocked_at).getTime() - new Date(b.unlocked_at).getTime();
-          break;
-        case "username":
-          const usernameA = a.username || "unknown";
-          const usernameB = b.username || "unknown";
-          comparison = usernameA.localeCompare(usernameB);
-          break;
-        case "stage":
-          comparison = a.stage - b.stage;
-          break;
-      }
-      
-      return sortOrder === "desc" ? -comparison : comparison;
-    });
+  const sortedAccounts = [...accounts].sort((a, b) => {
+    let comparison = 0;
+
+    switch (sortBy) {
+      case "date":
+        comparison = new Date(a.unlocked_at).getTime() - new Date(b.unlocked_at).getTime();
+        break;
+      case "username":
+        comparison = (a.username || "").localeCompare(b.username || "");
+        break;
+      case "posts":
+        comparison = a.boundary_end - b.boundary_end;
+        break;
+    }
+
+    return sortOrder === "desc" ? -comparison : comparison;
+  });
 
   const formatDate = (dateStr: string) => {
     return new Date(dateStr).toLocaleDateString("en-US", {
@@ -119,6 +104,8 @@ export default function MyUnlocksPage() {
     });
   };
 
+  const totalPosts = accounts.reduce((sum, a) => sum + a.boundary_end, 0);
+
   if (userLoading || !user) {
     return (
       <div className="min-h-screen flex items-center justify-center">
@@ -133,7 +120,7 @@ export default function MyUnlocksPage() {
       <div className="mb-8">
         <h1 className="text-2xl font-bold mb-2">My Unlocks</h1>
         <p className="text-zinc-400">
-          Your excavation history and unlocked accounts
+          Your unlocked accounts and excavated posts
         </p>
       </div>
 
@@ -150,7 +137,7 @@ export default function MyUnlocksPage() {
             {error}
           </div>
         </div>
-      ) : unlocks.length === 0 ? (
+      ) : accounts.length === 0 ? (
         <div className="text-center py-16">
           <div className="mb-6">
             <svg className="w-16 h-16 mx-auto text-zinc-600 mb-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -158,7 +145,7 @@ export default function MyUnlocksPage() {
             </svg>
             <h3 className="text-xl font-semibold text-zinc-300 mb-2">No Unlocks Yet</h3>
             <p className="text-zinc-500 mb-6 max-w-md mx-auto">
-              You haven't unlocked any accounts yet. Start exploring to discover earliest posts from X accounts.
+              You haven&apos;t unlocked any accounts yet. Start exploring to discover earliest posts from X accounts.
             </p>
           </div>
           <Link
@@ -173,24 +160,22 @@ export default function MyUnlocksPage() {
         </div>
       ) : (
         <>
-          {/* Filters and Sorting */}
+          {/* Sorting */}
           <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-4 mb-6">
             <div className="flex flex-wrap items-center gap-4">
-              {/* Sort By */}
               <div className="flex items-center gap-2">
                 <label className="text-sm font-medium text-zinc-300">Sort by:</label>
                 <select
                   value={sortBy}
-                  onChange={(e) => setSortBy(e.target.value as "date" | "username" | "stage")}
+                  onChange={(e) => setSortBy(e.target.value as "date" | "username" | "posts")}
                   className="bg-zinc-800 border border-zinc-700 rounded px-3 py-1 text-sm focus:outline-none focus:border-zinc-500"
                 >
                   <option value="date">Date</option>
                   <option value="username">Username</option>
-                  <option value="stage">Stage</option>
+                  <option value="posts">Posts Unlocked</option>
                 </select>
               </div>
 
-              {/* Sort Order */}
               <div className="flex items-center gap-2">
                 <label className="text-sm font-medium text-zinc-300">Order:</label>
                 <select
@@ -203,53 +188,32 @@ export default function MyUnlocksPage() {
                 </select>
               </div>
 
-              {/* Filter by Stage */}
-              <div className="flex items-center gap-2">
-                <label className="text-sm font-medium text-zinc-300">Stage:</label>
-                <select
-                  value={filterStage}
-                  onChange={(e) => setFilterStage(e.target.value as "all" | "1" | "2" | "3")}
-                  className="bg-zinc-800 border border-zinc-700 rounded px-3 py-1 text-sm focus:outline-none focus:border-zinc-500"
-                >
-                  <option value="all">All Stages</option>
-                  <option value="1">Stage 1</option>
-                  <option value="2">Stage 2</option>
-                  <option value="3">Stage 3</option>
-                </select>
-              </div>
-
-              {/* Stats */}
               <div className="ml-auto text-sm text-zinc-500">
-                Showing {processedUnlocks.length} of {unlocks.length} unlocks
+                {accounts.length} account{accounts.length !== 1 ? "s" : ""} unlocked
               </div>
             </div>
           </div>
 
-          {/* Unlocks Grid */}
+          {/* Account Cards Grid */}
           <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
-            {processedUnlocks.map((unlock) => (
+            {sortedAccounts.map((account) => (
               <div
-                key={`${unlock.account_id}-${unlock.stage}`}
+                key={account.account_id}
                 className="bg-zinc-900 border border-zinc-800 rounded-xl p-4 hover:border-zinc-700 transition-colors"
               >
                 {/* Header */}
                 <div className="flex items-start justify-between mb-3">
                   <div className="flex-1">
                     <Link
-                      href={`/user/${unlock.username || unlock.account_id}`}
+                      href={`/user/${account.username || account.account_id}`}
                       className="text-lg font-semibold text-zinc-200 hover:text-white transition-colors"
                     >
-                      @{unlock.username || "unknown"}
+                      @{account.username || "unknown"}
                     </Link>
-                    <div className="flex items-center gap-2 mt-1">
-                      <span className="inline-flex items-center px-2 py-1 bg-blue-900/50 text-blue-300 text-xs font-medium rounded-full">
-                        Stage {unlock.stage}
+                    <div className="mt-1">
+                      <span className="text-sm text-zinc-400">
+                        {account.boundary_end} posts unlocked
                       </span>
-                      {unlock.unlocked_count > 0 && (
-                        <span className="text-xs text-zinc-500">
-                          {unlock.unlocked_count} posts
-                        </span>
-                      )}
                     </div>
                   </div>
                 </div>
@@ -257,13 +221,13 @@ export default function MyUnlocksPage() {
                 {/* Metadata */}
                 <div className="space-y-2 text-sm text-zinc-500">
                   <div className="flex justify-between">
-                    <span>Unlocked:</span>
-                    <span>{formatDate(unlock.unlocked_at)}</span>
+                    <span>Last unlocked:</span>
+                    <span>{formatDate(account.unlocked_at)}</span>
                   </div>
-                  {unlock.account_created_at && (
+                  {account.account_created_at && (
                     <div className="flex justify-between">
                       <span>Account created:</span>
-                      <span>{formatAccountCreated(unlock.account_created_at)}</span>
+                      <span>{formatAccountCreated(account.account_created_at)}</span>
                     </div>
                   )}
                 </div>
@@ -271,7 +235,7 @@ export default function MyUnlocksPage() {
                 {/* Action */}
                 <div className="mt-4 pt-3 border-t border-zinc-800">
                   <Link
-                    href={`/user/${unlock.username || unlock.account_id}`}
+                    href={`/user/${account.username || account.account_id}`}
                     className="inline-flex items-center gap-2 text-sm text-zinc-400 hover:text-zinc-200 transition-colors"
                   >
                     <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -289,35 +253,33 @@ export default function MyUnlocksPage() {
           </div>
 
           {/* Summary Stats */}
-          {unlocks.length > 0 && (
-            <div className="mt-8 p-6 bg-zinc-900 border border-zinc-800 rounded-xl">
-              <h3 className="text-lg font-semibold mb-4">Your Exploration Stats</h3>
-              <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-center">
-                <div>
-                  <div className="text-2xl font-bold text-zinc-200">{unlocks.length}</div>
-                  <div className="text-sm text-zinc-500">Total Unlocks</div>
+          <div className="mt-8 p-6 bg-zinc-900 border border-zinc-800 rounded-xl">
+            <h3 className="text-lg font-semibold mb-4">Your Exploration Stats</h3>
+            <div className="grid grid-cols-2 md:grid-cols-3 gap-4 text-center">
+              <div>
+                <div className="text-2xl font-bold text-zinc-200">{accounts.length}</div>
+                <div className="text-sm text-zinc-500">Accounts Unlocked</div>
+              </div>
+              <div>
+                <div className="text-2xl font-bold text-zinc-200">
+                  {totalPosts.toLocaleString()}
                 </div>
-                <div>
-                  <div className="text-2xl font-bold text-zinc-200">
-                    {unlocks.reduce((sum, unlock) => sum + unlock.unlocked_count, 0).toLocaleString()}
-                  </div>
-                  <div className="text-sm text-zinc-500">Posts Discovered</div>
+                <div className="text-sm text-zinc-500">Posts Discovered</div>
+              </div>
+              <div>
+                <div className="text-2xl font-bold text-zinc-200">
+                  {(() => {
+                    const oldest = accounts.reduce(
+                      (min, a) => Math.min(min, new Date(a.unlocked_at).getTime()),
+                      Date.now(),
+                    );
+                    return Math.max(1, Math.round((Date.now() - oldest) / (1000 * 60 * 60 * 24)));
+                  })()}
                 </div>
-                <div>
-                  <div className="text-2xl font-bold text-zinc-200">
-                    {new Set(unlocks.map(u => u.stage)).size}
-                  </div>
-                  <div className="text-sm text-zinc-500">Stages Reached</div>
-                </div>
-                <div>
-                  <div className="text-2xl font-bold text-zinc-200">
-                    {Math.round((Date.now() - new Date(unlocks[unlocks.length - 1]?.unlocked_at).getTime()) / (1000 * 60 * 60 * 24))}
-                  </div>
-                  <div className="text-sm text-zinc-500">Days Exploring</div>
-                </div>
+                <div className="text-sm text-zinc-500">Days Exploring</div>
               </div>
             </div>
-          )}
+          </div>
         </>
       )}
     </div>

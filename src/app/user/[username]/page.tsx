@@ -401,6 +401,8 @@ export default function UserPage() {
           status={accountStatus}
           data={accountData}
           error={accountError}
+          onExcavateMore={isLoggedIn && hasResults ? () => setShowExtendModal(true) : undefined}
+          excavateMoreDisabled={credits <= 0}
         />
       </div>
 
@@ -456,7 +458,7 @@ export default function UserPage() {
                     onClick={handleUnlockForPrice}
                     className="bg-white text-black font-semibold px-6 py-3 rounded-lg hover:bg-zinc-200 transition-colors mb-3"
                   >
-                    Unlock for $3
+                    Unlock for $4
                   </button>
                   {!isLoggedIn && (
                     <div className="text-sm text-zinc-400">
@@ -644,28 +646,6 @@ export default function UserPage() {
             </div>
           )}
 
-          {/* Excavate 100 More Button */}
-          {isLoggedIn && hasResults && (
-            <div className="mb-6 flex justify-center">
-              <button
-                onClick={() => setShowExtendModal(true)}
-                disabled={credits <= 0}
-                className={`
-                  inline-flex items-center gap-2 px-4 py-2 rounded-lg font-medium text-sm transition-colors
-                  ${credits > 0
-                    ? 'bg-blue-600 text-white hover:bg-blue-700'
-                    : 'bg-zinc-800 text-zinc-500 cursor-not-allowed'
-                  }
-                `}
-              >
-                <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
-                </svg>
-                Excavate 100 more
-              </button>
-            </div>
-          )}
-
           {/* Guest Account Creation Prompt - only for guest users with results */}
           {!user && hasResults && (
             <div className="mb-6 bg-gradient-to-r from-blue-900/20 to-purple-900/20 border border-blue-800/50 rounded-xl p-6">
@@ -678,7 +658,7 @@ export default function UserPage() {
                 <h3 className="text-lg font-semibold mb-2 text-white">Create a free account to save your unlock</h3>
                 <p className="text-sm text-zinc-400 mb-4 max-w-md mx-auto">
                   This unlock will be saved to your account so you can access it anytime. 
-                  Plus you'll get 3 free credits to unlock more accounts.
+                  Plus you'll get 4 free credits to unlock more accounts.
                 </p>
                 <div className="flex items-center justify-center gap-3">
                   <Link

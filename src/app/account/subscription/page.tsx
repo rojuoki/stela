@@ -98,7 +98,7 @@ export default function SubscriptionManagePage() {
                 <span className="inline-flex items-center px-2 py-1 bg-emerald-900/50 text-emerald-300 text-xs font-medium rounded-full">
                   Active
                 </span>
-                <span className="text-sm text-zinc-400">$9/month</span>
+                <span className="text-sm text-zinc-400">$12/month</span>
               </div>
             </div>
           </div>
@@ -117,7 +117,7 @@ export default function SubscriptionManagePage() {
           </div>
           <div>
             <div className="text-zinc-400 mb-1">Monthly Credits</div>
-            <div className="font-medium">{subscription.creditsPerCycle || 3} credits</div>
+            <div className="font-medium">{subscription.creditsPerCycle || 4} credits</div>
           </div>
         </div>
       </div>
@@ -130,7 +130,7 @@ export default function SubscriptionManagePage() {
             <svg className="w-5 h-5 text-emerald-400 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">
               <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" />
             </svg>
-            <span className="text-sm">3 unlock credits per month (unused credits roll over)</span>
+            <span className="text-sm">4 unlock credits per month (unused credits roll over)</span>
           </div>
           <div className="flex items-center gap-3">
             <svg className="w-5 h-5 text-emerald-400 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">
@@ -183,7 +183,7 @@ export default function SubscriptionManagePage() {
               <div>
                 <div className="font-medium">Next Billing Date</div>
                 <div className="text-sm text-zinc-400">
-                  {subscription.cycleEnd ? formatDate(subscription.cycleEnd) : 'Unknown'} • $9.00
+                  {subscription.cycleEnd ? formatDate(subscription.cycleEnd) : 'Unknown'} • $12.00
                 </div>
               </div>
               <div className="text-sm text-zinc-400">Auto-renew</div>
@@ -245,7 +245,7 @@ export default function SubscriptionManagePage() {
             <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
             </svg>
-            Buy 1 Unlock - $3
+            Buy 1 Unlock - $4
           </Link>
         </div>
       )}

@@ -59,7 +59,7 @@ export default function AccountDashboard() {
             <p className="text-zinc-400 mb-2">{user.email}</p>
             {subscription.plan === 'basic' && subscription.cycleEnd && (
               <p className="text-xs text-zinc-500">
-                Next billing: {new Date(subscription.cycleEnd).toLocaleDateString()} • {subscription.creditsPerCycle || 3} credits/month
+                Next billing: {new Date(subscription.cycleEnd).toLocaleDateString()} • {subscription.creditsPerCycle || 4} credits/month
               </p>
             )}
           </div>
@@ -145,11 +145,11 @@ export default function AccountDashboard() {
             </div>
             <h3 className="text-lg font-semibold mb-2">Subscribe to Basic</h3>
             <p className="text-zinc-400 text-sm">
-              Get 3 unlock credits per month • Better value than buying individual unlocks
+              Get 4 unlock credits per month • Better value than buying individual unlocks
             </p>
             <div className="mt-3">
               <span className="inline-flex items-center px-2 py-1 bg-blue-900/50 text-blue-300 text-xs font-medium rounded-full">
-                $9/month
+                $12/month
               </span>
             </div>
           </Link>
@@ -176,7 +176,7 @@ export default function AccountDashboard() {
           </p>
           <div className="mt-3">
             <span className="inline-flex items-center px-2 py-1 bg-emerald-900/50 text-emerald-300 text-xs font-medium rounded-full">
-              $3 • No subscription
+              $4 • No subscription
             </span>
           </div>
           {credits === 0 && (

@@ -1,16 +1,19 @@
 "use client";
 
-import Link from "next/link";
 import type { AccountData, AccountStatus } from "./types";
 
 export function AccountHeader({
   status,
   data,
   error,
+  onExcavateMore,
+  excavateMoreDisabled,
 }: {
   status: AccountStatus;
   data: AccountData | null;
   error: string | null;
+  onExcavateMore?: () => void;
+  excavateMoreDisabled?: boolean;
 }) {
   if (status === "loading") {
     return (
@@ -104,17 +107,24 @@ export function AccountHeader({
           )}
         </div>
 
-        <div className="flex-shrink-0">
-          <Link
-            href={`/user/${data.username}`}
-            className="inline-flex items-center gap-1.5 text-xs text-zinc-400 hover:text-zinc-200 transition-colors px-2 py-1 rounded border border-zinc-700 hover:border-zinc-600"
-          >
-            <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
-            </svg>
-            Preview
-          </Link>
-        </div>
+        {onExcavateMore && (
+          <div className="flex-shrink-0">
+            <button
+              onClick={onExcavateMore}
+              disabled={excavateMoreDisabled}
+              className={`inline-flex items-center gap-1.5 text-xs font-medium px-3 py-1.5 rounded-lg transition-colors ${
+                excavateMoreDisabled
+                  ? "bg-zinc-700 text-zinc-500 cursor-not-allowed"
+                  : "bg-white text-black hover:bg-zinc-200"
+              }`}
+            >
+              <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+              </svg>
+              Excavate 100 more
+            </button>
+          </div>
+        )}
       </div>
     );
   }

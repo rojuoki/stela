@@ -516,7 +516,7 @@ export function getUserPlan(userId: string): 'free' | 'basic' {
 export function createOrUpdateSubscription(
   userId: string, 
   plan: 'basic' = 'basic',
-  creditsPerCycle: number = 3
+  creditsPerCycle: number = 4
 ): Subscription {
   const db = getDb();
   const now = new Date();
@@ -623,6 +623,36 @@ export function grantMonthlyCredits(): { processed: number; granted: number } {
   
   console.log(`[subscription] Granted monthly credits: ${processed} subscriptions processed, ${granted} credits granted`);
   return { processed, granted };
+}
+
+// ─── User unlocks (grouped by account) ────────────────
+
+export interface UnlockedAccountEntry {
+  account_id: string;
+  username: string | null;
+  account_created_at: string | null;
+  boundary_end: number;
+  unlocked_at: string;
+}
+
+/** One card per account: latest state across all unlock stages. */
+export function getUserUnlockedAccounts(userId: string): UnlockedAccountEntry[] {
+  const db = getDb();
+  return db
+    .prepare(
+      `SELECT
+         u.account_id,
+         a.username,
+         a.created_at               AS account_created_at,
+         MAX(u.boundary_end)        AS boundary_end,
+         MAX(u.unlocked_at)         AS unlocked_at
+       FROM unlocks u
+       LEFT JOIN accounts a ON a.account_id = u.account_id
+       WHERE u.user_id = ?
+       GROUP BY u.account_id
+       ORDER BY MAX(u.unlocked_at) DESC`
+    )
+    .all(userId) as UnlockedAccountEntry[];
 }
 
 // ─── Dev Panel helpers ─────────────────────────────────

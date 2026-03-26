@@ -37,7 +37,7 @@ export async function POST(req: NextRequest) {
     }
 
     // Create the subscription (this also grants initial credits)
-    const subscription = createOrUpdateSubscription(user.id, 'basic', 3);
+    const subscription = createOrUpdateSubscription(user.id, 'basic', 4);
 
     console.log(`[subscription] Basic subscription created for ${user.email} (${user.id})`);
 
@@ -51,7 +51,7 @@ export async function POST(req: NextRequest) {
         creditsPerCycle: subscription.credits_per_cycle,
         status: subscription.status,
       },
-      creditsGranted: 3,
+      creditsGranted: 4,
       message: "Subscription created successfully",
     });
 
