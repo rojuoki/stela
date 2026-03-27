@@ -1,19 +1,16 @@
 "use client";
 
+import { useState } from "react";
 import type { AccountData, AccountStatus } from "./types";
 
 export function AccountHeader({
   status,
   data,
   error,
-  onExcavateMore,
-  excavateMoreDisabled,
 }: {
   status: AccountStatus;
   data: AccountData | null;
   error: string | null;
-  onExcavateMore?: () => void;
-  excavateMoreDisabled?: boolean;
 }) {
   if (status === "loading") {
     return (
@@ -44,6 +41,8 @@ export function AccountHeader({
   }
 
   if (status === "found" && data) {
+    const [isDescriptionExpanded, setIsDescriptionExpanded] = useState(false);
+    
     const joinDate = data.created_at
       ? new Date(data.created_at).toLocaleDateString("en-US", {
           month: "short",
@@ -59,14 +58,13 @@ export function AccountHeader({
         })
       : null;
 
-    // Limit description to ~280 characters with ellipsis
-    const truncatedDescription = data.description && data.description.length > 280
-      ? data.description.slice(0, 280).trim() + "…"
-      : data.description;
+    // Check if description would overflow 2 lines (rough estimation: ~80 chars per line)
+    const isDescriptionLong = data.description && data.description.length > 160;
+    const shouldShowToggle = isDescriptionLong;
 
     return (
       <div
-        className={`relative flex items-start gap-4 p-4 border rounded-xl ${
+        className={`relative flex items-start gap-4 p-3.5 border rounded-xl ${
           data.protected
             ? "bg-orange-950/20 border-orange-900/40"
             : "bg-zinc-900/80 border-zinc-800"
@@ -89,7 +87,7 @@ export function AccountHeader({
           )}
         </div>
 
-        <div className="flex-1 min-w-0">
+        <div className="flex-1 min-w-0 pr-4">
           <div className="flex items-center gap-2 flex-wrap">
             <span className="font-bold text-zinc-100 text-lg truncate">
               {data.display_name || `@${data.username}`}
@@ -104,6 +102,7 @@ export function AccountHeader({
               </span>
             )}
           </div>
+          
           <div className="flex items-center gap-2 text-sm text-zinc-400 mt-0.5">
             <span>@{data.username}</span>
             {joinDate && (
@@ -113,36 +112,41 @@ export function AccountHeader({
               </>
             )}
           </div>
-          {truncatedDescription && (
-            <p className="text-sm text-zinc-300 mt-2 leading-relaxed">
-              {truncatedDescription}
-            </p>
+          
+          {data.description && (
+            <div className="mt-1.5">
+              <p 
+                className={`text-sm text-zinc-300 leading-snug ${
+                  !isDescriptionExpanded && shouldShowToggle 
+                    ? 'line-clamp-2' 
+                    : ''
+                }`}
+                style={{
+                  display: !isDescriptionExpanded && shouldShowToggle ? '-webkit-box' : 'block',
+                  WebkitLineClamp: !isDescriptionExpanded && shouldShowToggle ? 2 : 'none',
+                  WebkitBoxOrient: 'vertical',
+                  overflow: !isDescriptionExpanded && shouldShowToggle ? 'hidden' : 'visible'
+                }}
+              >
+                {data.description}
+              </p>
+              {shouldShowToggle && (
+                <button
+                  onClick={() => setIsDescriptionExpanded(!isDescriptionExpanded)}
+                  className="text-xs text-zinc-500 hover:text-zinc-400 mt-1 transition-colors"
+                >
+                  {isDescriptionExpanded ? 'Show less' : 'Show more'}
+                </button>
+              )}
+            </div>
           )}
+          
           {data.protected && (
-            <p className="text-xs text-orange-400/80 mt-1.5">
+            <p className="text-xs text-orange-400/80 mt-1">
               This account is protected — unlock is not available.
             </p>
           )}
         </div>
-
-        {onExcavateMore && (
-          <div className="flex-shrink-0">
-            <button
-              onClick={onExcavateMore}
-              disabled={excavateMoreDisabled}
-              className={`inline-flex items-center gap-1.5 text-xs font-medium px-3 py-1.5 rounded-lg transition-colors ${
-                excavateMoreDisabled
-                  ? "bg-zinc-700 text-zinc-500 cursor-not-allowed"
-                  : "bg-white text-black hover:bg-zinc-200"
-              }`}
-            >
-              <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
-              </svg>
-              Excavate 100 more
-            </button>
-          </div>
-        )}
 
         {fetchedDate && (
           <div className="absolute bottom-2 right-2">

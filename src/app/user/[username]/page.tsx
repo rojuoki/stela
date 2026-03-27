@@ -395,15 +395,36 @@ export default function UserPage() {
         </Link>
       </div>
 
-      {/* Account Header — always visible */}
+      {/* Account Header & Excavation CTA — always visible */}
       <div className={hasResults ? "sticky top-0 z-20 -mx-4 px-4 py-2 bg-black/80 backdrop-blur-sm mb-4" : "mb-4"}>
         <AccountHeader
           status={accountStatus}
           data={accountData}
           error={accountError}
-          onExcavateMore={isLoggedIn && hasResults ? () => setShowExtendModal(true) : undefined}
-          excavateMoreDisabled={credits <= 0}
         />
+        
+        {/* Excavate More CTA - part of sticky header group */}
+        {isLoggedIn && hasResults && (
+          <div className="flex items-center justify-center gap-3 mt-3 mb-1">
+            <button
+              onClick={() => setShowExtendModal(true)}
+              disabled={credits <= 0}
+              className={`inline-flex items-center gap-1.5 text-sm font-medium px-4 py-2 rounded-lg transition-colors ${
+                credits <= 0
+                  ? "bg-zinc-700 text-zinc-500 cursor-not-allowed"
+                  : "bg-white text-black hover:bg-zinc-200"
+              }`}
+            >
+              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+              </svg>
+              + Excavate more
+            </button>
+            <span className="text-xs text-zinc-500">
+              Want to see more? Extend your excavation for 1 credit.
+            </span>
+          </div>
+        )}
       </div>
 
       {/* Preview Phase */}
