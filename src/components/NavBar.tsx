@@ -185,7 +185,7 @@ export function NavBar() {
                       )}
 
                       <Link
-                        href="/buy-unlock"
+                        href="/account/credits"
                         className="block w-full text-left px-4 py-2 text-sm text-zinc-300 hover:bg-zinc-800 transition-colors"
                         onClick={() => setUserMenuOpen(false)}
                       >

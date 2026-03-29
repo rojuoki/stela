@@ -313,7 +313,7 @@ export default function SubscribePage() {
           Just need one unlock? No problem.
         </p>
         <Link
-          href="/buy-unlock"
+          href="/account/credits"
           className="inline-flex items-center gap-2 text-white hover:text-zinc-300 underline text-sm"
         >
           <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">

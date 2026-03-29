@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { useParams, useRouter } from "next/navigation";
 import Link from "next/link";
 import { notFound } from "next/navigation";
@@ -10,7 +10,7 @@ import type {
   AccountStatus,
 } from "../../../components/types";
 import { EngagementChart } from "../../../components/EngagementChart";
-import { TweetCard } from "../../../components/TweetCard";
+import { TweetCard, tweetElementId } from "../../../components/TweetCard";
 import { AccountHeader } from "../../../components/AccountHeader";
 import { JobStatus } from "../../../components/JobStatus";
 import { apiFetch } from "../../../lib/apiFetch";
@@ -50,6 +50,13 @@ export default function UserPage() {
 
   const [showExtendModal, setShowExtendModal] = useState(false);
   const [currentBoundary, setCurrentBoundary] = useState<number | null>(null);
+  const [showBackToTop, setShowBackToTop] = useState(false);
+
+  const scrollToTweetByPostId = useCallback((postId: string) => {
+    const el = document.getElementById(tweetElementId(postId));
+    if (!el) return;
+    el.scrollIntoView({ behavior: "smooth", block: "start" });
+  }, []);
 
   if (!username || typeof username !== "string") {
     notFound();
@@ -209,6 +216,16 @@ export default function UserPage() {
         });
     }
   }, [user, accountData, checkingUnlockStatus]);
+
+  // Handle scroll for back to top visibility
+  useEffect(() => {
+    const handleScroll = () => {
+      setShowBackToTop(window.scrollY > 300);
+    };
+
+    window.addEventListener('scroll', handleScroll);
+    return () => window.removeEventListener('scroll', handleScroll);
+  }, []);
 
   const handleExcavate = async (force = false) => {
     if (!accountData || accountData.protected) return;
@@ -418,11 +435,27 @@ export default function UserPage() {
               <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
               </svg>
-              + Excavate more
+              Excavate more
             </button>
             <span className="text-xs text-zinc-500">
               Want to see more? Extend your excavation for 1 credit.
             </span>
+          </div>
+        )}
+
+        {/* Back to Top Control - appears after scrolling */}
+        {showBackToTop && hasResults && (
+          <div className="text-center mt-2">
+            <button
+              onClick={() => window.scrollTo({ top: 0, behavior: "smooth" })}
+              className="text-xs text-zinc-500 opacity-60 hover:opacity-100 transition-opacity inline-flex items-center gap-1"
+              aria-label="Back to top"
+            >
+              <svg className="w-3 h-3" fill="currentColor" viewBox="0 0 12 12">
+                <path d="M6 2L2 6h2.5v4h3V6H10L6 2z"/>
+              </svg>
+              Back to top
+            </button>
           </div>
         )}
       </div>
@@ -700,7 +733,9 @@ export default function UserPage() {
           )}
 
           {/* Engagement Chart */}
-          {hasResults && <EngagementChart tweets={tweets} />}
+          {hasResults && (
+            <EngagementChart tweets={tweets} onBarSelect={scrollToTweetByPostId} />
+          )}
 
           {/* Tweet list */}
           {hasResults ? (

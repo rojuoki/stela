@@ -99,6 +99,11 @@ function ReplyIcon() {
   );
 }
 
+/** DOM id for scroll targets from the engagement chart (`post_id` only). */
+export function tweetElementId(postId: string): string {
+  return `tweet-${postId}`;
+}
+
 export function TweetCard({ tweet }: { tweet: TweetData }) {
   const date = new Date(tweet.created_at);
   const dateStr = date.toLocaleDateString("en-US", {
@@ -110,7 +115,10 @@ export function TweetCard({ tweet }: { tweet: TweetData }) {
   const media = parseMedia(tweet.media_json);
 
   return (
-    <article className="px-4 py-3 border-b border-zinc-800 last:border-b-0 hover:bg-zinc-900/50 transition-colors">
+    <article
+      id={tweetElementId(tweet.post_id)}
+      className="scroll-mt-48 px-4 py-3 border-b border-zinc-800 last:border-b-0 hover:bg-zinc-900/50 transition-colors"
+    >
       <div className="flex items-center gap-2 mb-1.5">
         <span className="text-xs text-zinc-500">{dateStr}</span>
         {media.hasMedia && media.urls.length === 0 && (

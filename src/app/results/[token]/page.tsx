@@ -1,11 +1,11 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { useParams, useRouter } from "next/navigation";
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { EngagementChart } from "../../../components/EngagementChart";
-import { TweetCard } from "../../../components/TweetCard";
+import { TweetCard, tweetElementId } from "../../../components/TweetCard";
 import { AccountHeader } from "../../../components/AccountHeader";
 import { JobStatus } from "../../../components/JobStatus";
 import { useUser } from "../../../contexts/UserContext";
@@ -41,6 +41,12 @@ export default function ResultsPage() {
   const [jobPhase, setJobPhase] = useState<JobPhase>(null);
   const [jobInfo, setJobInfo] = useState<string>("");
   const [jobResumeAt, setJobResumeAt] = useState<string | null>(null);
+
+  const scrollToTweetByPostId = useCallback((postId: string) => {
+    const el = document.getElementById(tweetElementId(postId));
+    if (!el) return;
+    el.scrollIntoView({ behavior: "smooth", block: "start" });
+  }, []);
 
   // Load temporary unlock data
   useEffect(() => {
@@ -437,7 +443,9 @@ export default function ResultsPage() {
       </div>
 
       {/* Engagement Chart */}
-      {hasResults && <EngagementChart tweets={data.tweets} />}
+      {hasResults && (
+        <EngagementChart tweets={data.tweets} onBarSelect={scrollToTweetByPostId} />
+      )}
 
       {/* Tweet list */}
       {isExcavating ? (

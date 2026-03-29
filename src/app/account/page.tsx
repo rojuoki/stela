@@ -157,7 +157,7 @@ export default function AccountDashboard() {
 
         {/* Buy Credits */}
         <Link
-          href="/buy-unlock"
+          href="/account/credits"
           className="bg-zinc-900 border border-zinc-800 rounded-xl p-6 hover:border-zinc-700 transition-colors group"
         >
           <div className="flex items-start justify-between mb-4">
@@ -170,9 +170,9 @@ export default function AccountDashboard() {
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
             </svg>
           </div>
-          <h3 className="text-lg font-semibold mb-2">Buy 1 Unlock</h3>
+          <h3 className="text-lg font-semibold mb-2">Buy Credits</h3>
           <p className="text-zinc-400 text-sm">
-            Purchase a single unlock credit for one-time use
+            Purchase credits to unlock accounts
           </p>
           <div className="mt-3">
             <span className="inline-flex items-center px-2 py-1 bg-emerald-900/50 text-emerald-300 text-xs font-medium rounded-full">

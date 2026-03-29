@@ -239,7 +239,7 @@ export default function SubscriptionManagePage() {
             While you wait for your monthly credits, you can purchase individual unlocks.
           </p>
           <Link
-            href="/buy-unlock"
+            href="/account/credits"
             className="inline-flex items-center gap-2 bg-white text-black font-semibold px-4 py-2 rounded-lg hover:bg-zinc-200 transition-colors text-sm"
           >
             <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">

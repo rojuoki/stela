@@ -27,7 +27,7 @@ export async function POST(req: NextRequest) {
     }
 
     // Grant the credit
-    giveCredits(user.id, 1, "Single unlock purchase ($3)");
+    giveCredits(user.id, 1, "Single unlock purchase ($4)");
 
     console.log(`[purchase] Single unlock purchased by ${user.email} (${user.id})`);
 

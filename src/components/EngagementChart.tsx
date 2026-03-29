@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useRef, useMemo } from "react";
+import { createPortal } from "react-dom";
 import type { TweetData } from "./types";
 
 const LINES = [
@@ -8,8 +9,16 @@ const LINES = [
   { key: "reply_count" as const, color: "#f59e0b", label: "Replies" },
 ];
 
-export function EngagementChart({ tweets }: { tweets: TweetData[] }) {
+export function EngagementChart({
+  tweets,
+  onBarSelect,
+}: {
+  tweets: TweetData[];
+  /** Called with `post_id` when the user clicks a bar (same mapping as hover). */
+  onBarSelect?: (postId: string) => void;
+}) {
   const [hoverIdx, setHoverIdx] = useState<number | null>(null);
+  const [barRect, setBarRect] = useState<DOMRect | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
 
   const sorted = useMemo(
@@ -42,16 +51,92 @@ export function EngagementChart({ tweets }: { tweets: TweetData[] }) {
       )
       .join(" ");
 
+  const indexFromClientX = (clientX: number) => {
+    const el = containerRef.current;
+    if (!el) return null;
+    const rect = el.getBoundingClientRect();
+    const x = clientX - rect.left;
+    return Math.min(Math.max(Math.floor((x / rect.width) * n), 0), n - 1);
+  };
+
   const handleMouseMove = (e: React.MouseEvent<HTMLDivElement>) => {
     const el = containerRef.current;
     if (!el) return;
     const rect = el.getBoundingClientRect();
-    const x = e.clientX - rect.left;
-    const idx = Math.min(Math.max(Math.floor((x / rect.width) * n), 0), n - 1);
-    setHoverIdx(idx);
+    setBarRect(rect);
+    const idx = indexFromClientX(e.clientX);
+    if (idx !== null) setHoverIdx(idx);
+  };
+
+  const handleClick = (e: React.MouseEvent<HTMLDivElement>) => {
+    if (!onBarSelect) return;
+    const idx = indexFromClientX(e.clientX);
+    if (idx === null) return;
+    const postId = sorted[idx]?.post_id;
+    if (postId) onBarSelect(postId);
   };
 
   const hoverTweet = hoverIdx !== null ? sorted[hoverIdx] : null;
+
+  const tooltipTransform =
+    hoverIdx !== null && hoverIdx > n * 0.65
+      ? "translateX(-90%)"
+      : hoverIdx !== null && hoverIdx < n * 0.35
+        ? "translateX(-10%)"
+        : "translateX(-50%)";
+
+  const tooltipPortal =
+    hoverTweet &&
+    hoverIdx !== null &&
+    barRect &&
+    typeof document !== "undefined"
+      ? createPortal(
+          <div
+            className="pointer-events-none bg-zinc-800 border border-zinc-700 rounded-lg px-3 py-2 shadow-xl text-xs"
+            style={{
+              position: "fixed",
+              left: barRect.left + ((hoverIdx + 0.5) / n) * barRect.width,
+              bottom: window.innerHeight - barRect.top + 8,
+              transform: tooltipTransform,
+              zIndex: 45,
+            }}
+          >
+            <div className="font-medium text-zinc-200">
+              Post #{hoverIdx + 1}
+            </div>
+            <div className="text-zinc-500 mb-1.5">
+              {new Date(hoverTweet.created_at).toLocaleDateString("en-US", {
+                month: "short",
+                day: "numeric",
+                year: "numeric",
+              })}
+            </div>
+            <div className="flex items-center gap-2">
+              <span
+                className="w-2 h-2 rounded-sm inline-block"
+                style={{ background: "#3b82f6" }}
+              />
+              <span className="text-zinc-400 w-16">Likes</span>
+              <span className="text-zinc-200 font-medium">
+                {hoverTweet.like_count.toLocaleString()}
+              </span>
+            </div>
+            {LINES.map((l) => (
+              <div key={l.key} className="flex items-center gap-2">
+                <span
+                  className="w-2 h-2 rounded-full inline-block"
+                  style={{ background: l.color }}
+                />
+                <span className="text-zinc-400 w-16">{l.label}</span>
+                <span className="text-zinc-200 font-medium">
+                  {hoverTweet[l.key].toLocaleString()}
+                </span>
+              </div>
+            ))}
+          </div>,
+          document.body,
+        )
+      : null;
 
   return (
     <div className="mb-6">
@@ -85,7 +170,11 @@ export function EngagementChart({ tweets }: { tweets: TweetData[] }) {
           ref={containerRef}
           className="flex items-end gap-px h-24 bg-zinc-900 rounded-lg p-2 border border-zinc-800 cursor-crosshair"
           onMouseMove={handleMouseMove}
-          onMouseLeave={() => setHoverIdx(null)}
+          onMouseLeave={() => {
+            setHoverIdx(null);
+            setBarRect(null);
+          }}
+          onClick={handleClick}
         >
           {sorted.map((t) => {
             const h = Math.max((t.like_count / maxLikes) * 100, 2);
@@ -121,56 +210,8 @@ export function EngagementChart({ tweets }: { tweets: TweetData[] }) {
           </svg>
         </div>
 
-        {/* Tooltip */}
-        {hoverTweet && hoverIdx !== null && (
-          <div
-            className="absolute pointer-events-none bg-zinc-800 border border-zinc-700 rounded-lg px-3 py-2 shadow-xl text-xs z-10"
-            style={{
-              left: `${((hoverIdx + 0.5) / n) * 100}%`,
-              bottom: "calc(100% + 8px)",
-              transform:
-                hoverIdx > n * 0.65
-                  ? "translateX(-90%)"
-                  : hoverIdx < n * 0.35
-                    ? "translateX(-10%)"
-                    : "translateX(-50%)",
-            }}
-          >
-            <div className="font-medium text-zinc-200">
-              Post #{hoverIdx + 1}
-            </div>
-            <div className="text-zinc-500 mb-1.5">
-              {new Date(hoverTweet.created_at).toLocaleDateString("en-US", {
-                month: "short",
-                day: "numeric",
-                year: "numeric",
-              })}
-            </div>
-            <div className="flex items-center gap-2">
-              <span
-                className="w-2 h-2 rounded-sm inline-block"
-                style={{ background: "#3b82f6" }}
-              />
-              <span className="text-zinc-400 w-16">Likes</span>
-              <span className="text-zinc-200 font-medium">
-                {hoverTweet.like_count.toLocaleString()}
-              </span>
-            </div>
-            {LINES.map((l) => (
-              <div key={l.key} className="flex items-center gap-2">
-                <span
-                  className="w-2 h-2 rounded-full inline-block"
-                  style={{ background: l.color }}
-                />
-                <span className="text-zinc-400 w-16">{l.label}</span>
-                <span className="text-zinc-200 font-medium">
-                  {hoverTweet[l.key].toLocaleString()}
-                </span>
-              </div>
-            ))}
-          </div>
-        )}
       </div>
+      {tooltipPortal}
     </div>
   );
 }
