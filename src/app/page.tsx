@@ -14,6 +14,7 @@ export default function Home() {
   // Handle Stripe Checkout success redirect
   useEffect(() => {
     const urlParams = new URLSearchParams(window.location.search);
+    
     if (urlParams.get('subscription') === 'success') {
       console.log('[page] Stripe subscription success detected, refreshing state...');
       
@@ -26,6 +27,63 @@ export default function Home() {
           } catch (error) {
             console.error('[page] Failed to refresh state after subscription success:', error);
           }
+        }
+      }, 1500); // 1.5 second delay
+      
+      // Clean up URL
+      window.history.replaceState({}, '', '/');
+    }
+    
+    if (urlParams.get('credit') === 'success') {
+      const creditAmount = urlParams.get('amount');
+      console.log(`[page] Stripe credit purchase success detected, amount: ${creditAmount}`);
+      
+      // Add delay to allow webhook processing to complete
+      setTimeout(async () => {
+        if (user) {
+          try {
+            await refreshCredits();
+            console.log(`[page] Credits refresh completed after ${creditAmount} credit purchase`);
+          } catch (error) {
+            console.error('[page] Failed to refresh credits after purchase:', error);
+          }
+        }
+      }, 1500); // 1.5 second delay
+      
+      // Clean up URL
+      window.history.replaceState({}, '', '/');
+    }
+    
+    if (urlParams.get('temp-unlock') === 'success') {
+      const sessionId = urlParams.get('session_id');
+      console.log(`[page] Stripe guest unlock success detected, session_id: ${sessionId}`);
+      
+      // Add delay to allow webhook processing to complete
+      setTimeout(async () => {
+        if (sessionId) {
+          try {
+            console.log(`[page] Fetching token for session: ${sessionId}`);
+            const response = await fetch(`/api/guest-unlock/session?session_id=${encodeURIComponent(sessionId)}`);
+            
+            if (response.ok) {
+              const { token, username } = await response.json();
+              console.log(`[page] Token retrieved: ${token} for @${username}`);
+              window.location.href = `/results/${token}`;
+            } else {
+              console.error(`[page] Failed to retrieve token: ${response.status}`);
+              const errorData = await response.json().catch(() => ({}));
+              console.error('[page] Error details:', errorData);
+              // Fallback: redirect to home page with error indication
+              window.location.href = '/?error=unlock-failed';
+            }
+          } catch (error) {
+            console.error('[page] Failed to retrieve unlock token:', error);
+            // Fallback: redirect to home page with error indication
+            window.location.href = '/?error=unlock-failed';
+          }
+        } else {
+          console.error('[page] Missing session_id for guest unlock');
+          window.location.href = '/?error=missing-session';
         }
       }, 1500); // 1.5 second delay
       

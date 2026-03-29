@@ -180,4 +180,14 @@ CREATE TABLE IF NOT EXISTS temporary_unlocks (
 );
 CREATE INDEX IF NOT EXISTS idx_temporary_unlocks_expires ON temporary_unlocks(expires_at);
 CREATE INDEX IF NOT EXISTS idx_temporary_unlocks_consumed ON temporary_unlocks(consumed);
+
+-- Stripe checkout sessions mapping (for guest unlock token retrieval)
+CREATE TABLE IF NOT EXISTS checkout_sessions (
+  session_id    TEXT PRIMARY KEY,
+  unlock_token  TEXT,
+  username      TEXT NOT NULL,
+  created_at    TEXT NOT NULL,
+  expires_at    TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_checkout_sessions_expires ON checkout_sessions(expires_at);
 `;

@@ -1,7 +1,16 @@
 import { NextRequest, NextResponse } from "next/server";
 import { headers } from "next/headers";
 import Stripe from 'stripe';
-import { createOrUpdateSubscription } from "@/lib/repository";
+import { 
+  createOrUpdateSubscription, 
+  giveCredits,
+  getAccountByUsername,
+  getTweetsByAccountForGuest,
+  createTemporaryUnlock
+} from "@/lib/repository";
+import { getDb } from "@/lib/db";
+import { planGuestUnlock } from "@/lib/unlockPlanning";
+import { createAndRunJob } from "@/lib/jobs";
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY!);
 
@@ -58,26 +67,37 @@ export async function POST(req: NextRequest) {
         console.log("[stripe/webhook] 10. Extracted from metadata:");
         console.log("  - userId:", userId);
         console.log("  - type:", type);
-        
-        console.log("[stripe/webhook] 11. Validating userId...");
-        if (!userId) {
-          console.error("❌ [stripe/webhook] FAILED: Missing userId in session metadata");
-          console.error("[stripe/webhook] Available metadata:", metadata);
-          return NextResponse.json({ error: "Missing userId" }, { status: 400 });
-        }
-        console.log("✅ [stripe/webhook] userId validation passed:", userId);
 
         // Handle different purchase types - extensible design
         // Default to 'subscription' if type is not specified (backward compatibility)
         const purchaseType = type || 'subscription';
         
-        console.log("[stripe/webhook] 12. Determined purchase type:", purchaseType);
-        console.log(`[stripe/webhook] 13. Processing ${purchaseType} for user ${userId}`);
+        console.log("[stripe/webhook] 11. Determined purchase type:", purchaseType);
 
-        console.log("[stripe/webhook] 14. Entering purchase type switch...");
+        // userId validation - only required for subscription and credit types
+        if (purchaseType !== 'unlock' && !userId) {
+          console.error("❌ [stripe/webhook] FAILED: Missing userId in session metadata");
+          console.error("[stripe/webhook] Required for purchase type:", purchaseType);
+          console.error("[stripe/webhook] Available metadata:", metadata);
+          return NextResponse.json({ error: "Missing userId" }, { status: 400 });
+        }
+        
+        if (userId) {
+          console.log("✅ [stripe/webhook] userId validation passed:", userId);
+        } else {
+          console.log("✅ [stripe/webhook] userId not required for type:", purchaseType);
+        }
+        
+        if (userId) {
+          console.log(`[stripe/webhook] 12. Processing ${purchaseType} for user ${userId}`);
+        } else {
+          console.log(`[stripe/webhook] 12. Processing ${purchaseType} (guest)`);
+        }
+
+        console.log("[stripe/webhook] 13. Entering purchase type switch...");
         switch (purchaseType) {
           case 'subscription': {
-            console.log("🔄 [stripe/webhook] 15. MATCHED subscription case!");
+            console.log("🔄 [stripe/webhook] 14. MATCHED subscription case!");
             
             const plan = (metadata.plan as 'basic') || 'basic';
             console.log("[stripe/webhook] 16. Plan extracted:", plan);
@@ -101,21 +121,122 @@ export async function POST(req: NextRequest) {
             break;
           }
           
-          // Future extension points:
-          // case 'credit': {
-          //   const amount = parseInt(metadata.creditAmount || '1');
-          //   giveCredits(userId, amount, 'Credit package purchase');
-          //   break;
-          // }
-          // 
-          // case 'unlock': {
-          //   const accountId = metadata.accountId;
-          //   // Handle one-time unlock purchase
-          //   break;
-          // }
+          case 'credit': {
+            console.log("💳 [stripe/webhook] 14. MATCHED credit case!");
+            
+            const creditAmountStr = metadata.creditAmount;
+            console.log("[stripe/webhook] 16. Credit amount from metadata:", creditAmountStr);
+            
+            const creditAmount = parseInt(creditAmountStr || '1');
+            if (isNaN(creditAmount) || creditAmount <= 0) {
+              console.error("[stripe/webhook] Invalid credit amount:", creditAmountStr);
+              return NextResponse.json({ error: "Invalid credit amount in metadata" }, { status: 400 });
+            }
+            
+            console.log(`[stripe/webhook] 17. About to call giveCredits(${userId}, ${creditAmount}, 'Credit package purchase')`);
+            
+            try {
+              console.log("[stripe/webhook] 18. Calling giveCredits...");
+              giveCredits(userId, creditAmount, 'Credit package purchase');
+              console.log("🎉 [stripe/webhook] 19. giveCredits SUCCESS!");
+              console.log(`✅ [stripe/webhook] ${creditAmount} credits added successfully for user ${userId}`);
+            } catch (error) {
+              console.error("💥 [stripe/webhook] 19. giveCredits FAILED!");
+              console.error(`[stripe/webhook] Error for user ${userId}:`, error);
+              if (error instanceof Error) {
+                console.error("[stripe/webhook] Error message:", error.message);
+                console.error("[stripe/webhook] Error stack:", error.stack);
+              }
+              return NextResponse.json({ error: "Failed to add credits" }, { status: 500 });
+            }
+            break;
+          }
+          
+          case 'unlock': {
+            console.log("🔓 [stripe/webhook] 14. MATCHED unlock case!");
+            
+            const username = metadata.username;
+            const sessionId = session.id;
+            
+            console.log("[stripe/webhook] 16. Guest unlock details:");
+            console.log("  - username:", username);
+            console.log("  - sessionId:", sessionId);
+            
+            if (!username) {
+              console.error("[stripe/webhook] Missing username in unlock metadata");
+              return NextResponse.json({ error: "Missing username in unlock metadata" }, { status: 400 });
+            }
+            
+            // 全て guest unlock として処理（temporary unlock）
+            console.log(`[stripe/webhook] 17. Processing guest unlock for @${username}`);
+            
+            try {
+              const account = getAccountByUsername(username);
+              if (!account) {
+                console.error(`[stripe/webhook] Account not found: @${username}`);
+                return NextResponse.json({ error: "Account not found" }, { status: 404 });
+              }
+              
+              console.log("[stripe/webhook] 18. Planning guest unlock...");
+              const plan = planGuestUnlock(account.account_id, account.created_at);
+              
+              let unlockToken = null;
+              
+              if (plan.strategy === "cache-only" && plan.guestBoundary) {
+                // キャッシュからtemporary unlock作成
+                console.log("[stripe/webhook] 19. Using cached data for guest unlock");
+                const tweets = getTweetsByAccountForGuest(account.account_id, plan.guestBoundary);
+                unlockToken = createTemporaryUnlock(account.account_id, username, tweets);
+                console.log(`[stripe/webhook] Cache-based temporary unlock created: ${unlockToken}`);
+              } else {
+                // excavation job開始 + placeholder temporary unlock
+                console.log("[stripe/webhook] 19. Starting excavation job for guest unlock");
+                const jobId = createAndRunJob(username, account.created_at, undefined, 1, false, "anonymous");
+                
+                const placeholderAccountId = account.account_id;
+                const placeholderTweets = [{
+                  post_id: `excavating_${Date.now()}`,
+                  account_id: placeholderAccountId,
+                  created_at: new Date().toISOString(),
+                  full_text: `🔄 Excavation in progress for @${username}. Your earliest posts will appear here shortly. Thank you for your purchase!`,
+                  media_json: null,
+                  like_count: 0,
+                  retweet_count: 0,
+                  reply_count: 0,
+                  fetched_at: new Date().toISOString()
+                }];
+                
+                unlockToken = createTemporaryUnlock(placeholderAccountId, username, placeholderTweets, jobId);
+                console.log(`[stripe/webhook] Job-based temporary unlock created: ${unlockToken}, jobId: ${jobId}`);
+              }
+              
+              // session_id → token マッピング保存
+              const db = getDb();
+              const now = new Date();
+              const expiresAt = new Date(now.getTime() + 48 * 60 * 60 * 1000); // 48時間後
+              
+              db.prepare(`
+                INSERT INTO checkout_sessions (session_id, unlock_token, username, created_at, expires_at)
+                VALUES (?, ?, ?, ?, ?)
+              `).run(sessionId, unlockToken, username, now.toISOString(), expiresAt.toISOString());
+              
+              console.log("🎉 [stripe/webhook] 20. Guest unlock completed successfully!");
+              console.log(`✅ [stripe/webhook] Session mapping saved: ${sessionId} → ${unlockToken}`);
+              
+            } catch (error) {
+              console.error("💥 [stripe/webhook] 19. Guest unlock EXCEPTION!");
+              console.error(`[stripe/webhook] Exception for guest @${username}:`, error);
+              if (error instanceof Error) {
+                console.error("[stripe/webhook] Error message:", error.message);
+                console.error("[stripe/webhook] Error stack:", error.stack);
+              }
+              return NextResponse.json({ error: "Failed to process guest unlock" }, { status: 500 });
+            }
+            break;
+          }
           
           default: {
-            console.log("⚠️ [stripe/webhook] 15. UNKNOWN purchase type:", purchaseType);
+            console.log("⚠️ [stripe/webhook] 14. UNKNOWN purchase type:", purchaseType);
             console.error(`[stripe/webhook] Unknown purchase type: ${purchaseType}. Available metadata:`, metadata);
             // Fallback to subscription for unknown types (backward compatibility)
             console.log(`[stripe/webhook] 16. Falling back to subscription processing for user ${userId}`);
@@ -132,7 +253,7 @@ export async function POST(req: NextRequest) {
             break;
           }
         }
-        console.log("✅ [stripe/webhook] 20. checkout.session.completed processing completed");
+        console.log("✅ [stripe/webhook] 15. checkout.session.completed processing completed");
         break;
       }
       
@@ -140,7 +261,7 @@ export async function POST(req: NextRequest) {
         console.log(`⚠️ [stripe/webhook] 7. UNHANDLED event type: ${event.type}`);
     }
 
-    console.log("🎉 [stripe/webhook] 21. Webhook processing completed successfully");
+    console.log("🎉 [stripe/webhook] 16. Webhook processing completed successfully");
     console.log("=== ✅ STRIPE WEBHOOK DEBUG END ===\n");
     return NextResponse.json({ received: true });
   } catch (error) {

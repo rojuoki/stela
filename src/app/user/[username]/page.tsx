@@ -162,18 +162,18 @@ export default function UserPage() {
     const searchParams = new URLSearchParams(window.location.search);
     const rangeStart = searchParams.get('rangeStart');
     const rangeEnd = searchParams.get('rangeEnd');
-    
+
     if (rangeStart && rangeEnd && accountData) {
       const start = parseInt(rangeStart, 10);
       const end = parseInt(rangeEnd, 10);
-      
+
       if (!isNaN(start) && !isNaN(end) && start > 0 && end >= start) {
         // Load range-specific tweets
         loadTweets(accountData.account_id, start, end).then(loadedTweets => {
           if (loadedTweets.length > 0) {
             setTweets(loadedTweets);
             setCurrentBoundary(end);
-            setJobInfo(`${loadedTweets.length} posts · showing ${start}–${end}`);
+            setJobInfo(`${loadedTweets.length} posts · showing ${start}-${end}`);
           }
         });
       }
@@ -201,7 +201,7 @@ export default function UserPage() {
               if (loadedTweets.length > 0) {
                 setTweets(loadedTweets);
                 setJobInfo(hasRange
-                  ? `${loadedTweets.length} posts · showing ${rangeStart}–${rangeEnd}`
+                  ? `${loadedTweets.length} posts · showing ${rangeStart}-${rangeEnd}`
                   : `${loadedTweets.length} posts • previously unlocked`
                 );
               }
@@ -261,39 +261,57 @@ export default function UserPage() {
     }
   };
 
-  // Handle "Unlock for $3" button - use new guest purchase endpoint
+  // Handle "Unlock for $4" button - guest purchase via Stripe
   const handleUnlockForPrice = async () => {
     if (!accountData || accountData.protected) return;
 
     setError(null);
 
     try {
-      // Use new guest purchase endpoint that handles payment + excavation
-      const res = await apiFetch("/api/purchase/guest-unlock", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ 
-          username: accountData.username,
-          returnUrl: window.location.href 
-        }),
-      });
+      // Dev/prod分岐
+      const isDev = process.env.NODE_ENV === 'development';
 
-      if (!res.ok) {
-        const data = await res.json().catch(() => ({}));
-        setError(data.error || `Failed to unlock: HTTP ${res.status}`);
-        return;
-      }
+      if (isDev) {
+        // 開発環境: 既存プレースホルダー維持
+        const res = await apiFetch("/api/purchase/guest-unlock", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            username: accountData.username,
+            returnUrl: window.location.href
+          }),
+        });
 
-      const unlockData = await res.json();
-      
-      if (unlockData.redirectUrl) {
-        // Production: redirect to Stripe Checkout or other flow
-        window.location.href = unlockData.redirectUrl;
-      } else if (unlockData.resultToken) {
-        // Go directly to results page with the result token
-        router.push(`/results/${unlockData.resultToken}`);
+        if (!res.ok) {
+          const data = await res.json().catch(() => ({}));
+          setError(data.error || `Failed to unlock: HTTP ${res.status}`);
+          return;
+        }
+
+        const unlockData = await res.json();
+
+        if (unlockData.redirectUrl) {
+          window.location.href = unlockData.redirectUrl;
+        } else if (unlockData.resultToken) {
+          router.push(`/results/${unlockData.resultToken}`);
+        } else {
+          setError("Unexpected response from server");
+        }
       } else {
-        setError("Unexpected response from server");
+        // 本番環境: Stripe Checkout (guest unlock)
+        const response = await fetch("/api/checkout/unlock", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ username: accountData.username }),
+        });
+
+        if (response.ok) {
+          const { checkoutUrl } = await response.json();
+          window.location.href = checkoutUrl;
+        } else {
+          const data = await response.json();
+          setError(data.error || "Checkout failed");
+        }
       }
     } catch (err) {
       setError('Network error. Please try again.');
@@ -304,8 +322,8 @@ export default function UserPage() {
     return (
       <main className="max-w-2xl mx-auto px-4 py-12">
         <div className="mb-8">
-          <Link 
-            href="/" 
+          <Link
+            href="/"
             className="text-zinc-400 hover:text-white transition-colors text-sm inline-flex items-center gap-2"
           >
             <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -325,8 +343,8 @@ export default function UserPage() {
     return (
       <main className="max-w-2xl mx-auto px-4 py-12">
         <div className="mb-8">
-          <Link 
-            href="/" 
+          <Link
+            href="/"
             className="text-zinc-400 hover:text-white transition-colors text-sm inline-flex items-center gap-2"
           >
             <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -337,17 +355,17 @@ export default function UserPage() {
         </div>
         <div className="text-center py-16">
           <div className="mb-6">
-            <svg 
-              className="w-16 h-16 mx-auto text-zinc-600 mb-4" 
-              fill="none" 
-              viewBox="0 0 24 24" 
+            <svg
+              className="w-16 h-16 mx-auto text-zinc-600 mb-4"
+              fill="none"
+              viewBox="0 0 24 24"
               stroke="currentColor"
             >
-              <path 
-                strokeLinecap="round" 
-                strokeLinejoin="round" 
-                strokeWidth={1.5} 
-                d="M9.172 16.172a4 4 0 015.656 0M9 12h6m-6 0a9 9 0 1118 0 9 9 0 01-18 0z" 
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                strokeWidth={1.5}
+                d="M9.172 16.172a4 4 0 015.656 0M9 12h6m-6 0a9 9 0 1118 0 9 9 0 01-18 0z"
               />
             </svg>
             <h1 className="text-2xl font-bold text-zinc-300 mb-2">Account Not Found</h1>
@@ -376,7 +394,7 @@ export default function UserPage() {
   const hasResults = tweets.length > 0;
 
   const isLoggedIn = !!user; // Check if user is authenticated
-  
+
   // Determine if user can unlock (has credits OR basic subscription)
   const canUnlock = isLoggedIn && (credits > 0 || subscription.plan === 'basic');
 
@@ -392,7 +410,7 @@ export default function UserPage() {
       loadTweets(accountData.account_id).then(loadedTweets => {
         setTweets(loadedTweets);
         const boundary = currentBoundary || loadedTweets.length;
-        setJobInfo(`${loadedTweets.length} posts • showing 1–${boundary}`);
+        setJobInfo(`${loadedTweets.length} posts • showing 1-${boundary}`);
       });
     }
   };
@@ -401,8 +419,8 @@ export default function UserPage() {
     <main className="max-w-2xl mx-auto px-4 py-12">
       {/* Navigation */}
       <div className="mb-8">
-        <Link 
-          href="/" 
+        <Link
+          href="/"
           className="text-zinc-400 hover:text-white transition-colors text-sm inline-flex items-center gap-2"
         >
           <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -412,14 +430,14 @@ export default function UserPage() {
         </Link>
       </div>
 
-      {/* Account Header & Excavation CTA — always visible */}
+      {/* Account Header & Excavation CTA - always visible */}
       <div className={hasResults ? "sticky top-0 z-20 -mx-4 px-4 py-2 bg-black/80 backdrop-blur-sm mb-4" : "mb-4"}>
         <AccountHeader
           status={accountStatus}
           data={accountData}
           error={accountError}
         />
-        
+
         {/* Excavate More CTA - part of sticky header group */}
         {isLoggedIn && hasResults && (
           <div className="flex items-center justify-center gap-3 mt-3 mb-1">
@@ -485,7 +503,7 @@ export default function UserPage() {
                       </button>
                     )}
                     <p className="text-xs text-zinc-500">
-                      {DEV_PANEL ? 
+                      {DEV_PANEL ?
                         `Re-excavation uses 1 credit • You have ${credits} credits${subscription.plan === 'basic' ? ' • Basic subscriber' : ''}` :
                         `Account previously unlocked • ${credits} credits available${subscription.plan === 'basic' ? ' • Basic subscriber' : ''}`
                       }
@@ -517,7 +535,7 @@ export default function UserPage() {
                   {!isLoggedIn && (
                     <div className="text-sm text-zinc-400">
                       Have an account?{" "}
-                      <Link 
+                      <Link
                         href="/login"
                         className="text-white hover:text-zinc-300 underline"
                       >
@@ -618,7 +636,7 @@ export default function UserPage() {
               ))}
             </div>
 
-            {/* Discover overlay — text only, centered over blurred zone */}
+            {/* Discover overlay - text only, centered over blurred zone */}
             <div className="absolute inset-0 flex items-center justify-center z-10 pointer-events-none">
               <div className="text-center max-w-sm px-6">
                 <p className="text-base font-semibold text-white drop-shadow-lg mb-3">
@@ -643,19 +661,19 @@ export default function UserPage() {
             <div className="space-y-4 text-sm text-zinc-400">
               <p>
                 <strong className="text-zinc-300">What is excavation?</strong><br />
-                Timeline excavation uses advanced techniques to discover and retrieve 
-                the earliest posts from an account's history, even when they're buried 
+                Timeline excavation uses advanced techniques to discover and retrieve
+                the earliest posts from an account's history, even when they're buried
                 deep in the timeline.
               </p>
               <p>
                 <strong className="text-zinc-300">Why earliest posts?</strong><br />
-                Early posts often reveal authentic thoughts, genuine interactions, and 
+                Early posts often reveal authentic thoughts, genuine interactions, and
                 the evolution of ideas before accounts became widely followed.
               </p>
               <p>
                 <strong className="text-zinc-300">How it works:</strong><br />
-                Our system searches through years of posts to find and present 
-                the chronologically oldest content, providing a unique window into 
+                Our system searches through years of posts to find and present
+                the chronologically oldest content, providing a unique window into
                 an account's origins.
               </p>
             </div>
@@ -711,7 +729,7 @@ export default function UserPage() {
                 </div>
                 <h3 className="text-lg font-semibold mb-2 text-white">Create a free account to save your unlock</h3>
                 <p className="text-sm text-zinc-400 mb-4 max-w-md mx-auto">
-                  This unlock will be saved to your account so you can access it anytime. 
+                  This unlock will be saved to your account so you can access it anytime.
                   Plus you'll get 4 free credits to unlock more accounts.
                 </p>
                 <div className="flex items-center justify-center gap-3">
@@ -775,7 +793,7 @@ export default function UserPage() {
             <p className="text-sm text-zinc-400 mb-6">
               Use 1 credit to excavate up to 100 more posts from @{accountData?.username}'s timeline.
             </p>
-            
+
             <div className="flex gap-3">
               <button
                 onClick={handleExcavateMore}

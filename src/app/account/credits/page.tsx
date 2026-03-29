@@ -40,27 +40,50 @@ export default function CreditPurchasePage() {
     setSuccess(null);
 
     try {
-      const response = await fetch("/api/account/credits/purchase", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({ amount }),
-        credentials: "include",
-      });
-
-      const data = await response.json();
-
-      if (!response.ok) {
-        throw new Error(data.error || "Purchase failed");
-      }
-
-      setSuccess(data.message);
-      await refreshCredits();
+      // Dev bypass - handle at frontend level
+      const isDev = process.env.NODE_ENV === 'development';
       
-      // Auto-hide success message after 3 seconds
-      setTimeout(() => setSuccess(null), 3000);
+      if (isDev) {
+        // Existing dev flow - direct purchase
+        const response = await fetch("/api/account/credits/purchase", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ amount }),
+          credentials: "include",
+        });
 
+        const data = await response.json();
+
+        if (!response.ok) {
+          throw new Error(data.error || "Purchase failed");
+        }
+
+        setSuccess(data.message);
+        await refreshCredits();
+        
+        // Auto-hide success message after 3 seconds
+        setTimeout(() => setSuccess(null), 3000);
+      } else {
+        // Production Stripe flow
+        const response = await fetch("/api/checkout/credit", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ creditAmount: amount }),
+          credentials: "include",
+        });
+
+        if (response.ok) {
+          const { checkoutUrl } = await response.json();
+          window.location.href = checkoutUrl;
+        } else {
+          const data = await response.json();
+          setError(data.error || "Checkout failed");
+        }
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Purchase failed");
     } finally {
