@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { DevPanel } from "../components/DevPanel";
 import { useUser } from "@/contexts/UserContext";
 
@@ -9,7 +9,30 @@ const DEV_PANEL = process.env.NEXT_PUBLIC_DEV_PANEL === "1";
 
 export default function Home() {
   const [username, setUsername] = useState("");
-  const { user, credits } = useUser();
+  const { user, credits, refreshCredits, refreshSubscription } = useUser();
+
+  // Handle Stripe Checkout success redirect
+  useEffect(() => {
+    const urlParams = new URLSearchParams(window.location.search);
+    if (urlParams.get('subscription') === 'success') {
+      console.log('[page] Stripe subscription success detected, refreshing state...');
+      
+      // Add delay to allow webhook processing to complete
+      setTimeout(async () => {
+        if (user) {
+          try {
+            await Promise.all([refreshCredits(), refreshSubscription()]);
+            console.log('[page] State refresh completed after subscription success');
+          } catch (error) {
+            console.error('[page] Failed to refresh state after subscription success:', error);
+          }
+        }
+      }, 1500); // 1.5 second delay
+      
+      // Clean up URL
+      window.history.replaceState({}, '', '/');
+    }
+  }, [user, refreshCredits, refreshSubscription]);
 
   const handleLookupClick = () => {
     if (username.trim()) {

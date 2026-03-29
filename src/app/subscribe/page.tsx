@@ -21,23 +21,43 @@ export default function SubscribePage() {
     setError(null);
 
     try {
-      // Placeholder for actual payment processing
-      // In real implementation, this would integrate with Stripe
-      const response = await fetch('/api/subscription/create', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ plan: 'basic' }),
-        credentials: 'include',
-      });
-
-      if (response.ok) {
-        await Promise.all([refreshCredits(), refreshSubscription()]);
-        router.push('/'); // Redirect to home or back to the account they were viewing
+      // Dev bypass - handle at frontend level
+      const isDev = process.env.NODE_ENV === 'development';
+      console.log("[subscribe] === FLOW DEBUG ===");
+      console.log("[subscribe] NODE_ENV:", process.env.NODE_ENV);
+      console.log("[subscribe] isDev:", isDev);
+      console.log("[subscribe] Selected flow:", isDev ? "DEV (direct)" : "PROD (Stripe)");
+      
+      if (isDev) {
+        // Existing dev flow - unchanged
+        const response = await fetch('/api/subscription/create', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ plan: 'basic' }),
+          credentials: 'include',
+        });
+        
+        if (response.ok) {
+          await Promise.all([refreshCredits(), refreshSubscription()]);
+          router.push('/');
+        } else {
+          const data = await response.json();
+          setError(data.error || 'Subscription failed');
+        }
       } else {
-        const data = await response.json();
-        setError(data.error || 'Subscription failed');
+        // Production Stripe flow
+        const response = await fetch('/api/checkout/subscription', {
+          method: 'POST',
+          credentials: 'include',
+        });
+        
+        if (response.ok) {
+          const { checkoutUrl } = await response.json();
+          window.location.href = checkoutUrl;
+        } else {
+          const data = await response.json();
+          setError(data.error || 'Checkout failed');
+        }
       }
     } catch (err) {
       setError('Network error. Please try again.');
@@ -75,22 +95,42 @@ export default function SubscribePage() {
 
       // Account created successfully and user is now logged in
       // Now create subscription
-      const subscriptionResponse = await fetch('/api/subscription/create', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ plan: 'basic' }),
-        credentials: 'include',
-      });
+      const isDev = process.env.NODE_ENV === 'development';
+      console.log("[signup+subscribe] === FLOW DEBUG ===");
+      console.log("[signup+subscribe] NODE_ENV:", process.env.NODE_ENV);
+      console.log("[signup+subscribe] isDev:", isDev);
+      console.log("[signup+subscribe] Selected flow:", isDev ? "DEV (direct)" : "PROD (Stripe)");
+      
+      if (isDev) {
+        // Existing dev flow - unchanged
+        const subscriptionResponse = await fetch('/api/subscription/create', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ plan: 'basic' }),
+          credentials: 'include',
+        });
 
-      if (subscriptionResponse.ok) {
-        // Refresh subscription and credits to reflect the new subscription
-        await Promise.all([refreshCredits(), refreshSubscription()]);
-        router.push('/'); // Redirect to home with logged in state
+        if (subscriptionResponse.ok) {
+          await Promise.all([refreshCredits(), refreshSubscription()]);
+          router.push('/');
+        } else {
+          const subscriptionData = await subscriptionResponse.json();
+          setError(subscriptionData.error || 'Subscription setup failed');
+        }
       } else {
-        const subscriptionData = await subscriptionResponse.json();
-        setError(subscriptionData.error || 'Subscription setup failed');
+        // Production Stripe flow
+        const subscriptionResponse = await fetch('/api/checkout/subscription', {
+          method: 'POST',
+          credentials: 'include',
+        });
+
+        if (subscriptionResponse.ok) {
+          const { checkoutUrl } = await subscriptionResponse.json();
+          window.location.href = checkoutUrl;
+        } else {
+          const subscriptionData = await subscriptionResponse.json();
+          setError(subscriptionData.error || 'Checkout failed');
+        }
       }
     } catch (err) {
       setError('Network error. Please try again.');
