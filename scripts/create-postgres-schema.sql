@@ -47,11 +47,46 @@ CREATE TABLE IF NOT EXISTS temporary_unlocks (
     consumed BOOLEAN NOT NULL DEFAULT false
 );
 
+-- Stripe checkout sessions mapping (for guest unlock token retrieval)
+CREATE TABLE IF NOT EXISTS checkout_sessions (
+    session_id VARCHAR(200) PRIMARY KEY,
+    unlock_token VARCHAR(100),
+    username VARCHAR(50) NOT NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+    expires_at TIMESTAMP NOT NULL
+);
+
+-- Excavation jobs (main job queue)
+CREATE TABLE IF NOT EXISTS jobs (
+    id VARCHAR(100) PRIMARY KEY,
+    account_username VARCHAR(50) NOT NULL,
+    account_id VARCHAR(50),
+    user_id VARCHAR(50) NOT NULL DEFAULT 'anonymous',
+    requested_limit INTEGER NOT NULL DEFAULT 100,
+    stage INTEGER NOT NULL DEFAULT 1,
+    hold_id VARCHAR(100),
+    status VARCHAR(20) NOT NULL DEFAULT 'queued' CHECK(status IN ('queued','running','succeeded','failed','canceled')),
+    error_code VARCHAR(50),
+    error_message TEXT,
+    result_json TEXT,
+    api_calls INTEGER NOT NULL DEFAULT 0,
+    fetched_count INTEGER NOT NULL DEFAULT 0,
+    created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+    started_at TIMESTAMP,
+    finished_at TIMESTAMP,
+    resume_at TIMESTAMP,
+    resume_state TEXT,
+    node_pid INTEGER
+);
+
 -- Create indexes
 CREATE INDEX IF NOT EXISTS idx_api_call_log_ts ON api_call_log(ts DESC);
 CREATE INDEX IF NOT EXISTS idx_unlocks_user_account ON unlocks(user_id, account_id);
 CREATE INDEX IF NOT EXISTS idx_temporary_unlocks_expires ON temporary_unlocks(expires_at);
 CREATE INDEX IF NOT EXISTS idx_temporary_unlocks_consumed ON temporary_unlocks(consumed);
+CREATE INDEX IF NOT EXISTS idx_checkout_sessions_expires ON checkout_sessions(expires_at);
+CREATE INDEX IF NOT EXISTS idx_jobs_status_resume ON jobs(status, resume_at);
+CREATE INDEX IF NOT EXISTS idx_jobs_created_at ON jobs(created_at);
 
 -- Verify tables created
 \dt;

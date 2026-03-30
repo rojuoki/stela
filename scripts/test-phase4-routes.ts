@@ -1,5 +1,5 @@
 /**
- * Test Phase 4 migrated routes using Postgres
+ * Test Phase 4-5 migrated routes using Postgres
  * Run: npx tsx scripts/test-phase4-routes.ts
  */
 
@@ -66,15 +66,34 @@ async function main() {
     "4. Account Lookup (Phase 3 - already migrated)"
   );
   
+  // Phase 5 tests: Direct DB bypass routes
+  
+  // Test 5: Guest unlock session (needs session_id parameter)
+  allPassed &&= await testRoute(
+    `${baseUrl}/api/guest-unlock/session?session_id=test_session`,
+    "5. Guest Unlock Session (Phase 5 - expect 404 for test session)"
+  );
+  
+  // Test 6: Dev jobs panel (dev panel needs to be enabled)
+  if (process.env.NEXT_PUBLIC_DEV_PANEL === "1") {
+    allPassed &&= await testRoute(
+      `${baseUrl}/api/dev/jobs`,
+      "6. Dev Jobs Panel (Phase 5 - active jobs list)"
+    );
+  } else {
+    console.log("\n6. Dev Jobs Panel (Phase 5) - SKIPPED (NEXT_PUBLIC_DEV_PANEL not enabled)");
+  }
+  
   console.log("\n" + "=".repeat(50));
   if (allPassed) {
-    console.log("🎉 All Phase 4 routes working with Postgres!");
+    console.log("🎉 All Phase 4-5 routes working with Postgres!");
   } else {
     console.log("⚠️  Some routes failed - check logs above");
   }
   
   console.log("\nNote: Auth endpoints may return 401 (not authenticated) - this is expected");
-  console.log("Phase 4 migration focuses on database connectivity, not authentication flow");
+  console.log("Guest unlock session may return 404 (test session not found) - this is expected");
+  console.log("Phase 4-5 migration focuses on database connectivity, not business logic validation");
 }
 
 main().catch(console.error);

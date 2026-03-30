@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getDb } from "@/lib/db";
+import { getCheckoutSessionPg } from "@/lib/repository";
 
 export async function GET(req: NextRequest) {
   try {
@@ -13,22 +13,18 @@ export async function GET(req: NextRequest) {
       return NextResponse.json({ error: "Missing session_id parameter" }, { status: 400 });
     }
     
-    const db = getDb();
-    const row = db.prepare(`
-      SELECT unlock_token, username FROM checkout_sessions 
-      WHERE session_id = ? AND expires_at > ?
-    `).get(sessionId, new Date().toISOString()) as { unlock_token: string, username: string } | undefined;
+    const session = await getCheckoutSessionPg(sessionId);
     
-    if (!row) {
+    if (!session) {
       console.log("[guest-unlock/session] Session not found or expired:", sessionId);
       return NextResponse.json({ error: "Session not found or expired" }, { status: 404 });
     }
     
-    console.log(`[guest-unlock/session] Token found: ${row.unlock_token} for @${row.username}`);
+    console.log(`[guest-unlock/session] Token found: ${session.unlock_token} for @${session.username}`);
     
     return NextResponse.json({ 
-      token: row.unlock_token,
-      username: row.username 
+      token: session.unlock_token,
+      username: session.username 
     });
     
   } catch (error) {

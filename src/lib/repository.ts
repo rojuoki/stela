@@ -1012,3 +1012,78 @@ export async function transferTemporaryUnlockPg(token: string, userId: string): 
     throw error;
   }
 }
+
+/**
+ * Get checkout session by session ID (Postgres version).
+ * Used by guest unlock token retrieval.
+ */
+export async function getCheckoutSessionPg(sessionId: string): Promise<{ unlock_token: string, username: string } | null> {
+  try {
+    const result = await pgQuery(
+      "SELECT unlock_token, username FROM checkout_sessions WHERE session_id = $1 AND expires_at > NOW()",
+      [sessionId]
+    );
+    
+    if (result.rows.length === 0) {
+      return null;
+    }
+    
+    const row = result.rows[0];
+    return {
+      unlock_token: row.unlock_token,
+      username: row.username
+    };
+  } catch (error) {
+    console.error("[repository] getCheckoutSessionPg error:", error);
+    throw error;
+  }
+}
+
+export interface JobRow {
+  id: string;
+  account_username: string;
+  status: string;
+  resume_at: string | null;
+  api_calls: number;
+  fetched_count: number;
+  requested_limit: number;
+  created_at: string;
+  started_at: string | null;
+}
+
+/**
+ * Get active jobs from database with proper ordering (Postgres version).
+ * Used by dev jobs panel.
+ */
+export async function getActiveJobsPg(): Promise<JobRow[]> {
+  try {
+    const result = await pgQuery(
+      `SELECT id, account_username, status, resume_at, api_calls, fetched_count,
+              requested_limit, created_at, started_at
+       FROM jobs
+       WHERE status IN ('running', 'queued')
+       ORDER BY
+         CASE
+           WHEN status = 'running' THEN 0
+           WHEN status = 'queued' AND (resume_at IS NULL OR resume_at <= NOW()) THEN 1
+           ELSE 2
+         END,
+         created_at ASC`
+    );
+    
+    return result.rows.map(row => ({
+      id: row.id,
+      account_username: row.account_username,
+      status: row.status,
+      resume_at: row.resume_at,
+      api_calls: row.api_calls,
+      fetched_count: row.fetched_count,
+      requested_limit: row.requested_limit,
+      created_at: row.created_at,
+      started_at: row.started_at
+    }));
+  } catch (error) {
+    console.error("[repository] getActiveJobsPg error:", error);
+    throw error;
+  }
+}
