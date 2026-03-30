@@ -1,6 +1,6 @@
 # Database Migration Status
 
-## Current Status: Phase 6 Partial Complete
+## Current Status: Phase 7 Partial Complete
 
 **New Database Standard: Postgres/Neon via DATABASE_URL**
 
@@ -11,8 +11,9 @@
 - ✅ **Phase 3**: /api/account fully migrated to Postgres
 - ✅ **Phase 4**: Core routes migrated (health + unlock status + auth verification)
 - ✅ **Phase 5**: Remaining direct DB bypasses eliminated (guest unlock + dev tools)
-- ✅ **Phase 6A**: Auth system fully migrated to Postgres (login + signup)
-- 🔄 **Phase 6B**: Unlock system partially migrated (route updated, dependencies remain)
+- ✅ **Phase 6**: Auth system + credit system fully migrated to Postgres
+- 🔄 **Phase 7A**: UnlockPlanning + StageResults migrated to Postgres
+- 🔄 **Phase 7B**: Jobs.ts partially migrated (major dependency remaining)
 
 ### Database Files Status
 
@@ -114,6 +115,26 @@ Add your Neon `DATABASE_URL` to `.env` file to enable Postgres connection testin
 - Added complete `users` table for authentication
 - Added `credits`, `credit_holds`, `credit_events` tables for credit system
 - Added `tweets` table for tweet caching
+
+### Phase 7 Implementation Details
+
+**UnlockPlanning Migration:**
+- `planInitialUnlockPg()` — Core unlock planning with Postgres
+- `getExcavationContinuePointPg()` — Tweet continuation logic
+- `extractNewlyUnlockedPostsPgByRange()` — Result filtering
+- Added supporting Postgres functions in repository.ts
+
+**StageResults Migration:**  
+- `getStageResultPg()`, `storeStageResultPg()` — Stage result management
+- `checkStagePrerequisitesPg()`, `getAccountHighestStagePg()` — Stage validation
+- `getAccountStageResultsPg()` — Stage querying
+
+**Partially Migrated:**
+- `src/app/api/unlock/route.ts` — Updated to use Postgres planning functions
+- `src/lib/jobs.ts` — Import updates only, 10+ direct DB calls remain
+
+**Enhanced Schema (Phase 7):**
+- Added `stage_results` table for immutable stage tracking
 
 **Previously Migrated Routes:**
 - `src/app/api/health/route.ts` — Database health monitoring (Phase 4)

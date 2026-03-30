@@ -1471,3 +1471,210 @@ export async function cleanupExpiredHoldsPg(): Promise<void> {
     // Non-fatal for cleanup function
   }
 }
+
+// ========================================
+// STAGE RESULTS (Postgres versions)
+// ========================================
+
+export interface StageResult {
+  id: number;
+  account_id: string;
+  stage: number;
+  target_count: number;
+  collected_count: number;
+  status: string;
+  job_id: string;
+  created_at: string;
+}
+
+/**
+ * Check if a stage result already exists for an account (Postgres version).
+ */
+export async function getStageResultPg(accountId: string, stage: number): Promise<StageResult | null> {
+  try {
+    const result = await pgQuery(
+      "SELECT * FROM stage_results WHERE account_id = $1 AND stage = $2",
+      [accountId, stage]
+    );
+    
+    if (result.rows.length === 0) {
+      return null;
+    }
+    
+    const row = result.rows[0];
+    return {
+      id: row.id,
+      account_id: row.account_id,
+      stage: row.stage,
+      target_count: row.target_count,
+      collected_count: row.collected_count,
+      status: row.status,
+      job_id: row.job_id,
+      created_at: row.created_at,
+    };
+  } catch (error) {
+    console.error("[repository] getStageResultPg error:", error);
+    throw error;
+  }
+}
+
+/**
+ * Store a stage result after excavation completes (Postgres version).
+ */
+export async function storeStageResultPg(
+  accountId: string,
+  stage: number,
+  excavationResult: {
+    requestedLimit: number;
+    fetchedCount: number;
+    stopReason: string;
+  },
+  jobId: string
+): Promise<void> {
+  try {
+    const result = await pgQuery(
+      `INSERT INTO stage_results 
+       (account_id, stage, target_count, collected_count, status, job_id, created_at)
+       VALUES ($1, $2, $3, $4, $5, $6, NOW())
+       ON CONFLICT (account_id, stage) DO NOTHING`,
+      [
+        accountId,
+        stage,
+        excavationResult.requestedLimit,
+        excavationResult.fetchedCount,
+        excavationResult.stopReason,
+        jobId
+      ]
+    );
+    
+    if (result.rowCount === 0) {
+      console.log(
+        `[stage] Stage ${stage} result for account ${accountId} already exists - respecting immutability`
+      );
+    } else {
+      console.log(
+        `[stage] Stored Stage ${stage} result: account=${accountId} collected=${excavationResult.fetchedCount} target=${excavationResult.requestedLimit}`
+      );
+    }
+  } catch (error) {
+    console.error("[repository] storeStageResultPg error:", error);
+    throw error;
+  }
+}
+
+/**
+ * Check if all prerequisite stages exist (Postgres version).
+ */
+export async function checkStagePrerequisitesPg(accountId: string, targetStage: number): Promise<number | null> {
+  try {
+    if (targetStage <= 1) return null;
+    
+    for (let stage = 1; stage < targetStage; stage++) {
+      const result = await pgQuery(
+        "SELECT 1 FROM stage_results WHERE account_id = $1 AND stage = $2",
+        [accountId, stage]
+      );
+      
+      if (result.rows.length === 0) {
+        return stage; // Return missing prerequisite stage number
+      }
+    }
+    
+    return null; // All prerequisites satisfied
+  } catch (error) {
+    console.error("[repository] checkStagePrerequisitesPg error:", error);
+    throw error;
+  }
+}
+
+/**
+ * Get the highest completed stage for an account (Postgres version).
+ */
+export async function getAccountHighestStagePg(accountId: string): Promise<number> {
+  try {
+    const result = await pgQuery(
+      "SELECT MAX(stage) as max_stage FROM stage_results WHERE account_id = $1",
+      [accountId]
+    );
+    return result.rows[0]?.max_stage ?? 0;
+  } catch (error) {
+    console.error("[repository] getAccountHighestStagePg error:", error);
+    throw error;
+  }
+}
+
+/**
+ * Get all stage results for an account (Postgres version).
+ */
+export async function getAccountStageResultsPg(accountId: string): Promise<StageResult[]> {
+  try {
+    const result = await pgQuery(
+      "SELECT * FROM stage_results WHERE account_id = $1 ORDER BY stage ASC",
+      [accountId]
+    );
+    
+    return result.rows.map(row => ({
+      id: row.id,
+      account_id: row.account_id,
+      stage: row.stage,
+      target_count: row.target_count,
+      collected_count: row.collected_count,
+      status: row.status,
+      job_id: row.job_id,
+      created_at: row.created_at,
+    }));
+  } catch (error) {
+    console.error("[repository] getAccountStageResultsPg error:", error);
+    throw error;
+  }
+}
+
+// ========================================
+// UNLOCK PLANNING (Postgres versions)
+// ========================================
+
+/**
+ * Get newest cached tweet timestamp for continuation (Postgres version).
+ */
+export async function getNewestCachedTweetTimestampPg(accountId: string): Promise<string | null> {
+  try {
+    const result = await pgQuery(
+      "SELECT created_at FROM tweets WHERE account_id = $1 ORDER BY created_at DESC LIMIT 1",
+      [accountId]
+    );
+    return result.rows.length > 0 ? result.rows[0].created_at : null;
+  } catch (error) {
+    console.error("[repository] getNewestCachedTweetTimestampPg error:", error);
+    throw error;
+  }
+}
+
+/**
+ * Extract newly unlocked posts for result range (Postgres version).
+ */
+export async function extractNewlyUnlockedPostsPg(accountId: string, offset: number, limit: number): Promise<any[]> {
+  try {
+    const result = await pgQuery(
+      `SELECT 
+         post_id,
+         account_id,
+         created_at,
+         full_text,
+         media_json,
+         like_count,
+         retweet_count,
+         reply_count,
+         fetched_at
+       FROM tweets 
+       WHERE account_id = $1
+       ORDER BY created_at ASC
+       LIMIT $2 OFFSET $3`,
+      [accountId, limit, offset]
+    );
+    
+    return result.rows;
+  } catch (error) {
+    console.error("[repository] extractNewlyUnlockedPostsPg error:", error);
+    throw error;
+  }
+}

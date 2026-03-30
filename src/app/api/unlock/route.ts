@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createAndRunJob, createStageExpansionJob } from "@/lib/jobs";
-import { getStageResult } from "@/lib/stageResults";
-import { planInitialUnlock } from "@/lib/unlockPlanning";
+import { getStageResultPg } from "@/lib/repository";
+import { planInitialUnlockPg } from "@/lib/unlockPlanning";
 import {
   getAccountByUsernamePg,
   getCachedTweetCountPg,
@@ -89,7 +89,7 @@ export async function POST(req: NextRequest) {
 
     // ── Unified decision planning: cache-hit and fresh excavation use same logic ──
     const account = await getAccountByUsernamePg(username);
-    const plan = planInitialUnlock(userId, account?.account_id || null, requestedStage, account?.created_at || null);
+    const plan = await planInitialUnlockPg(userId, account?.account_id || null, requestedStage, account?.created_at || null);
     
     console.log(`[unlock] @${username} Stage ${requestedStage} plan:`, {
       targetCount: plan.targetCount,

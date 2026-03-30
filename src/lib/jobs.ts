@@ -31,10 +31,11 @@ import { captureHeld, releaseHeld, recordStageUnlock } from "./repository";
 import { tokenPool } from "./tokenPool";
 import { XApiStop } from "./xclient";
 import { 
-  getStageResult, 
-  storeStageResult, 
-  createSyntheticExcavationResult
-} from "./stageResults";
+  getStageResultPg, 
+  storeStageResultPg,
+  StageResult
+} from "./repository";
+import { createSyntheticExcavationResult } from "./stageResults";
 import { computeTargetCount } from "./unlockPlanning";
 
 export interface JobRecord {

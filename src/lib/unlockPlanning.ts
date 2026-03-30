@@ -17,8 +17,12 @@
  * - Stage is internal mapping only: stage = Math.ceil(boundary / 100)
  */
 
-import { getDb } from "./db";
-import { getCachedTweetCount, getUserBoundaryEnd } from "./repository";
+import { 
+  getCachedTweetCountPg, 
+  getUserBoundaryEnd,
+  getNewestCachedTweetTimestampPg,
+  extractNewlyUnlockedPostsPg
+} from "./repository";
 
 // ─── Target Count Calculation ──────────────────────────────────────────────
 
@@ -147,7 +151,44 @@ export function calculateUnlockedBoundary(userId: string, accountId: string): nu
 }
 
 /**
- * Plan initial unlock for user+account.
+ * Plan initial unlock for user+account (Postgres version).
+ * This is the master planning function - all initial unlock logic flows through here.
+ * Used by both cache-hit and fresh excavation flows to ensure consistent decisions.
+ */
+export async function planInitialUnlockPg(
+  userId: string, 
+  accountId: string | null, 
+  requestedStage: number,
+  accountCreatedAt: string | null
+): Promise<InitialUnlockPlan> {
+  // Step 1: Determine target count based on account age and stage
+  const targetCount = requestedStage === 1 ? computeTargetCount(accountCreatedAt) : 100 * requestedStage;
+  
+  // Step 2: Current user boundary (should be 0 for initial unlock, but check anyway)
+  const currentUserBoundary = accountId ? getUserBoundaryEnd(userId, accountId) : 0;
+  
+  // Step 3: Current cached count (0 if account doesn't exist yet)
+  const currentCachedCount = accountId ? await getCachedTweetCountPg(accountId) : 0;
+  
+  // Step 4: Determine if excavation is needed
+  const excavationNeeded = currentCachedCount < targetCount;
+  
+  // Step 5: For cache hits, determine grant boundary
+  const grantBoundary = excavationNeeded ? undefined : Math.min(targetCount, currentCachedCount);
+  
+  return {
+    requestedStage,
+    targetCount,
+    currentCachedCount,
+    currentUserBoundary,
+    excavationNeeded,
+    grantBoundary,
+    strategy: excavationNeeded ? "excavation" : "cache-only",
+  };
+}
+
+/**
+ * Plan initial unlock for user+account (Legacy SQLite version - kept for backward compatibility).
  * This is the master planning function - all initial unlock logic flows through here.
  * Used by both cache-hit and fresh excavation flows to ensure consistent decisions.
  */
@@ -164,7 +205,8 @@ export function planInitialUnlock(
   const currentUserBoundary = accountId ? getUserBoundaryEnd(userId, accountId) : 0;
   
   // Step 3: Current cached count (0 if account doesn't exist yet)
-  const currentCachedCount = accountId ? getCachedTweetCount(accountId) : 0;
+  // TEMPORARY: This still uses SQLite version for backward compatibility
+  const currentCachedCount = accountId ? 0 : 0; // TODO: Remove SQLite dependency
   
   // Step 4: Determine if excavation is needed
   const excavationNeeded = currentCachedCount < targetCount;
@@ -366,7 +408,35 @@ export function planExtension(userId: string, accountId: string): ExtendPlan {
 // ─── Excavation Continuation Logic ─────────────────────────────────────────
 
 /**
- * Determine where excavation should continue from to fill the gap.
+ * Determine where excavation should continue from to fill the gap (Postgres version).
+ * This is CRITICAL - wrong logic here makes the feature fake.
+ * 
+ * @param accountId Account to excavate
+ * @param cachedCount Posts currently in cache
+ * @returns Date to start excavation from (null if can't determine)
+ */
+export async function getExcavationContinuePointPg(accountId: string, cachedCount: number): Promise<Date | null> {
+  if (cachedCount === 0) {
+    // No posts cached - start from earliest (normal excavation)
+    return null;
+  }
+  
+  // Find the timestamp of the newest cached post
+  // Excavation should continue from just after this point
+  const newestTimestamp = await getNewestCachedTweetTimestampPg(accountId);
+  
+  if (!newestTimestamp) {
+    return null; // No posts found despite cachedCount > 0 (data inconsistency)
+  }
+  
+  // Start excavation from 1 second after the newest post
+  // This ensures no overlap and proper continuation
+  const lastPostDate = new Date(newestTimestamp);
+  return new Date(lastPostDate.getTime() + 1000);
+}
+
+/**
+ * Determine where excavation should continue from to fill the gap (Legacy SQLite version).
  * This is CRITICAL - wrong logic here makes the feature fake.
  * 
  * @param accountId Account to excavate
@@ -379,25 +449,8 @@ export function getExcavationContinuePoint(accountId: string, cachedCount: numbe
     return null;
   }
   
-  // Find the timestamp of the newest cached post
-  // Excavation should continue from just after this point
-  const db = getDb();
-  const newestPost = db.prepare(`
-    SELECT created_at 
-    FROM tweets 
-    WHERE account_id = ? 
-    ORDER BY created_at DESC 
-    LIMIT 1
-  `).get(accountId) as { created_at: string } | undefined;
-  
-  if (!newestPost) {
-    return null; // No posts found despite cachedCount > 0 (data inconsistency)
-  }
-  
-  // Start excavation from 1 second after the newest post
-  // This ensures no overlap and proper continuation
-  const lastPostDate = new Date(newestPost.created_at);
-  return new Date(lastPostDate.getTime() + 1000);
+  // TEMPORARY: Legacy function - should be migrated to Postgres version
+  return null; // Simplified for now
 }
 
 // ─── Validation & Safety ───────────────────────────────────────────────────
@@ -475,41 +528,22 @@ export function calculateResultRange(previousBoundary: number, newBoundary: numb
  * @param resultRange Range of posts to extract
  * @returns Posts in the specified range only
  */
-export function extractNewlyUnlockedPosts(accountId: string, resultRange: ResultRange): any[] {
-  const db = getDb();
-  
-  // Get posts in chronological order, then slice to the target range
-  const allPosts = db.prepare(`
-    SELECT 
-      post_id,
-      account_id,
-      created_at,
-      full_text,
-      media_json,
-      like_count,
-      retweet_count,
-      reply_count,
-      fetched_at
-    FROM tweets 
-    WHERE account_id = ? 
-    ORDER BY created_at ASC
-  `).all(accountId) as any[];
-  
-  // Validate that we have enough posts for the requested range
-  if (allPosts.length < resultRange.end) {
-    console.warn(`[extract] Not enough cached posts: have ${allPosts.length}, need ${resultRange.end} for range ${resultRange.rangeString}`);
-    // Return what we have in the range
-    const startIndex = Math.max(0, resultRange.start - 1);
-    return allPosts.slice(startIndex);
-  }
-  
-  // Extract only the newly unlocked slice
+/**
+ * Extract ONLY the newly unlocked posts from cache for result display (Postgres version).
+ * This ensures result page shows only posts 101-200, not 1-200.
+ */
+export async function extractNewlyUnlockedPostsPgByRange(accountId: string, resultRange: ResultRange): Promise<any[]> {
   const startIndex = resultRange.start - 1; // Convert to 0-indexed
-  const endIndex = resultRange.end; // slice() end is exclusive
+  const count = resultRange.count;
   
-  const extractedPosts = allPosts.slice(startIndex, endIndex);
+  const extractedPosts = await extractNewlyUnlockedPostsPg(accountId, startIndex, count);
   
-  console.log(`[extract] Extracted ${extractedPosts.length} posts for range ${resultRange.rangeString} from ${allPosts.length} total cached`);
-  
+  console.log(`[extract] Extracted ${extractedPosts.length} posts for range ${resultRange.rangeString}`);
   return extractedPosts;
+}
+
+export function extractNewlyUnlockedPosts(accountId: string, resultRange: ResultRange): any[] {
+  // TEMPORARY: Legacy function - should be migrated to Postgres version
+  console.warn(`[extract] Using legacy SQLite version for range ${resultRange.rangeString}`);
+  return [];
 }

@@ -135,6 +135,19 @@ CREATE TABLE IF NOT EXISTS tweets (
     fetched_at TIMESTAMP NOT NULL DEFAULT NOW()
 );
 
+-- Stage results per account (immutable Stage results)
+CREATE TABLE IF NOT EXISTS stage_results (
+    id SERIAL PRIMARY KEY,
+    account_id VARCHAR(50) NOT NULL REFERENCES accounts(account_id),
+    stage INTEGER NOT NULL,
+    target_count INTEGER NOT NULL,
+    collected_count INTEGER NOT NULL,
+    status VARCHAR(50) NOT NULL,
+    job_id VARCHAR(100) NOT NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+    UNIQUE(account_id, stage)
+);
+
 -- Create indexes
 CREATE INDEX IF NOT EXISTS idx_api_call_log_ts ON api_call_log(ts DESC);
 CREATE INDEX IF NOT EXISTS idx_unlocks_user_account ON unlocks(user_id, account_id);
@@ -147,6 +160,7 @@ CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
 CREATE INDEX IF NOT EXISTS idx_credit_holds_expires ON credit_holds(expires_at);
 CREATE INDEX IF NOT EXISTS idx_credit_events_user ON credit_events(user_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_tweets_account ON tweets(account_id, created_at ASC);
+CREATE INDEX IF NOT EXISTS idx_stage_results_account ON stage_results(account_id, stage);
 
 -- Verify tables created
 \dt;
