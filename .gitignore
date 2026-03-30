@@ -33,9 +33,10 @@ yarn-error.log*
 *.tsbuildinfo
 next-env.d.ts
 
-# sqlite
+# database files (SQLite legacy - reference only, no longer runtime target)
 *.sqlite
 *.sqlite-journal
 *.sqlite-wal
 *.sqlite-shm
+*.db
 .claude/
