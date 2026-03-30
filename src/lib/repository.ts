@@ -1087,3 +1087,387 @@ export async function getActiveJobsPg(): Promise<JobRow[]> {
     throw error;
   }
 }
+
+// ========================================
+// AUTH FUNCTIONS (Postgres versions)
+// ========================================
+
+export interface User {
+  id: string;
+  email: string;
+  name: string;
+}
+
+/**
+ * Create user in Postgres.
+ */
+export async function createUserPg(email: string, passwordHash: string, name: string): Promise<User | null> {
+  try {
+    const normalizedEmail = email.toLowerCase();
+    
+    // Check if user exists
+    const existing = await pgQuery(
+      "SELECT id FROM users WHERE email = $1",
+      [normalizedEmail]
+    );
+    
+    if (existing.rows.length > 0) {
+      return null; // User already exists
+    }
+    
+    // Create new user
+    const id = `user_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+    await pgQuery(
+      "INSERT INTO users (id, email, name, password_hash, created_at) VALUES ($1, $2, $3, $4, NOW())",
+      [id, normalizedEmail, name, passwordHash]
+    );
+    
+    return { id, email: normalizedEmail, name };
+  } catch (error) {
+    console.error("[repository] createUserPg error:", error);
+    throw error;
+  }
+}
+
+/**
+ * Authenticate user in Postgres.
+ */
+export async function authenticateUserPg(email: string): Promise<{ id: string; email: string; name: string; password_hash: string } | null> {
+  try {
+    const result = await pgQuery(
+      "SELECT id, email, name, password_hash FROM users WHERE email = $1",
+      [email.toLowerCase()]
+    );
+    
+    if (result.rows.length === 0) {
+      return null;
+    }
+    
+    const row = result.rows[0];
+    return {
+      id: row.id,
+      email: row.email,
+      name: row.name,
+      password_hash: row.password_hash
+    };
+  } catch (error) {
+    console.error("[repository] authenticateUserPg error:", error);
+    throw error;
+  }
+}
+
+// ========================================
+// CREDIT SYSTEM (Postgres versions)
+// ========================================
+
+export interface CreditBalance {
+  user_id: string;
+  balance: number;
+  total_earned: number;
+  total_spent: number;
+  updated_at: string;
+}
+
+/**
+ * Get credit balance for a user (Postgres version).
+ */
+export async function getCreditBalancePg(userId: string): Promise<CreditBalance> {
+  try {
+    const result = await pgQuery(
+      "SELECT * FROM credits WHERE user_id = $1",
+      [userId]
+    );
+    
+    if (result.rows.length === 0) {
+      // Create default balance
+      const now = new Date().toISOString();
+      await pgQuery(
+        "INSERT INTO credits (user_id, balance, total_earned, total_spent, updated_at) VALUES ($1, 0, 0, 0, NOW())",
+        [userId]
+      );
+      
+      return {
+        user_id: userId,
+        balance: 0,
+        total_earned: 0,
+        total_spent: 0,
+        updated_at: now,
+      };
+    }
+    
+    const row = result.rows[0];
+    return {
+      user_id: row.user_id,
+      balance: row.balance,
+      total_earned: row.total_earned,
+      total_spent: row.total_spent,
+      updated_at: row.updated_at,
+    };
+  } catch (error) {
+    console.error("[repository] getCreditBalancePg error:", error);
+    throw error;
+  }
+}
+
+/**
+ * Give credits to user (Postgres version).
+ */
+export async function giveCreditsPg(userId: string, amount: number, reason: string): Promise<void> {
+  try {
+    const balance = await getCreditBalancePg(userId);
+    const newBalance = balance.balance + amount;
+    
+    // Update balance
+    await pgQuery(
+      "UPDATE credits SET balance = $1, total_earned = total_earned + $2, updated_at = NOW() WHERE user_id = $3",
+      [newBalance, amount, userId]
+    );
+    
+    // Log event
+    await pgQuery(
+      "INSERT INTO credit_events (user_id, event_type, amount, balance_after, reason, created_at) VALUES ($1, 'earned', $2, $3, $4, NOW())",
+      [userId, amount, newBalance, reason]
+    );
+  } catch (error) {
+    console.error("[repository] giveCreditsPg error:", error);
+    throw error;
+  }
+}
+
+/**
+ * Spend credits immediately (Postgres version).
+ */
+export async function spendCreditsPg(userId: string, amount: number, reason: string): Promise<boolean> {
+  try {
+    const balance = await getCreditBalancePg(userId);
+    if (balance.balance < amount) {
+      return false;
+    }
+    
+    const newBalance = balance.balance - amount;
+    
+    // Update balance
+    await pgQuery(
+      "UPDATE credits SET balance = $1, total_spent = total_spent + $2, updated_at = NOW() WHERE user_id = $3",
+      [newBalance, amount, userId]
+    );
+    
+    // Log event
+    await pgQuery(
+      "INSERT INTO credit_events (user_id, event_type, amount, balance_after, reason, created_at) VALUES ($1, 'captured', $2, $3, $4, NOW())",
+      [userId, amount, newBalance, reason]
+    );
+    
+    return true;
+  } catch (error) {
+    console.error("[repository] spendCreditsPg error:", error);
+    return false;
+  }
+}
+
+/**
+ * Hold credits for a job (Postgres version).
+ */
+export async function holdCreditsPg(userId: string, jobId: string, amount: number = 1): Promise<string | null> {
+  try {
+    const balance = await getCreditBalancePg(userId);
+    if (balance.balance < amount) {
+      return null;
+    }
+    
+    const holdId = `hold_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    const expiresAt = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes TTL
+    
+    // Create hold and update balance in transaction-like manner
+    await pgQuery(
+      "INSERT INTO credit_holds (id, user_id, job_id, amount, created_at, expires_at, status) VALUES ($1, $2, $3, $4, NOW(), $5, 'held')",
+      [holdId, userId, jobId, amount, expiresAt.toISOString()]
+    );
+    
+    // Update balance
+    await pgQuery(
+      "UPDATE credits SET balance = balance - $1, updated_at = NOW() WHERE user_id = $2",
+      [amount, userId]
+    );
+    
+    // Log event
+    await pgQuery(
+      "INSERT INTO credit_events (user_id, job_id, hold_id, event_type, amount, balance_after, reason, created_at) VALUES ($1, $2, $3, 'held', $4, $5, $6, NOW())",
+      [userId, jobId, holdId, amount, balance.balance - amount, `Hold for job ${jobId}`]
+    );
+    
+    return holdId;
+  } catch (error) {
+    console.error("[repository] holdCreditsPg error:", error);
+    return null;
+  }
+}
+
+/**
+ * Capture held credits (Postgres version).
+ */
+export async function captureHeldPg(holdId: string, reason: string = "Unlock successful"): Promise<boolean> {
+  try {
+    // Get hold
+    const holdResult = await pgQuery(
+      "SELECT * FROM credit_holds WHERE id = $1 AND status = 'held'",
+      [holdId]
+    );
+    
+    if (holdResult.rows.length === 0) {
+      return false;
+    }
+    
+    const hold = holdResult.rows[0];
+    
+    // Mark as captured
+    await pgQuery(
+      "UPDATE credit_holds SET status = 'captured' WHERE id = $1",
+      [holdId]
+    );
+    
+    // Update total spent
+    await pgQuery(
+      "UPDATE credits SET total_spent = total_spent + $1, updated_at = NOW() WHERE user_id = $2",
+      [hold.amount, hold.user_id]
+    );
+    
+    // Log event
+    const balance = await getCreditBalancePg(hold.user_id);
+    await pgQuery(
+      "INSERT INTO credit_events (user_id, job_id, hold_id, event_type, amount, balance_after, reason, created_at) VALUES ($1, $2, $3, 'captured', $4, $5, $6, NOW())",
+      [hold.user_id, hold.job_id, holdId, hold.amount, balance.balance, reason]
+    );
+    
+    return true;
+  } catch (error) {
+    console.error("[repository] captureHeldPg error:", error);
+    return false;
+  }
+}
+
+// ========================================
+// UNLOCK SYSTEM (Postgres versions)
+// ========================================
+
+/**
+ * Get cached tweet count for an account (Postgres version).
+ */
+export async function getCachedTweetCountPg(accountId: string): Promise<number> {
+  try {
+    const result = await pgQuery(
+      "SELECT COUNT(*) as cnt FROM tweets WHERE account_id = $1",
+      [accountId]
+    );
+    return result.rows[0]?.cnt || 0;
+  } catch (error) {
+    console.error("[repository] getCachedTweetCountPg error:", error);
+    throw error;
+  }
+}
+
+/**
+ * Check if user has unlocked a specific stage (Postgres version).
+ */
+export async function hasUserUnlockedStagePg(userId: string, accountId: string, stage: number): Promise<boolean> {
+  try {
+    const result = await pgQuery(
+      "SELECT 1 FROM unlocks WHERE user_id = $1 AND account_id = $2 AND stage = $3",
+      [userId, accountId, stage]
+    );
+    return result.rows.length > 0;
+  } catch (error) {
+    console.error("[repository] hasUserUnlockedStagePg error:", error);
+    throw error;
+  }
+}
+
+/**
+ * Record stage unlock (Postgres version).
+ */
+export async function recordStageUnlockPg(
+  userId: string, 
+  accountId: string, 
+  stage: number, 
+  boundaryEnd: number,
+  grantedCount: number,
+  jobId: string
+): Promise<void> {
+  try {
+    await pgQuery(
+      `INSERT INTO unlocks (user_id, account_id, stage, boundary_end, granted_count, job_id, unlocked_at)
+       VALUES ($1, $2, $3, $4, $5, $6, NOW())
+       ON CONFLICT (user_id, account_id, stage) DO NOTHING`,
+      [userId, accountId, stage, boundaryEnd, grantedCount, jobId]
+    );
+  } catch (error) {
+    console.error("[repository] recordStageUnlockPg error:", error);
+    throw error;
+  }
+}
+
+/**
+ * Record basic unlock (backward compatibility) (Postgres version).
+ */
+export async function recordUnlockPg(userId: string, accountId: string, jobId: string): Promise<void> {
+  try {
+    const tweetCount = await getCachedTweetCountPg(accountId);
+    const boundaryEnd = Math.min(100, tweetCount);
+    await recordStageUnlockPg(userId, accountId, 1, boundaryEnd, boundaryEnd, jobId);
+  } catch (error) {
+    console.error("[repository] recordUnlockPg error:", error);
+    throw error;
+  }
+}
+
+/**
+ * Find active job for username (Postgres version).
+ */
+export async function findActiveJobForUsernamePg(username: string): Promise<string | null> {
+  try {
+    const result = await pgQuery(
+      "SELECT id FROM jobs WHERE account_username = $1 AND status IN ('queued', 'running') ORDER BY created_at DESC LIMIT 1",
+      [username.toLowerCase()]
+    );
+    return result.rows.length > 0 ? result.rows[0].id : null;
+  } catch (error) {
+    console.error("[repository] findActiveJobForUsernamePg error:", error);
+    throw error;
+  }
+}
+
+/**
+ * Cleanup expired holds (Postgres version).
+ */
+export async function cleanupExpiredHoldsPg(): Promise<void> {
+  try {
+    // Release expired holds and return credits
+    const expiredHolds = await pgQuery(
+      "SELECT * FROM credit_holds WHERE status = 'held' AND expires_at <= NOW()"
+    );
+    
+    for (const hold of expiredHolds.rows) {
+      // Mark as released
+      await pgQuery(
+        "UPDATE credit_holds SET status = 'released' WHERE id = $1",
+        [hold.id]
+      );
+      
+      // Return credits
+      await pgQuery(
+        "UPDATE credits SET balance = balance + $1, updated_at = NOW() WHERE user_id = $2",
+        [hold.amount, hold.user_id]
+      );
+      
+      // Log event
+      const balance = await getCreditBalancePg(hold.user_id);
+      await pgQuery(
+        "INSERT INTO credit_events (user_id, job_id, hold_id, event_type, amount, balance_after, reason, created_at) VALUES ($1, $2, $3, 'expired', $4, $5, 'Hold expired', NOW())",
+        [hold.user_id, hold.job_id, hold.id, hold.amount, balance.balance]
+      );
+    }
+  } catch (error) {
+    console.error("[repository] cleanupExpiredHoldsPg error:", error);
+    // Non-fatal for cleanup function
+  }
+}

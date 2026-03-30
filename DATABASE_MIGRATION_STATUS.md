@@ -1,6 +1,6 @@
 # Database Migration Status
 
-## Current Status: Phase 5 Complete
+## Current Status: Phase 6 Partial Complete
 
 **New Database Standard: Postgres/Neon via DATABASE_URL**
 
@@ -11,6 +11,8 @@
 - ✅ **Phase 3**: /api/account fully migrated to Postgres
 - ✅ **Phase 4**: Core routes migrated (health + unlock status + auth verification)
 - ✅ **Phase 5**: Remaining direct DB bypasses eliminated (guest unlock + dev tools)
+- ✅ **Phase 6A**: Auth system fully migrated to Postgres (login + signup)
+- 🔄 **Phase 6B**: Unlock system partially migrated (route updated, dependencies remain)
 
 ### Database Files Status
 
@@ -90,6 +92,29 @@ Add your Neon `DATABASE_URL` to `.env` file to enable Postgres connection testin
 - Added `jobs` table for excavation job queue management
 - Added proper indexes for performance optimization
 
+### Phase 6 Implementation Details
+
+**Major Postgres Repository Functions Added:**
+- `createUserPg()`, `authenticateUserPg()` — User authentication system
+- `getCreditBalancePg()`, `giveCreditsPg()`, `spendCreditsPg()` — Credit system
+- `holdCreditsPg()`, `captureHeldPg()`, `cleanupExpiredHoldsPg()` — Credit holds
+- `hasUserUnlockedStagePg()`, `recordStageUnlockPg()` — Unlock tracking
+- `getCachedTweetCountPg()`, `findActiveJobForUsernamePg()` — Support functions
+
+**Fully Migrated Components:**
+- `src/lib/auth.ts` — User authentication (createUser, authenticateUser)
+- `src/app/api/auth/login/route.ts` — User login functionality
+- `src/app/api/auth/signup/route.ts` — User registration with temp unlock transfer
+
+**Partially Migrated Components:**
+- `src/app/api/unlock/route.ts` — Main unlock logic updated to use Postgres functions
+- **Dependencies still on SQLite:** planInitialUnlock, createAndRunJob, createStageExpansionJob
+
+**Enhanced Schema (Phase 6):**
+- Added complete `users` table for authentication
+- Added `credits`, `credit_holds`, `credit_events` tables for credit system
+- Added `tweets` table for tweet caching
+
 **Previously Migrated Routes:**
 - `src/app/api/health/route.ts` — Database health monitoring (Phase 4)
 - `src/app/api/account/unlock-status/route.ts` — User unlock status checking (Phase 4)
@@ -107,6 +132,9 @@ Add your Neon `DATABASE_URL` to `.env` file to enable Postgres connection testin
 - ✅ `/api/auth/me` — **No DB dependency** (works with current JWT system)
 - ✅ `/api/guest-unlock/session` — **Fully migrated to Postgres** (Phase 5)
 - ✅ `/api/dev/jobs` — **GET method migrated to Postgres** (Phase 5)
+- ✅ `/api/auth/login` — **Fully migrated to Postgres** (Phase 6)
+- ✅ `/api/auth/signup` — **Fully migrated to Postgres** (Phase 6)
+- 🔄 `/api/unlock` — **Partially migrated** (route updated, dependencies remain)
 - 🎉 **All direct DB bypasses eliminated** — No more routes using `getDb()` directly
 - 🔄 Remaining routes — Still using SQLite via repository.ts functions
 
@@ -154,22 +182,26 @@ All routes now use repository pattern instead of direct `getDb()` calls.
 npx tsx scripts/test-pg-connection.ts
 
 # 2. Test repository functions  
-npx tsx scripts/test-pg-repository.ts
+npx tsx scripts/test-repository-functions.ts
 
 # 3. Start dev server
 npm run dev
 
-# 4. Test Phase 3+4 endpoints
-npx tsx scripts/test-phase4-routes.ts
+# 4. Test all migrated endpoints (Phase 3-6)
+npx tsx scripts/test-phase6-routes.ts
 ```
 
-**Phase 4-5 Test Coverage:**
+**Phase 6 Test Coverage:**
 - ✅ Health check with Postgres connectivity
 - ✅ Account unlock status (unlock system read-only)  
-- ✅ Auth verification (no DB dependency)
-- ✅ Account lookup (Phase 3 - regression test)
+- ✅ Auth verification (JWT only, no DB)
+- ✅ Account lookup (Phase 3)
 - ✅ Guest unlock session token retrieval
 - ✅ Dev jobs panel active job listing
+- ✅ User authentication (login/signup with Postgres)
+- 🔄 Main unlock route (partially migrated, may have dependency errors)
 
-**Key Achievement:**
-🎯 **Zero Direct DB Bypasses Remaining** - All routes now follow repository pattern
+**Key Achievements:**
+- 🎯 **Zero Direct DB Bypasses** - All routes follow repository pattern
+- 🔐 **Auth System Complete** - User registration/login fully on Postgres
+- 💳 **Credit System Ready** - Full Postgres implementation available

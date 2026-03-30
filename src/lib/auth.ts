@@ -1,7 +1,7 @@
 import * as jose from 'jose';
 import bcrypt from 'bcryptjs';
 import { NextRequest, NextResponse } from 'next/server';
-import { getDb } from './db';
+import { createUserPg, authenticateUserPg } from './repository';
 
 // JWT Configuration
 const JWT_SECRET = process.env.AUTH_SECRET || 'stela-auth-secret-key-phase1-development-only';
@@ -150,29 +150,12 @@ interface DbUser {
 }
 
 export async function createUser(email: string, password: string, name: string): Promise<User | null> {
-  const db = getDb();
-  const normalizedEmail = email.toLowerCase();
-
-  const existing = db.prepare('SELECT id FROM users WHERE email = ?').get(normalizedEmail);
-  if (existing) {
-    return null;
-  }
-
-  const id = `user_${Date.now()}_${Math.random().toString(36).slice(2)}`;
   const passwordHash = await hashPassword(password);
-
-  db.prepare(
-    'INSERT INTO users (id, email, name, password_hash, created_at) VALUES (?, ?, ?, ?, ?)'
-  ).run(id, normalizedEmail, name, passwordHash, new Date().toISOString());
-
-  return { id, email: normalizedEmail, name };
+  return createUserPg(email, passwordHash, name);
 }
 
 export async function authenticateUser(email: string, password: string): Promise<User | null> {
-  const db = getDb();
-  const normalizedEmail = email.toLowerCase();
-
-  const row = db.prepare('SELECT * FROM users WHERE email = ?').get(normalizedEmail) as DbUser | undefined;
+  const row = await authenticateUserPg(email);
   if (!row) {
     return null;
   }

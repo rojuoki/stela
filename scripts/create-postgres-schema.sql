@@ -79,6 +79,62 @@ CREATE TABLE IF NOT EXISTS jobs (
     node_pid INTEGER
 );
 
+-- Auth users
+CREATE TABLE IF NOT EXISTS users (
+    id VARCHAR(100) PRIMARY KEY,
+    email VARCHAR(255) NOT NULL UNIQUE,
+    name VARCHAR(255) NOT NULL,
+    password_hash VARCHAR(255) NOT NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT NOW()
+);
+
+-- Credit balances per user
+CREATE TABLE IF NOT EXISTS credits (
+    user_id VARCHAR(100) PRIMARY KEY,
+    balance INTEGER NOT NULL DEFAULT 0,
+    total_earned INTEGER NOT NULL DEFAULT 0,
+    total_spent INTEGER NOT NULL DEFAULT 0,
+    updated_at TIMESTAMP NOT NULL DEFAULT NOW()
+);
+
+-- Credit holds with TTL (prevent double-spend)
+CREATE TABLE IF NOT EXISTS credit_holds (
+    id VARCHAR(100) PRIMARY KEY,
+    user_id VARCHAR(100) NOT NULL,
+    job_id VARCHAR(100) NOT NULL REFERENCES jobs(id),
+    amount INTEGER NOT NULL DEFAULT 1,
+    created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+    expires_at TIMESTAMP NOT NULL,
+    status VARCHAR(20) NOT NULL DEFAULT 'held' CHECK(status IN ('held','captured','released')),
+    UNIQUE(job_id)
+);
+
+-- Credit events audit log
+CREATE TABLE IF NOT EXISTS credit_events (
+    id SERIAL PRIMARY KEY,
+    user_id VARCHAR(100) NOT NULL,
+    job_id VARCHAR(100),
+    hold_id VARCHAR(100),
+    event_type VARCHAR(20) NOT NULL CHECK(event_type IN ('earned','held','captured','released','expired')),
+    amount INTEGER NOT NULL,
+    balance_after INTEGER NOT NULL,
+    reason TEXT,
+    created_at TIMESTAMP NOT NULL DEFAULT NOW()
+);
+
+-- Stored tweets (earliest posts per account)
+CREATE TABLE IF NOT EXISTS tweets (
+    post_id VARCHAR(50) PRIMARY KEY,
+    account_id VARCHAR(50) NOT NULL REFERENCES accounts(account_id),
+    created_at TIMESTAMP NOT NULL,
+    full_text TEXT NOT NULL,
+    media_json TEXT,
+    like_count INTEGER NOT NULL DEFAULT 0,
+    retweet_count INTEGER NOT NULL DEFAULT 0,
+    reply_count INTEGER NOT NULL DEFAULT 0,
+    fetched_at TIMESTAMP NOT NULL DEFAULT NOW()
+);
+
 -- Create indexes
 CREATE INDEX IF NOT EXISTS idx_api_call_log_ts ON api_call_log(ts DESC);
 CREATE INDEX IF NOT EXISTS idx_unlocks_user_account ON unlocks(user_id, account_id);
@@ -87,6 +143,10 @@ CREATE INDEX IF NOT EXISTS idx_temporary_unlocks_consumed ON temporary_unlocks(c
 CREATE INDEX IF NOT EXISTS idx_checkout_sessions_expires ON checkout_sessions(expires_at);
 CREATE INDEX IF NOT EXISTS idx_jobs_status_resume ON jobs(status, resume_at);
 CREATE INDEX IF NOT EXISTS idx_jobs_created_at ON jobs(created_at);
+CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
+CREATE INDEX IF NOT EXISTS idx_credit_holds_expires ON credit_holds(expires_at);
+CREATE INDEX IF NOT EXISTS idx_credit_events_user ON credit_events(user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_tweets_account ON tweets(account_id, created_at ASC);
 
 -- Verify tables created
 \dt;

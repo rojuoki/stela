@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createUser, createToken, createAuthResponse } from "@/lib/auth";
-import { giveCredits, transferTemporaryUnlock } from "@/lib/repository";
+import { giveCreditsPg, transferTemporaryUnlockPg } from "@/lib/repository";
 
 export async function POST(req: NextRequest) {
   try {
@@ -54,7 +54,7 @@ export async function POST(req: NextRequest) {
     let transferredUnlock = false;
     if (transferToken) {
       try {
-        transferredUnlock = transferTemporaryUnlock(transferToken, user.id);
+        transferredUnlock = await transferTemporaryUnlockPg(transferToken, user.id);
         if (transferredUnlock) {
           console.log(`[signup] Transferred temporary unlock ${transferToken} to user ${user.id}`);
         }
