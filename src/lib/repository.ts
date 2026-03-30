@@ -915,3 +915,100 @@ export async function createOrUpdateAccountPg(accountData: {
     throw error;
   }
 }
+
+/**
+ * Postgres health check.
+ * Simple connectivity test for database health monitoring.
+ */
+export async function getDatabaseHealthPg(): Promise<{ healthy: boolean; dbValue: number }> {
+  try {
+    const result = await pgQuery("SELECT 1 as test");
+    return {
+      healthy: true,
+      dbValue: result.rows[0]?.test || 0
+    };
+  } catch (error) {
+    console.error("[repository] getDatabaseHealthPg error:", error);
+    throw error;
+  }
+}
+
+/**
+ * Check if user already unlocked this account (Postgres version).
+ */
+export async function hasUserUnlockedAccountPg(userId: string, accountId: string): Promise<boolean> {
+  try {
+    const result = await pgQuery(
+      "SELECT MAX(boundary_end) as max_boundary FROM unlocks WHERE user_id = $1 AND account_id = $2",
+      [userId, accountId]
+    );
+    return (result.rows[0]?.max_boundary || 0) > 0;
+  } catch (error) {
+    console.error("[repository] hasUserUnlockedAccountPg error:", error);
+    throw error;
+  }
+}
+
+/**
+ * Get temporary unlock by token (Postgres version).
+ */
+export async function getTemporaryUnlockPg(token: string): Promise<TemporaryUnlock | null> {
+  try {
+    const result = await pgQuery(
+      "SELECT * FROM temporary_unlocks WHERE token = $1 AND expires_at > NOW() AND consumed = false",
+      [token]
+    );
+    
+    if (result.rows.length === 0) {
+      return null;
+    }
+    
+    const row = result.rows[0];
+    return {
+      token: row.token,
+      account_id: row.account_id,
+      username: row.username,
+      tweets_json: row.tweets_json,
+      job_id: row.job_id,
+      created_at: row.created_at,
+      expires_at: row.expires_at,
+      consumed: row.consumed ? 1 : 0 // Convert boolean back to number for compatibility
+    };
+  } catch (error) {
+    console.error("[repository] getTemporaryUnlockPg error:", error);
+    throw error;
+  }
+}
+
+/**
+ * Transfer temporary unlock to user account (Postgres version).
+ */
+export async function transferTemporaryUnlockPg(token: string, userId: string): Promise<boolean> {
+  try {
+    // Start transaction simulation with multiple queries
+    const tempUnlock = await getTemporaryUnlockPg(token);
+    if (!tempUnlock) {
+      return false;
+    }
+    
+    // Mark temporary unlock as consumed
+    await pgQuery(
+      "UPDATE temporary_unlocks SET consumed = true WHERE token = $1",
+      [token]
+    );
+    
+    // Create official unlock record (using boundary defaults for now)
+    await pgQuery(
+      `INSERT INTO unlocks (user_id, account_id, stage, boundary_end, granted_count, job_id, unlocked_at)
+       VALUES ($1, $2, $3, $4, $5, $6, NOW())
+       ON CONFLICT (user_id, account_id, stage) DO NOTHING`,
+      [userId, tempUnlock.account_id, 1, 100, 100, `temp-transfer-${token}`]
+    );
+    
+    console.log(`[temporary-unlock] Transferred token ${token} to user ${userId} for account ${tempUnlock.account_id}`);
+    return true;
+  } catch (error) {
+    console.error("[repository] transferTemporaryUnlockPg error:", error);
+    throw error;
+  }
+}

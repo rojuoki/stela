@@ -1,13 +1,21 @@
 import { NextResponse } from "next/server";
-import { getDb } from "@/lib/db";
+import { getDatabaseHealthPg } from "@/lib/repository";
 
-export function GET() {
+export async function GET() {
   try {
-    const db = getDb();
-    const row = db.prepare("SELECT 1 AS ok").get() as { ok: number };
-    return NextResponse.json({ status: "ok", db: row.ok === 1 });
+    const health = await getDatabaseHealthPg();
+    return NextResponse.json({ 
+      status: "ok", 
+      db: health.healthy,
+      postgres: true,
+      value: health.dbValue
+    });
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : "unknown";
-    return NextResponse.json({ status: "error", error: msg }, { status: 500 });
+    return NextResponse.json({ 
+      status: "error", 
+      error: msg,
+      postgres: true
+    }, { status: 500 });
   }
 }

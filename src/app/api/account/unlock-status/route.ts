@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getUserId } from "@/lib/getUserId";
-import { hasUserUnlockedAccount, getAccountByUsername, getTemporaryUnlock, transferTemporaryUnlock } from "@/lib/repository";
+import { hasUserUnlockedAccountPg, getAccountByUsernamePg, getTemporaryUnlockPg, transferTemporaryUnlockPg } from "@/lib/repository";
 import { withDevMeasure } from "@/lib/devMeasure";
 
 export async function GET(req: NextRequest) {
@@ -18,7 +18,7 @@ export async function GET(req: NextRequest) {
 
     try {
       // Get account info
-      const account = getAccountByUsername(username);
+      const account = await getAccountByUsernamePg(username);
       if (!account) {
         return NextResponse.json({
           unlocked: false,
@@ -31,14 +31,14 @@ export async function GET(req: NextRequest) {
       const tempUnlockToken = req.cookies.get('temp-unlock-token')?.value;
       
       if (tempUnlockToken) {
-        const tempUnlock = getTemporaryUnlock(tempUnlockToken);
+        const tempUnlock = await getTemporaryUnlockPg(tempUnlockToken);
         if (tempUnlock && tempUnlock.username.toLowerCase() === username.toLowerCase()) {
           hasTemporaryUnlock = true;
           
           // If user is authenticated, transfer the temporary unlock to their account
           if (userId !== "anonymous") {
             try {
-              const transferred = transferTemporaryUnlock(tempUnlockToken, userId);
+              const transferred = await transferTemporaryUnlockPg(tempUnlockToken, userId);
               if (transferred) {
                 console.log(`[unlock-status] Transferred temporary unlock to user ${userId} for ${username}`);
                 // Clear the temporary unlock cookie since it's now transferred
@@ -74,7 +74,7 @@ export async function GET(req: NextRequest) {
         });
       }
 
-      const isUnlocked = hasUserUnlockedAccount(userId, account.account_id);
+      const isUnlocked = await hasUserUnlockedAccountPg(userId, account.account_id);
 
       return NextResponse.json({
         unlocked: isUnlocked,

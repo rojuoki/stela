@@ -22,8 +22,36 @@ CREATE TABLE IF NOT EXISTS api_call_log (
     ts TIMESTAMP NOT NULL DEFAULT NOW()
 );
 
+-- User unlock history (for unlock status checking)
+CREATE TABLE IF NOT EXISTS unlocks (
+    id SERIAL PRIMARY KEY,
+    user_id VARCHAR(50) NOT NULL DEFAULT 'anonymous',
+    account_id VARCHAR(50) NOT NULL,
+    stage INTEGER NOT NULL DEFAULT 1,
+    boundary_end INTEGER NOT NULL DEFAULT 0,
+    granted_count INTEGER NOT NULL DEFAULT 0,
+    job_id TEXT,
+    unlocked_at TIMESTAMP NOT NULL DEFAULT NOW(),
+    UNIQUE(user_id, account_id, stage)
+);
+
+-- Temporary unlock results (for guest users)
+CREATE TABLE IF NOT EXISTS temporary_unlocks (
+    token VARCHAR(100) PRIMARY KEY,
+    account_id VARCHAR(50) NOT NULL,
+    username VARCHAR(50) NOT NULL,
+    tweets_json TEXT NOT NULL,
+    job_id TEXT,
+    created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+    expires_at TIMESTAMP NOT NULL,
+    consumed BOOLEAN NOT NULL DEFAULT false
+);
+
 -- Create indexes
 CREATE INDEX IF NOT EXISTS idx_api_call_log_ts ON api_call_log(ts DESC);
+CREATE INDEX IF NOT EXISTS idx_unlocks_user_account ON unlocks(user_id, account_id);
+CREATE INDEX IF NOT EXISTS idx_temporary_unlocks_expires ON temporary_unlocks(expires_at);
+CREATE INDEX IF NOT EXISTS idx_temporary_unlocks_consumed ON temporary_unlocks(consumed);
 
 -- Verify tables created
 \dt;

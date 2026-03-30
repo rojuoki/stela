@@ -1,6 +1,6 @@
 # Database Migration Status
 
-## Current Status: Phase 3.1 Complete
+## Current Status: Phase 4 Complete
 
 **New Database Standard: Postgres/Neon via DATABASE_URL**
 
@@ -8,10 +8,8 @@
 
 - ✅ **Phase 1**: SQLite dependency audit complete
 - ✅ **Phase 2**: SQLite removed from source control, Postgres established as new standard
-- ✅ **Phase 3.1**: Postgres connection layer introduced (coexisting with SQLite)
-- ✅ **Phase 3.2**: Migrated minimal repository functions for /api/account
-- ✅ **Phase 3.3**: Switched /api/account to Postgres
-- ✅ **Phase 3.4**: SQLite dependency reduced for /api/account path
+- ✅ **Phase 3**: /api/account fully migrated to Postgres
+- ✅ **Phase 4**: Core routes migrated (health + unlock status + auth verification)
 
 ### Database Files Status
 
@@ -68,9 +66,30 @@ Add your Neon `DATABASE_URL` to `.env` file to enable Postgres connection testin
 - `scripts/test-pg-repository.ts` — Repository function validation
 - `scripts/test-api-account.ts` — End-to-end API testing
 
+### Phase 4 Implementation Details
+
+**Additional Postgres Repository Functions:**
+- `getDatabaseHealthPg()` — Health check connectivity test
+- `hasUserUnlockedAccountPg()` — Check if user has unlocked an account
+- `getTemporaryUnlockPg()` — Get guest user temporary unlock by token
+- `transferTemporaryUnlockPg()` — Transfer guest unlock to authenticated user
+
+**Migrated Routes:**
+- `src/app/api/health/route.ts` — Database health monitoring
+- `src/app/api/account/unlock-status/route.ts` — User unlock status checking
+- `/api/auth/me` — No changes needed (JWT verification only)
+
+**Updated Schema:**
+- Added `unlocks` table to Postgres schema
+- Added `temporary_unlocks` table for guest user functionality
+- Updated indexes for performance
+
 **Migration Status:**
-- ✅ `/api/account` — **Fully migrated to Postgres**
-- 🔄 All other routes — Still using SQLite via repository.ts
+- ✅ `/api/account` — **Fully migrated to Postgres** (Phase 3)
+- ✅ `/api/health` — **Fully migrated to Postgres** (Phase 4)
+- ✅ `/api/account/unlock-status` — **Fully migrated to Postgres** (Phase 4)
+- ✅ `/api/auth/me` — **No DB dependency** (works with current JWT system)
+- 🔄 Remaining routes — Still using SQLite via repository.ts
 
 ### Current System State
 
@@ -86,11 +105,10 @@ Add your Neon `DATABASE_URL` to `.env` file to enable Postgres connection testin
 
 ### Next Migration Targets (Priority Order)
 
-**High Priority - Direct DB Bypasses:**
-1. `src/app/api/health/route.ts` — Simple health check query
-2. `src/app/api/stripe/webhook/route.ts` — Payment processing critical path  
-3. `src/app/api/guest-unlock/session/route.ts` — Guest user functionality
-4. `src/app/api/dev/jobs/route.ts` — Development tools
+**Remaining Direct DB Bypasses:**
+1. `src/app/api/guest-unlock/session/route.ts` — Guest user functionality
+2. `src/app/api/dev/jobs/route.ts` — Development tools
+3. `src/app/api/stripe/webhook/route.ts` — Payment processing (save for later)
 
 **Medium Priority - Core Features:**
 5. `/api/unlock/*` routes — Main unlock functionality (7 routes)
@@ -122,6 +140,12 @@ npx tsx scripts/test-pg-repository.ts
 # 3. Start dev server
 npm run dev
 
-# 4. Test /api/account endpoint
-npx tsx scripts/test-api-account.ts
+# 4. Test Phase 3+4 endpoints
+npx tsx scripts/test-phase4-routes.ts
 ```
+
+**Phase 4 Test Coverage:**
+- ✅ Health check with Postgres connectivity
+- ✅ Account unlock status (unlock system read-only)  
+- ✅ Auth verification (no DB dependency)
+- ✅ Account lookup (Phase 3 - regression test)
