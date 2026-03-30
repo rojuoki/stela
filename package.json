@@ -12,10 +12,12 @@
   },
   "dependencies": {
     "@types/bcryptjs": "^2.4.6",
+    "@types/pg": "^8.20.0",
     "bcryptjs": "^3.0.3",
     "better-sqlite3": "^12.6.2",
     "jose": "^6.2.1",
     "next": "16.1.6",
+    "pg": "^8.20.0",
     "react": "19.2.3",
     "react-dom": "19.2.3",
     "stripe": "^21.0.1"

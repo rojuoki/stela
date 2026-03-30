@@ -1,8 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { normalizeUsername, checkRateLimit } from "@/lib/validation";
-import { getAccountByUsername, recordApiCall } from "@/lib/repository";
+import { getAccountByUsernamePg, recordApiCallPg, createOrUpdateAccountPg } from "@/lib/repository";
 import { getUserByUsername, createStats, XApiStop } from "@/lib/xclient";
-import { getDb } from "@/lib/db";
 import { withDevMeasure, type MeasureCtx } from "@/lib/devMeasure";
 
 export async function GET(req: NextRequest) {
@@ -50,9 +49,9 @@ export async function GET(req: NextRequest) {
     }
 
     // ── Check DB cache first ──
-    const cachedAccount = getAccountByUsername(username);
+    const cachedAccount = await getAccountByUsernamePg(username);
     if (cachedAccount) {
-      recordApiCall("cache/account", true); // saved: user lookup from DB
+      await recordApiCallPg("cache/account", true); // saved: user lookup from DB
       console.log(`[account] Cache hit for @${username}`);
       return NextResponse.json({
         account_id: cachedAccount.account_id,
@@ -75,20 +74,15 @@ export async function GET(req: NextRequest) {
       const user = await getUserByUsername(username, stats);
       
       // Store in DB for future cache hits
-      const db = getDb();
-      db.prepare(`
-        INSERT OR REPLACE INTO accounts (account_id, username, display_name, avatar_url, description, created_at, protected, fetched_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-      `).run(
-        user.id,
-        user.username.toLowerCase(),
-        user.name,
-        user.profile_image_url || null,
-        user.description || null,
-        user.created_at,
-        user.protected ? 1 : 0,
-        new Date().toISOString()
-      );
+      await createOrUpdateAccountPg({
+        id: user.id,
+        username: user.username,
+        name: user.name,
+        profile_image_url: user.profile_image_url,
+        description: user.description,
+        created_at: user.created_at,
+        protected: user.protected
+      });
 
       console.log(`[account] Stored @${username} in cache`);
       

@@ -3,7 +3,7 @@
  * Pure DB read/write. No external API calls.
  */
 
-import { getDb } from "./db";
+import { getDb, pgQuery } from "./db";
 
 export interface Account {
   account_id: string;
@@ -821,4 +821,97 @@ export function cleanupExpiredTemporaryUnlocks(): number {
   }
   
   return result.changes;
+}
+
+// ========================================
+// POSTGRES REPOSITORY FUNCTIONS (Phase 3.2)
+// Async versions for gradual migration from SQLite
+// ========================================
+
+/**
+ * Postgres version of getAccountByUsername.
+ * Returns Account or undefined, with boolean converted from integer.
+ */
+export async function getAccountByUsernamePg(username: string): Promise<Account | undefined> {
+  try {
+    const result = await pgQuery(
+      "SELECT * FROM accounts WHERE username = $1",
+      [username.toLowerCase()]
+    );
+    
+    if (result.rows.length === 0) {
+      return undefined;
+    }
+    
+    const row = result.rows[0];
+    return {
+      account_id: row.account_id,
+      username: row.username,
+      display_name: row.display_name,
+      avatar_url: row.avatar_url,
+      description: row.description,
+      created_at: row.created_at,
+      protected: row.protected ? 1 : 0, // Convert boolean back to integer for compatibility
+      fetched_at: row.fetched_at,
+    };
+  } catch (error) {
+    console.error("[repository] getAccountByUsernamePg error:", error);
+    throw error;
+  }
+}
+
+/**
+ * Postgres version of recordApiCall.
+ * Non-fatal telemetry logging.
+ */
+export async function recordApiCallPg(endpoint: string, cached: boolean): Promise<void> {
+  try {
+    await pgQuery(
+      "INSERT INTO api_call_log (endpoint, cached, ts) VALUES ($1, $2, $3)",
+      [endpoint, cached, new Date().toISOString()]
+    );
+  } catch (error) {
+    // Non-fatal — telemetry must never break the hot path
+    console.warn("[repository] recordApiCallPg failed:", error);
+  }
+}
+
+/**
+ * Create or update account in Postgres.
+ * Handles the INSERT OR REPLACE logic that was directly in /api/account route.
+ */
+export async function createOrUpdateAccountPg(accountData: {
+  id: string;
+  username: string;
+  name: string;
+  profile_image_url?: string;
+  description?: string;
+  created_at: string;
+  protected: boolean;
+}): Promise<void> {
+  try {
+    await pgQuery(
+      `INSERT INTO accounts (account_id, username, display_name, avatar_url, description, created_at, protected, fetched_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+       ON CONFLICT (account_id) DO UPDATE SET
+         display_name = EXCLUDED.display_name,
+         avatar_url = EXCLUDED.avatar_url,
+         description = EXCLUDED.description,
+         protected = EXCLUDED.protected,
+         fetched_at = EXCLUDED.fetched_at`,
+      [
+        accountData.id,
+        accountData.username.toLowerCase(),
+        accountData.name,
+        accountData.profile_image_url || null,
+        accountData.description || null,
+        accountData.created_at,
+        accountData.protected,
+        new Date().toISOString()
+      ]
+    );
+  } catch (error) {
+    console.error("[repository] createOrUpdateAccountPg error:", error);
+    throw error;
+  }
 }

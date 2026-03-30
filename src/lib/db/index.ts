@@ -1,5 +1,6 @@
 import Database from "better-sqlite3";
 import path from "path";
+import { Pool, PoolClient, QueryResult } from "pg";
 import { SCHEMA_SQL } from "./schema";
 
 const DB_PATH = process.env.DATABASE_PATH || "./stela.sqlite";
@@ -139,5 +140,66 @@ function runMigrations(db: Database.Database): void {
   if (!jobCols2.some((c) => c.name === "user_id")) {
     db.prepare("ALTER TABLE jobs ADD COLUMN user_id TEXT NOT NULL DEFAULT 'anonymous'").run();
     console.log("[db] Migration M-009: added jobs.user_id for unlock user tracking");
+  }
+}
+
+// ========================================
+// POSTGRES CONNECTION LAYER (Phase 3)
+// ========================================
+
+let _pgPool: Pool | null = null;
+
+/**
+ * Get Postgres connection pool using DATABASE_URL.
+ * This will coexist with SQLite during migration phase.
+ */
+export function getPgPool(): Pool {
+  if (!_pgPool) {
+    if (!process.env.DATABASE_URL) {
+      throw new Error("DATABASE_URL environment variable is not set for Postgres connection");
+    }
+    
+    _pgPool = new Pool({
+      connectionString: process.env.DATABASE_URL,
+      ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false,
+    });
+    
+    console.log("[postgres] Connection pool initialized");
+  }
+  return _pgPool;
+}
+
+/**
+ * Execute a parameterized Postgres query.
+ * Helper function for repository layer migration.
+ */
+export async function pgQuery<T = any>(
+  text: string,
+  params: any[] = []
+): Promise<QueryResult<T>> {
+  const pool = getPgPool();
+  try {
+    const result = await pool.query(text, params);
+    return result;
+  } catch (error) {
+    console.error("[postgres] Query error:", error);
+    console.error("[postgres] Query:", text);
+    console.error("[postgres] Params:", params);
+    throw error;
+  }
+}
+
+/**
+ * Test Postgres connectivity.
+ * Simple connection validation for Phase 3.1
+ */
+export async function testPgConnection(): Promise<boolean> {
+  try {
+    const result = await pgQuery("SELECT 1 as test");
+    console.log("[postgres] Connection test successful:", result.rows[0]);
+    return true;
+  } catch (error) {
+    console.error("[postgres] Connection test failed:", error);
+    return false;
   }
 }
