@@ -88,7 +88,7 @@ export default function Home() {
       }, 1500); // 1.5 second delay
       
       // Clean up URL
-      window.history.replaceState({}, '', '/');
+      //window.history.replaceState({}, '', '/');
     }
   }, [user, refreshCredits, refreshSubscription]);
 
