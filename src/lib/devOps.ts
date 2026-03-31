@@ -2,7 +2,7 @@
  * Dev-only DB helpers. Never imported in production code paths.
  * All callers must guard with NEXT_PUBLIC_DEV_PANEL === "1".
  */
-import { getDb } from "./db";
+import { pgQuery } from "./db";
 
 export function sanitizeDevUserId(raw: unknown): string | null {
   if (typeof raw !== "string") return null;
@@ -16,25 +16,23 @@ export function sanitizeDevUsername(raw: unknown): string | null {
 }
 
 /** Delete all unlock rows for a user. Returns rows deleted. */
-export function devResetUser(userId: string): number {
-  const db = getDb();
-  return db.prepare("DELETE FROM unlocks WHERE user_id = ?").run(userId).changes;
+export async function devResetUser(userId: string): Promise<number> {
+  const result = await pgQuery("DELETE FROM unlocks WHERE user_id = $1", [userId]);
+  return result.rowCount || 0;
 }
 
 /**
  * Delete unlock row for a specific (userId, username) pair.
  * Returns rows deleted (0 if account unknown or not unlocked).
  */
-export function devResetAccount(userId: string, username: string): number {
-  const db = getDb();
+export async function devResetAccount(userId: string, username: string): Promise<number> {
   const normalized = username.toLowerCase();
-  const account = db
-    .prepare("SELECT account_id FROM accounts WHERE username = ?")
-    .get(normalized) as { account_id: string } | undefined;
-  if (!account) return 0;
-  return db
-    .prepare("DELETE FROM unlocks WHERE user_id = ? AND account_id = ?")
-    .run(userId, account.account_id).changes;
+  const accountResult = await pgQuery("SELECT account_id FROM accounts WHERE username = $1", [normalized]);
+  if (accountResult.rows.length === 0) return 0;
+  
+  const account = accountResult.rows[0];
+  const result = await pgQuery("DELETE FROM unlocks WHERE user_id = $1 AND account_id = $2", [userId, account.account_id]);
+  return result.rowCount || 0;
 }
 
 /**
@@ -42,56 +40,50 @@ export function devResetAccount(userId: string, username: string): number {
  * Creates a minimal accounts row and a sentinel succeeded job if needed,
  * then upserts the unlock record.
  */
-export function devForceUnlock(
+export async function devForceUnlock(
   userId: string,
   username: string,
   cap: number,
-): void {
-  const db = getDb();
+): Promise<void> {
   const now = new Date().toISOString();
   const normalized = username.toLowerCase();
 
   // Ensure account row exists (upsert minimal row)
-  let account = db
-    .prepare("SELECT account_id FROM accounts WHERE username = ?")
-    .get(normalized) as { account_id: string } | undefined;
-  if (!account) {
+  let accountResult = await pgQuery("SELECT account_id FROM accounts WHERE username = $1", [normalized]);
+  let account;
+  if (accountResult.rows.length === 0) {
     const accountId = `dev_acct_${normalized}`;
-    db.prepare(
-      `INSERT OR IGNORE INTO accounts
-         (account_id, username, display_name, protected, fetched_at)
-       VALUES (?, ?, ?, 0, ?)`,
-    ).run(accountId, normalized, username, now);
+    await pgQuery(
+      `INSERT INTO accounts (account_id, username, display_name, protected, fetched_at)
+       VALUES ($1, $2, $3, $4, $5) ON CONFLICT (account_id) DO NOTHING`,
+      [accountId, normalized, username, false, now]
+    );
     account = { account_id: accountId };
+  } else {
+    account = accountResult.rows[0];
   }
 
   // Create a sentinel succeeded job (needed for unlocks FK)
   const jobId = `dev_job_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
-  db.prepare(
-    `INSERT INTO jobs
-       (id, account_username, account_id, requested_limit,
-        status, fetched_count, created_at, finished_at)
-     VALUES (?, ?, ?, ?, 'succeeded', ?, ?, ?)`,
-  ).run(jobId, normalized, account.account_id, cap, cap, now, now);
+  await pgQuery(
+    `INSERT INTO jobs (id, account_username, account_id, requested_limit, status, fetched_count, created_at, finished_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+    [jobId, normalized, account.account_id, cap, 'succeeded', cap, now, now]
+  );
 
   // Upsert unlock record
-  db.prepare(
-    `INSERT OR REPLACE INTO unlocks (user_id, account_id, job_id, unlocked_at)
-     VALUES (?, ?, ?, ?)`,
-  ).run(userId, account.account_id, jobId, now);
+  await pgQuery(
+    `INSERT INTO unlocks (user_id, account_id, job_id, unlocked_at)
+     VALUES ($1, $2, $3, $4) ON CONFLICT (user_id, account_id) DO UPDATE SET job_id = $3, unlocked_at = $4`,
+    [userId, account.account_id, jobId, now]
+  );
 
   // Insert a placeholder tweet so getCachedTweetCount() > 0.
   // This lets /api/unlock return cache-hit (instead of queuing a new job).
   const placeholderTweetId = `dev_tweet_${account.account_id}`;
-  db.prepare(
-    `INSERT OR IGNORE INTO tweets
-       (post_id, account_id, created_at, full_text, like_count, retweet_count, reply_count, fetched_at)
-     VALUES (?, ?, ?, ?, 0, 0, 0, ?)`,
-  ).run(
-    placeholderTweetId,
-    account.account_id,
-    "2006-03-21T00:00:00.000Z",
-    "[dev placeholder — force unlock]",
-    now,
+  await pgQuery(
+    `INSERT INTO tweets (post_id, account_id, created_at, full_text, like_count, retweet_count, reply_count, fetched_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8) ON CONFLICT (post_id) DO NOTHING`,
+    [placeholderTweetId, account.account_id, "2006-03-21T00:00:00.000Z", "[dev placeholder — force unlock]", 0, 0, 0, now]
   );
 }

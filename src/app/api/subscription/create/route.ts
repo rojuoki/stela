@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getUserFromRequest } from "@/lib/auth";
-import { createOrUpdateSubscription } from "@/lib/repository";
+import { createOrUpdateSubscriptionPg } from "@/lib/repository";
 
 export async function POST(req: NextRequest) {
   try {
@@ -37,7 +37,7 @@ export async function POST(req: NextRequest) {
     }
 
     // Create the subscription (this also grants initial credits)
-    const subscription = createOrUpdateSubscription(user.id, 'basic', 4);
+    const subscription = await createOrUpdateSubscriptionPg(user.id, 'basic', 4);
 
     console.log(`[subscription] Basic subscription created for ${user.email} (${user.id})`);
 

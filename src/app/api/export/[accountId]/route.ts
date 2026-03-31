@@ -19,7 +19,7 @@ export async function GET(
   }
 
   // Get tweets (no re-fetch, export only stored data)
-  const tweets = getTweetsByAccount(accountId);
+  const tweets = await getTweetsByAccount(accountId);
   
   if (tweets.length === 0) {
     return NextResponse.json({ error: "No data found for this account" }, { status: 404 });

@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { grantMonthlyCredits } from "@/lib/repository";
+import { grantMonthlyCreditsPg } from "@/lib/repository";
 
 export async function POST(req: NextRequest) {
   try {
@@ -11,7 +11,7 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
-    const result = grantMonthlyCredits();
+    const result = await grantMonthlyCreditsPg();
     
     console.log(`[cron/monthly-credits] Completed: ${result.processed} subscriptions processed, ${result.granted} credits granted`);
     

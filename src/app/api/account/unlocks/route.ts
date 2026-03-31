@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getUserId } from "@/lib/getUserId";
-import { getUserUnlockedAccounts } from "@/lib/repository";
+import { getUserUnlockedAccountsPg } from "@/lib/repository";
 import { withDevMeasure } from "@/lib/devMeasure";
 
 export async function GET(req: NextRequest) {
@@ -14,7 +14,7 @@ export async function GET(req: NextRequest) {
     }
 
     try {
-      const accounts = getUserUnlockedAccounts(userId);
+      const accounts = await getUserUnlockedAccountsPg(userId);
 
       return NextResponse.json({
         userId,

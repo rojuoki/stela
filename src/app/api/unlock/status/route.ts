@@ -18,7 +18,7 @@ import {
   planExtension, 
   validateExtendRequest 
 } from "@/lib/unlockPlanning";
-import { getAccountByUsername } from "@/lib/repository";
+import { getAccountByUsernamePg } from "@/lib/repository";
 import { normalizeUsername } from "@/lib/validation";
 
 export async function GET(req: NextRequest) {
@@ -35,7 +35,7 @@ export async function GET(req: NextRequest) {
     }
 
     // Find account
-    const account = getAccountByUsername(username);
+    const account = await getAccountByUsernamePg(username);
     if (!account) {
       return NextResponse.json({ 
         error: `Account @${username} not found` 
@@ -43,7 +43,7 @@ export async function GET(req: NextRequest) {
     }
 
     // Calculate current unlocked boundary (authoritative)
-    const currentBoundary = calculateUnlockedBoundary(userId, account.account_id);
+    const currentBoundary = await calculateUnlockedBoundary(userId, account.account_id);
     
     // Check if user has unlocked anything yet
     if (currentBoundary === 0) {
@@ -61,10 +61,10 @@ export async function GET(req: NextRequest) {
     }
 
     // Plan potential extension
-    const plan = planExtension(userId, account.account_id);
+    const plan = await planExtension(userId, account.account_id);
     
     // Check if extend is valid and possible
-    const validationError = validateExtendRequest(userId, account.account_id);
+    const validationError = await validateExtendRequest(userId, account.account_id);
     const canExtend = validationError === null;
     
     // Return comprehensive status

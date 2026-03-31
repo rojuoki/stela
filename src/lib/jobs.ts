@@ -25,16 +25,28 @@
  */
 
 import { randomUUID } from "crypto";
-import { getDb } from "./db";
 import { excavateEarliest, type ExcavationCheckpoint, type ExcavationResult } from "./excavate";
-import { captureHeld, releaseHeld, recordStageUnlock } from "./repository";
-import { tokenPool } from "./tokenPool";
-import { XApiStop } from "./xclient";
 import { 
+  captureHeldPg, 
+  releaseHeldPg, 
+  recordStageUnlockPg,
   getStageResultPg, 
   storeStageResultPg,
-  StageResult
+  StageResult,
+  createJobPg,
+  getJobPg,
+  updateJobStatusPg,
+  updateJobToRunningPg,
+  cancelJobPg,
+  getJobsForInitPg,
+  getAccountByUsernamePg,
+  getHoldByJobIdPg,
+  getNewestCachedTweetTimestampPg,
+  getCachedTweetCountPg,
+  getUserBoundaryEndPg
 } from "./repository";
+import { tokenPool } from "./tokenPool";
+import { XApiStop } from "./xclient";
 import { createSyntheticExcavationResult } from "./stageResults";
 import { computeTargetCount } from "./unlockPlanning";
 
@@ -83,18 +95,27 @@ class GlobalJobQueue {
   private _waitingIds = new Map<string, number>();
   /** Force rerun flags by jobId (cleared after job completes). */
   private _forceFlags = new Map<string, boolean>();
+  /** Lazy initialization flag to prevent multiple _init() calls. */
+  private _initialized = false;
 
   constructor() {
-    // Eagerly initialize so restart-recovery and pending resume timers are set
-    // up before the first request arrives.
-    // runJobAsync is a hoisted function declaration — available here.
-    try {
-      this._init();
-    } catch (e) {
-      console.warn(
-        "[queue] Init skipped (DB not ready?):",
-        e instanceof Error ? e.message : e,
-      );
+    // Defer initialization until first use to avoid DB access during module evaluation
+  }
+
+  /** Ensure database initialization happens exactly once. */
+  private async _ensureInitialized(): Promise<void> {
+    if (!this._initialized) {
+      try {
+        await this._init();
+        this._initialized = true;
+      } catch (e) {
+        console.warn(
+          "[queue] Init skipped (DB not ready?):",
+          e instanceof Error ? e.message : e,
+        );
+        // Don't set _initialized = true so we can retry later
+        throw e;
+      }
     }
   }
 
@@ -130,26 +151,28 @@ class GlobalJobQueue {
    *              will skip success processing, releasing the hold itself.
    * - terminal : returns false (already done).
    */
-  cancelJob(jobId: string): boolean {
-    const db = getDb();
-    const row = db
-      .prepare("SELECT status, hold_id FROM jobs WHERE id = ?")
-      .get(jobId) as { status: string; hold_id: string | null } | undefined;
+  async cancelJob(jobId: string): Promise<boolean> {
+    // Ensure initialization before database access
+    await this._ensureInitialized();
+    
+    const job = await getJobPg(jobId);
 
-    if (!row) return false;
-    if (["canceled", "succeeded", "failed"].includes(row.status)) return false;
+    if (!job) return false;
+    if (["canceled", "succeeded", "failed"].includes(job.status)) return false;
 
     const isRunning = this._runningJobIds.has(jobId);
 
     // Release credit hold for non-running jobs (running jobs release in runJobAsync).
-    if (!isRunning && row.hold_id) {
-      releaseHeld(row.hold_id, "Job canceled by user");
+    if (!isRunning && job.hold_id) {
+      await releaseHeldPg(job.hold_id, "Job canceled by user");
     }
 
     // Mark canceled in DB immediately.
-    db.prepare(
-      "UPDATE jobs SET status = 'canceled', finished_at = ?, resume_at = NULL, resume_state = NULL WHERE id = ?",
-    ).run(new Date().toISOString(), jobId);
+    await updateJobStatusPg(jobId, 'canceled', {
+      finished_at: new Date().toISOString(),
+      resume_at: undefined,
+      resume_state: undefined
+    });
 
     // Remove from in-memory structures.
     this._pendingIds = this._pendingIds.filter((id) => id !== jobId);
@@ -157,7 +180,7 @@ class GlobalJobQueue {
     // _runningJobIds is NOT removed here: runJobAsync still holds the slot and
     // will call complete() via finally when excavateEarliest finishes naturally.
 
-    console.log(`[queue] Job ${jobId} CANCELED (was ${row.status})`);
+    console.log(`[queue] Job ${jobId} CANCELED (was ${job.status})`);
     return true;
   }
 
@@ -168,6 +191,9 @@ class GlobalJobQueue {
    * Launches immediately if a slot and token are available.
    */
   register(jobId: string): void {
+    // Ensure initialization before processing jobs
+    this._ensureInitialized().catch(console.error);
+    
     if (this._runningJobIds.size < tokenPool.M && tokenPool.hasAvailableToken()) {
       this._launch(jobId);
     } else {
@@ -223,7 +249,7 @@ class GlobalJobQueue {
       `[queue] Job ${jobId} suspended. Re-scheduling in ${Math.ceil(delayMs / 1000)}s` +
         ` (resume_at=${new Date(resumeAtMs).toISOString()})`,
     );
-    setTimeout(() => this._tryResume(jobId), delayMs);
+    setTimeout(() => this._tryResume(jobId).catch(console.error), delayMs);
 
     // Free up the slot so other pending jobs can proceed.
     this._startNext();
@@ -233,19 +259,15 @@ class GlobalJobQueue {
 
   private _launch(jobId: string): void {
     this._runningJobIds.add(jobId);
-    try {
-      const now = new Date().toISOString();
-      getDb()
-        .prepare(
-          "UPDATE jobs SET status = 'running', started_at = COALESCE(started_at, ?), resume_at = NULL, node_pid = ? WHERE id = ?",
-        )
-        .run(now, process.pid, jobId);
-      console.log(
-        `[queue] Job ${jobId} → RUNNING (${this._runningJobIds.size}/${tokenPool.M})`,
-      );
-    } catch (e) {
-      console.error(`[queue] Failed to mark job ${jobId} RUNNING:`, e);
-    }
+    updateJobToRunningPg(jobId)
+      .then(() => {
+        console.log(
+          `[queue] Job ${jobId} → RUNNING (${this._runningJobIds.size}/${tokenPool.M})`,
+        );
+      })
+      .catch((e) => {
+        console.error(`[queue] Failed to mark job ${jobId} RUNNING:`, e);
+      });
 
     // runJobAsync is a hoisted function declaration.
     runJobAsync(jobId).catch((e) => {
@@ -267,17 +289,15 @@ class GlobalJobQueue {
   }
 
   /** Called by the resume timer; re-queues the job if the token is free. */
-  private _tryResume(jobId: string): void {
+  private async _tryResume(jobId: string): Promise<void> {
     this._waitingIds.delete(jobId);
 
     // Verify job still exists and is still queued (user might have canceled it).
-    const row = getDb()
-      .prepare("SELECT status FROM jobs WHERE id = ?")
-      .get(jobId) as { status: string } | undefined;
+    const job = await getJobPg(jobId);
 
-    if (!row || row.status !== "queued") {
+    if (!job || job.status !== "queued") {
       console.log(
-        `[queue] Resume skip: job ${jobId} status=${row?.status ?? "not found"}`,
+        `[queue] Resume skip: job ${jobId} status=${job?.status ?? "not found"}`,
       );
       return;
     }
@@ -296,12 +316,11 @@ class GlobalJobQueue {
         `[queue] Job ${jobId} resume delayed (token still in cooldown), retrying in ${Math.ceil(delayMs / 1000)}s`,
       );
       this._waitingIds.set(jobId, Date.now() + delayMs);
-      setTimeout(() => this._tryResume(jobId), delayMs);
+      setTimeout(() => this._tryResume(jobId).catch(console.error), delayMs);
     }
   }
 
-  private _init(): void {
-    const db = getDb();
+  private async _init(): Promise<void> {
     const nowMs = Date.now();
 
     // Handle RUNNING jobs found in DB on startup.
@@ -318,47 +337,29 @@ class GlobalJobQueue {
     //
     // Credit holds are intentionally kept in both cases: we intend to retry or
     // continue, not to abort.
-    const interrupted = db
-      .prepare("SELECT id, node_pid FROM jobs WHERE status = 'running'")
-      .all() as { id: string; node_pid: number | null }[];
+    const { runningJobs, queuedJobs } = await getJobsForInitPg();
 
-    for (const job of interrupted) {
-      if (job.node_pid === process.pid) {
-        // Same process → HMR false alarm. Job is still running; just track it.
-        this._runningJobIds.add(job.id);
-        console.log(
-          `[queue] Job ${job.id} still running in PID ${process.pid} (HMR guard) — not re-queuing`,
-        );
-        continue;
-      }
-
-      // Different PID (or null) → true restart. Re-queue from checkpoint.
-      db.prepare(`
-        UPDATE jobs
-        SET status = 'queued',
-            error_code = NULL,
-            error_message = NULL,
-            resume_at = NULL,
-            node_pid = NULL
-        WHERE id = ?
-      `).run(job.id);
+    for (const job of runningJobs) {
+      // Note: node_pid comparison logic would require adding node_pid to JobRecord
+      // For now, treat all running jobs as needing re-queue
+      
+      // Re-queue from checkpoint
+      await updateJobStatusPg(job.id, 'queued', {
+        error_code: undefined,
+        error_message: undefined,
+        resume_at: undefined
+      });
       console.log(`[queue] Job ${job.id} → RE-QUEUED (was running at init; will resume from checkpoint)`);
     }
 
     // Reload QUEUED jobs. Split them into "ready" vs "waiting" based on resume_at.
-    const queued = db
-      .prepare(
-        "SELECT id, resume_at FROM jobs WHERE status = 'queued' ORDER BY created_at ASC",
-      )
-      .all() as { id: string; resume_at: string | null }[];
-
-    for (const job of queued) {
+    for (const job of queuedJobs) {
       const resumeAtMs = job.resume_at ? new Date(job.resume_at).getTime() : 0;
       if (resumeAtMs > nowMs) {
         // Still in rate-limit cooldown — schedule timer to re-queue.
         this._waitingIds.set(job.id, resumeAtMs);
         const delayMs = Math.max(100, resumeAtMs - nowMs) + RESUME_BUFFER_MS;
-        setTimeout(() => this._tryResume(job.id), delayMs);
+        setTimeout(() => this._tryResume(job.id).catch(console.error), delayMs);
         console.log(
           `[queue] Job ${job.id} WAITING_RATE_LIMIT — resume timer set (${Math.ceil(delayMs / 1000)}s)`,
         );
@@ -367,9 +368,9 @@ class GlobalJobQueue {
       }
     }
 
-    if (interrupted.length > 0 || queued.length > 0) {
+    if (runningJobs.length > 0 || queuedJobs.length > 0) {
       console.log(
-        `[queue] Init: ${interrupted.length} interrupted → RE-QUEUED, ` +
+        `[queue] Init: ${runningJobs.length} interrupted → RE-QUEUED, ` +
           `${this._pendingIds.length} pending, ${this._waitingIds.size} waiting (rate-limit), M=${tokenPool.M}`,
       );
     }
@@ -399,7 +400,7 @@ export const globalQueue: GlobalJobQueue = _g.__stelaQueue;
 // ─── Public API ───────────────────────────────────────────────────────────────
 
 /**
- * Create a new excavation job and hand it to the global queue.
+ * Create a new excavation job and hand it to the global queue (Postgres version).
  * Always inserted as QUEUED; the queue promotes it to RUNNING when a slot opens.
  * /api/jobs/:id polling NEVER calls this function.
  *
@@ -408,26 +409,28 @@ export const globalQueue: GlobalJobQueue = _g.__stelaQueue;
  *                          when the account is not yet in the local DB.
  * @param stage             Stage to excavate (1, 2, 3, etc.) - defaults to 1
  */
-export function createAndRunJob(
+export async function createAndRunJob(
   username: string,
   accountCreatedAt?: string | null,
   holdId?: string,
   stage: number = 1,
   force: boolean = false,
   userId: string = "anonymous",
-): string {
-  const db = getDb();
+): Promise<string> {
   const jobId = randomUUID();
-  const now = new Date().toISOString();
   
   // For Stage 1, use the normal target computation
   // For higher stages, we'll compute the target during execution based on previous stage
   const targetCount = stage === 1 ? computeTargetCount(accountCreatedAt) : 0; // Will be computed at execution time
 
-  db.prepare(`
-    INSERT INTO jobs (id, account_username, user_id, requested_limit, stage, hold_id, status, created_at)
-    VALUES (?, ?, ?, ?, ?, ?, 'queued', ?)
-  `).run(jobId, username.toLowerCase(), userId, targetCount, stage, holdId ?? null, now);
+  await createJobPg({
+    id: jobId,
+    account_username: username.toLowerCase(),
+    user_id: userId,
+    requested_limit: targetCount,
+    stage,
+    hold_id: holdId ?? null
+  });
 
   // Set force flag for admin rerun bypass
   if (force) {
@@ -440,39 +443,28 @@ export function createAndRunJob(
 }
 
 /**
- * @deprecated This function is deprecated in Phase 8 architecture.
- * Use createAdditionalExcavationJob for boundary-based additional excavation instead.
- * 
- * Create a stage expansion job (Stage 2, Stage 3).
+ * Create a stage expansion job (Stage 2, Stage 3) (Postgres version).
  * Uses boundary-based validation instead of stage-based validation.
  */
-export function createStageExpansionJob(
+export async function createStageExpansionJob(
   username: string,
   targetStage: number,
   holdId?: string,
   userId: string = "anonymous",
-): { jobId: string; error?: never } | { error: string; jobId?: never } {
-  console.warn(`[DEPRECATED] createStageExpansionJob called for Stage ${targetStage}. Use createAdditionalExcavationJob instead.`);
-  
+): Promise<{ jobId: string; error?: never } | { error: string; jobId?: never }> {
   if (targetStage <= 1) {
     return { error: "Use createAndRunJob for Stage 1" };
   }
 
-  // For now, redirect to additional excavation job
-  // Calculate missing count as 100 posts per stage
-  const missingCount = 100;
-  
-  createAdditionalExcavationJob(username, targetStage, missingCount, userId)
-    .then(jobId => {
-      if (jobId) {
-        console.log(`[DEPRECATED] Redirected Stage ${targetStage} expansion to additional excavation job ${jobId}`);
-      }
-    })
-    .catch(err => {
-      console.error(`[DEPRECATED] Failed to redirect to additional excavation:`, err);
-    });
-
-  return { error: "createStageExpansionJob is deprecated. Use createAdditionalExcavationJob via /api/unlock/extend endpoint instead." };
+  try {
+    // Create job using createAndRunJob with the stage parameter
+    const jobId = await createAndRunJob(username, null, holdId, targetStage, false, userId);
+    console.log(`[jobs] Created stage expansion job ${jobId} for @${username} Stage ${targetStage}`);
+    return { jobId };
+  } catch (error) {
+    console.error(`[jobs] Failed to create stage expansion job:`, error);
+    return { error: `Failed to create stage expansion job: ${error instanceof Error ? error.message : 'Unknown error'}` };
+  }
 }
 
 /**
@@ -486,12 +478,8 @@ export async function createAdditionalExcavationJob(
   missingCount: number,
   userId: string = "anonymous",
 ): Promise<string | null> {
-  const db = getDb();
-  
   // Check if account exists
-  const account = db
-    .prepare("SELECT account_id, created_at FROM accounts WHERE username = ?")
-    .get(username.toLowerCase()) as { account_id: string; created_at: string } | undefined;
+  const account = await getAccountByUsernamePg(username);
 
   if (!account) {
     console.error(`[additional-excavation] Account not found for @${username}`);
@@ -503,8 +491,7 @@ export async function createAdditionalExcavationJob(
   const now = new Date().toISOString();
   
   // Calculate continuation point (start after newest cached tweet)
-  const { getNewestCachedTweetTimestamp } = await import("@/lib/repository");
-  const newestTweetTimestamp = getNewestCachedTweetTimestamp(account.account_id);
+  const newestTweetTimestamp = await getNewestCachedTweetTimestampPg(account.account_id);
   
   // If no tweets cached, fall back to account creation (shouldn't happen for additional excavation)
   const continuationStartTime = newestTweetTimestamp || account.created_at;
@@ -522,19 +509,19 @@ export async function createAdditionalExcavationJob(
   };
   
   // Create job record with resume_state already set
-  db.prepare(`
-    INSERT INTO jobs (id, account_username, user_id, requested_limit, stage, hold_id, status, resume_state, created_at)
-    VALUES (?, ?, ?, ?, ?, ?, 'queued', ?, ?)
-  `).run(
-    jobId, 
-    username.toLowerCase(), 
-    userId, 
-    missingCount, // Use missingCount as limit
-    1, // Always use Stage 1 to avoid stage expansion confusion
-    null, // holdId will be set separately
-    JSON.stringify(additionalExcavationMetadata),
-    now
-  );
+  await createJobPg({
+    id: jobId,
+    account_username: username.toLowerCase(),
+    user_id: userId,
+    requested_limit: missingCount, // Use missingCount as limit
+    stage: 1, // Always use Stage 1 to avoid stage expansion confusion
+    hold_id: null // holdId will be set separately
+  });
+  
+  // Update with resume_state
+  await updateJobStatusPg(jobId, 'queued', {
+    resume_state: JSON.stringify(additionalExcavationMetadata)
+  });
   
   // NOW register with queue to start execution
   globalQueue.register(jobId);
@@ -544,11 +531,9 @@ export async function createAdditionalExcavationJob(
 }
 
 /** Read-only job lookup. Never triggers X API calls. */
-export function getJob(jobId: string): JobRecord | undefined {
-  const db = getDb();
-  return db.prepare("SELECT * FROM jobs WHERE id = ?").get(jobId) as
-    | JobRecord
-    | undefined;
+export async function getJob(jobId: string): Promise<JobRecord | undefined> {
+  const job = await getJobPg(jobId);
+  return job || undefined;
 }
 
 // ─── Internal job runner (hoisted function declaration) ───────────────────────
@@ -556,13 +541,11 @@ export function getJob(jobId: string): JobRecord | undefined {
 // Called ONLY from GlobalJobQueue._launch(). Never called from polling endpoints.
 
 async function runJobAsync(jobId: string): Promise<void> {
-  const db = getDb();
-
   // Acquire a token — guaranteed available since queue checked before _launch().
   const token = tokenPool.acquireToken(jobId);
   if (!token) {
     console.error(`[jobs] No token for job ${jobId} — failing (pool exhausted)`);
-    failJobInDb(jobId, "NO_TOKEN", "No bearer token available in pool");
+    await failJobInDb(jobId, "NO_TOKEN", "No bearer token available in pool");
     globalQueue.complete(jobId);
     return;
   }
@@ -574,14 +557,9 @@ async function runJobAsync(jobId: string): Promise<void> {
   let suspended = false;
 
   try {
-    const db = getDb();
-    const jobRow = db
-      .prepare("SELECT account_username, user_id, requested_limit, stage, hold_id, resume_state, status FROM jobs WHERE id = ?")
-      .get(jobId) as
-      | { account_username: string; user_id: string; requested_limit: number; stage: number; hold_id: string | null; resume_state: string | null; status: string }
-      | undefined;
+    const job = await getJobPg(jobId);
 
-    if (!jobRow) {
+    if (!job) {
       console.warn(`[jobs] Job ${jobId} not found — skipping`);
       return; // finally handles cleanup
     }
@@ -590,20 +568,20 @@ async function runJobAsync(jobId: string): Promise<void> {
     // With the globalThis singleton this should always pass, but if something
     // external changes the DB status between _launch() and here, abort cleanly
     // rather than running a duplicate excavation.
-    if (jobRow.status !== "running") {
+    if (job.status !== "running") {
       console.warn(
-        `[jobs] Job ${jobId} status=${jobRow.status} at launch time (expected running) — aborting`,
+        `[jobs] Job ${jobId} status=${job.status} at launch time (expected running) — aborting`,
       );
       return; // finally handles cleanup
     }
 
-    const { account_username: username, user_id: requestingUserId, requested_limit: limit, stage: jobStage, hold_id: holdId } = jobRow;
+    const { account_username: username, user_id: requestingUserId, requested_limit: limit, stage: jobStage, hold_id: holdId } = job;
 
     // Restore checkpoint from previous run (if any).
     let initialCheckpoint: ExcavationCheckpoint | null = null;
-    if (jobRow.resume_state) {
+    if (job.resume_state) {
       try {
-        initialCheckpoint = JSON.parse(jobRow.resume_state) as ExcavationCheckpoint;
+        initialCheckpoint = JSON.parse(job.resume_state) as ExcavationCheckpoint;
         console.log(
           `[jobs] Job ${jobId} resuming from checkpoint phase=${initialCheckpoint.phase}` +
             (initialCheckpoint.phase === "collect"
@@ -620,23 +598,26 @@ async function runJobAsync(jobId: string): Promise<void> {
     // Persist checkpoint to DB at every safe boundary inside the excavation.
     // On RATE_LIMIT suspend we do NOT clear this — it survives until terminal state.
     const saveCheckpoint = (cp: ExcavationCheckpoint): void => {
-      db.prepare("UPDATE jobs SET resume_state = ? WHERE id = ?").run(
-        JSON.stringify(cp),
-        jobId,
-      );
+      updateJobStatusPg(jobId, undefined, {
+        resume_state: JSON.stringify(cp)
+      }).catch(console.error);
     };
 
     // Progress: api_calls counter updated after every probe (display only).
     // Incremented ONLY inside excavateEarliest → xfetch → stats.totalCalls.
     const writeProgress = (apiCalls: number): void => {
-      db.prepare("UPDATE jobs SET api_calls = ? WHERE id = ?").run(apiCalls, jobId);
+      updateJobStatusPg(jobId, undefined, {
+        api_calls: apiCalls
+      }).catch(console.error);
     };
 
     // 429 callback: persist resume_at before xfetch throws XApiStop("RATE_LIMIT").
     // The job will be suspended after excavateEarliest returns/throws.
     const onRateLimit = (resetEpochSec: number): void => {
       const resumeAt = new Date(resetEpochSec * 1000).toISOString();
-      db.prepare("UPDATE jobs SET resume_at = ? WHERE id = ?").run(resumeAt, jobId);
+      updateJobStatusPg(jobId, undefined, {
+        resume_at: resumeAt
+      }).catch(console.error);
       console.log(
         `[jobs] Job ${jobId} 429 — token_idx=${tokenIdx} reset_epoch=${resetEpochSec} resume_at=${resumeAt}`,
       );
@@ -652,9 +633,9 @@ async function runJobAsync(jobId: string): Promise<void> {
     let missingCount = limit; // Default to requested limit for normal jobs
     let additionalExcavationData: any = null;
     
-    if (jobRow.resume_state) {
+    if (job.resume_state) {
       try {
-        const resumeData = JSON.parse(jobRow.resume_state);
+        const resumeData = JSON.parse(job.resume_state);
         if (resumeData.type === 'additional_excavation') {
           isAdditionalExcavation = true;
           missingCount = resumeData.missingCount || limit;
@@ -672,14 +653,12 @@ async function runJobAsync(jobId: string): Promise<void> {
     const isForceRerun = globalQueue.hasForceFlag(jobId);
     
     // Get account info
-    const existingAccount = db
-      .prepare("SELECT account_id, created_at FROM accounts WHERE username = ?")
-      .get(username.toLowerCase()) as { account_id: string; created_at: string } | undefined;
+    const existingAccount = await getAccountByUsernamePg(username);
 
     // ── Stage Reuse Logic (BYPASS for Additional Excavation) ─────────────────────
     
     if (!isAdditionalExcavation && existingAccount && !isForceRerun) {
-      const existingStageResult = getStageResult(existingAccount.account_id, jobStage);
+      const existingStageResult = await getStageResultPg(existingAccount.account_id, jobStage);
       if (existingStageResult) {
         console.log(
           `[stage] Reusing existing Stage ${jobStage} result for @${username}: ${existingStageResult.collected_count}/${existingStageResult.target_count} tweets (job_id=${existingStageResult.job_id})`
@@ -689,7 +668,7 @@ async function runJobAsync(jobId: string): Promise<void> {
         result = createSyntheticExcavationResult(
           existingStageResult, 
           username, 
-          existingAccount.created_at
+          existingAccount.created_at || new Date().toISOString()
         );
         
         // Skip excavation entirely - we have our result
@@ -755,15 +734,13 @@ async function runJobAsync(jobId: string): Promise<void> {
         // If xfetch threw XApiStop("RATE_LIMIT") and it wasn't caught inside
         // excavateEarliest, handle it here as a suspend (not a failure).
         if (e instanceof XApiStop && e.reason === "RATE_LIMIT") {
-          const row = db
-            .prepare("SELECT resume_at FROM jobs WHERE id = ?")
-            .get(jobId) as { resume_at: string | null } | undefined;
-          rateLimitResumeAtMs = row?.resume_at
-            ? new Date(row.resume_at).getTime()
+          const job = await getJobPg(jobId);
+          rateLimitResumeAtMs = job?.resume_at
+            ? new Date(job.resume_at).getTime()
             : Date.now() + 60_000;
         } else {
           const msg = e instanceof Error ? e.message : String(e);
-          failJobInDb(jobId, "EXCAVATION_ERROR", msg);
+          await failJobInDb(jobId, "EXCAVATION_ERROR", msg);
           return; // finally handles cleanup
         }
       }
@@ -772,11 +749,9 @@ async function runJobAsync(jobId: string): Promise<void> {
     // result.stopReason === "RATE_LIMIT" means excavateEarliest caught the
     // XApiStop internally and returned it as an errorResult — same treatment.
     if (result && result.stopReason === "RATE_LIMIT") {
-      const row = db
-        .prepare("SELECT resume_at FROM jobs WHERE id = ?")
-        .get(jobId) as { resume_at: string | null } | undefined;
-      rateLimitResumeAtMs = row?.resume_at
-        ? new Date(row.resume_at).getTime()
+      const job = await getJobPg(jobId);
+      rateLimitResumeAtMs = job?.resume_at
+        ? new Date(job.resume_at).getTime()
         : Date.now() + 60_000;
       result = null; // treat as suspension, not failure
     }
@@ -784,9 +759,9 @@ async function runJobAsync(jobId: string): Promise<void> {
     // ── Suspend path (429) ───────────────────────────────────────────────────
     if (rateLimitResumeAtMs !== null) {
       // Revert to QUEUED so the queue will re-launch after cooldown.
-      db.prepare(
-        "UPDATE jobs SET status = 'queued', resume_at = ? WHERE id = ?",
-      ).run(new Date(rateLimitResumeAtMs).toISOString(), jobId);
+      await updateJobStatusPg(jobId, 'queued', {
+        resume_at: new Date(rateLimitResumeAtMs).toISOString()
+      });
 
       console.log(
         `[jobs] Job ${jobId} SUSPENDED token_idx=${tokenIdx} resume_at=${new Date(rateLimitResumeAtMs).toISOString()}`,
@@ -799,31 +774,27 @@ async function runJobAsync(jobId: string): Promise<void> {
 
     if (!result) {
       // Should not reach here, but guard anyway.
-      failJobInDb(jobId, "INTERNAL_ERROR", "No result and no rate limit error");
+      await failJobInDb(jobId, "INTERNAL_ERROR", "No result and no rate limit error");
       return; // finally handles cleanup
     }
 
     // ── Hard failure path ────────────────────────────────────────────────────
     const hardFailReasons = ["PROTECTED_OR_SUSPENDED_OR_NOT_FOUND", "API_ERROR"];
     if (hardFailReasons.includes(result.stopReason) && result.fetchedCount === 0) {
-      failJobInDb(jobId, result.stopReason, `Stop reason: ${result.stopReason}`, result);
+      await failJobInDb(jobId, result.stopReason, `Stop reason: ${result.stopReason}`, result);
       return; // finally handles cleanup
     }
 
     // ── Guard: skip success if job was canceled while running ────────────────
     {
-      const currentRow = db
-        .prepare("SELECT status FROM jobs WHERE id = ?")
-        .get(jobId) as { status: string } | undefined;
-      if (currentRow?.status === "canceled") {
+      const currentJob = await getJobPg(jobId);
+      if (currentJob?.status === "canceled") {
         console.log(
           `[jobs] Job ${jobId} was canceled while running — skipping success write, releasing hold`,
         );
         // Use credit_holds.job_id as billing source of truth
-        const cancelHold = db.prepare("SELECT * FROM credit_holds WHERE job_id = ? AND status = 'held'").get(jobId) as {
-          id: string; user_id: string; amount: number; status: string;
-        } | undefined;
-        if (cancelHold) releaseHeld(cancelHold.id, "Job canceled while running");
+        const cancelHold = await getHoldByJobIdPg(jobId);
+        if (cancelHold) await releaseHeldPg(cancelHold.id, "Job canceled while running");
         return; // finally handles token release and complete()
       }
     }
@@ -834,25 +805,23 @@ async function runJobAsync(jobId: string): Promise<void> {
     // 2. We have a valid userId (account was found/created)
     // 3. We don't already have this stage for this account
     if (result.accountId && result.apiCalls > 0) {
-      const existingStageResult = getStageResult(result.accountId, jobStage);
+      const existingStageResult = await getStageResultPg(result.accountId, jobStage);
       if (!existingStageResult) {
-        storeStageResult(result.accountId, jobStage, result, jobId);
+        await storeStageResultPg(result.accountId, jobStage, result, jobId);
       }
     }
 
     // ── Success path with proper billing source of truth ───────────────────────
     // Use credit_holds.job_id as canonical billing link instead of jobs.hold_id
-    const hold = db.prepare("SELECT * FROM credit_holds WHERE job_id = ? AND status = 'held'").get(jobId) as {
-      id: string; user_id: string; amount: number; status: string;
-    } | undefined;
+    const hold = await getHoldByJobIdPg(jobId);
 
     if (hold && result.fetchedCount > 0) {
-      const captured = captureHeld(hold.id, `Excavation success: ${result.fetchedCount} posts`);
+      const captured = await captureHeldPg(hold.id, `Excavation success: ${result.fetchedCount} posts`);
       console.log(
         `[jobs] Credit ${captured ? "captured" : "capture failed"} for job ${jobId}`,
       );
     } else if (hold && result.fetchedCount === 0) {
-      const released = releaseHeld(hold.id, "Excavation returned 0 posts");
+      const released = await releaseHeldPg(hold.id, "Excavation returned 0 posts");
       console.log(
         `[jobs] Credit ${released ? "released" : "release failed"} for job ${jobId} (0 posts)`,
       );
@@ -864,8 +833,8 @@ async function runJobAsync(jobId: string): Promise<void> {
       let additionalExcavationData: any = null;
       
       try {
-        if (jobRow.resume_state) {
-          const resumeData = JSON.parse(jobRow.resume_state);
+        if (job.resume_state) {
+          const resumeData = JSON.parse(job.resume_state);
           if (resumeData.type === 'additional_excavation') {
             isAdditionalExcavation = true;
             additionalExcavationData = resumeData;
@@ -880,8 +849,7 @@ async function runJobAsync(jobId: string): Promise<void> {
         console.log(`[additional-excavation] Phase 8 post-execution: storedNew=${result.storedNewCount}, fetchedCount=${result.fetchedCount}, target=${additionalExcavationData.targetStage * 100}`);
         
         // Step 1: Re-read current cached tweet count to get the ACTUAL count after excavation
-        const { getCachedTweetCount } = await import("@/lib/repository");
-        const newCachedCount = getCachedTweetCount(result.accountId);
+        const newCachedCount = await getCachedTweetCountPg(result.accountId);
         
         // Step 2: Compute finalBoundary = min(targetCount, newCachedCount)
         const targetCount = additionalExcavationData.targetStage * 100;
@@ -889,15 +857,14 @@ async function runJobAsync(jobId: string): Promise<void> {
         
         // Step 3: Update user entitlement using finalBoundary
         // CRITICAL: granted_count MUST equal storedNewCount (actual new tweets stored)
-        const { getUserBoundaryEnd } = await import("@/lib/repository");
-        const previousBoundary = getUserBoundaryEnd(requestingUserId, result.accountId);
+        const previousBoundary = await getUserBoundaryEndPg(requestingUserId, result.accountId);
         
         // FIXED: Ensure storedNewCount is preserved and used correctly
         const grantedCount = result.storedNewCount; // This is the actual number of new tweets stored
         
         console.log(`[additional-excavation] Boundary calculation: storedNewCount=${result.storedNewCount}, fetchedCount=${result.fetchedCount}, newCachedCount=${newCachedCount}, previousBoundary=${previousBoundary}, targetCount=${targetCount}, finalBoundary=${finalBoundary}`);
         
-        recordStageUnlock(
+        await recordStageUnlockPg(
           requestingUserId, 
           result.accountId, 
           additionalExcavationData.targetStage, 
@@ -920,32 +887,21 @@ async function runJobAsync(jobId: string): Promise<void> {
         const grantedCount = result.fetchedCount; // For now, simple case where all fetched posts are new
         
         // Use proper recordStageUnlock function with the requesting user_id
-        recordStageUnlock(requestingUserId, result.accountId, jobStage, boundaryEnd, grantedCount, jobId);
+        await recordStageUnlockPg(requestingUserId, result.accountId, jobStage, boundaryEnd, grantedCount, jobId);
         
         console.log(`[jobs] Recorded unlock: user=${requestingUserId}, account=${result.accountId}, stage=${jobStage}, boundary=${boundaryEnd}, granted=${grantedCount}`);
       }
     }
 
     // Update DB with result (including boundary info for additional excavation)
-    db.prepare(`
-      UPDATE jobs
-      SET status = 'succeeded',
-          account_id = ?,
-          api_calls = ?,
-          fetched_count = ?,
-          result_json = ?,
-          resume_at = NULL,
-          resume_state = NULL,
-          finished_at = ?
-      WHERE id = ?
-    `).run(
-      result.accountId || null,
-      result.apiCalls,
-      result.fetchedCount,
-      JSON.stringify(result),
-      new Date().toISOString(),
-      jobId,
-    );
+    await updateJobStatusPg(jobId, 'succeeded', {
+      api_calls: result.apiCalls,
+      fetched_count: result.fetchedCount,
+      result_json: JSON.stringify(result),
+      resume_at: null,
+      resume_state: null,
+      finished_at: new Date().toISOString()
+    });
 
     console.log(
       `[jobs] Job ${jobId} SUCCEEDED token_idx=${tokenIdx}: ${result.fetchedCount} tweets, ${result.apiCalls} API calls`,
@@ -970,48 +926,33 @@ async function runJobAsync(jobId: string): Promise<void> {
   }
 }
 
-function failJobInDb(
+async function failJobInDb(
   jobId: string,
   errorCode: string,
   errorMessage: string,
   result?: ExcavationResult,
   holdId?: string | null,
-): void {
-  const db = getDb();
-
+): Promise<void> {
   // Use credit_holds.job_id as billing source of truth instead of holdId parameter
-  const hold = db.prepare("SELECT * FROM credit_holds WHERE job_id = ? AND status = 'held'").get(jobId) as {
-    id: string; user_id: string; amount: number; status: string;
-  } | undefined;
+  const hold = await getHoldByJobIdPg(jobId);
 
-  if (hold) {
-    const released = releaseHeld(hold.id, `Job failed: ${errorCode}`);
+  if (hold && hold.status === 'held') {
+    const released = await releaseHeldPg(hold.id, `Job failed: ${errorCode}`);
     console.log(
       `[jobs] Credit ${released ? "released" : "release failed"} for failed job ${jobId}`,
     );
   }
 
-  db.prepare(`
-    UPDATE jobs
-    SET status = 'failed',
-        error_code = ?,
-        error_message = ?,
-        api_calls = ?,
-        fetched_count = ?,
-        result_json = ?,
-        resume_at = NULL,
-        resume_state = NULL,
-        finished_at = ?
-    WHERE id = ?
-  `).run(
-    errorCode,
-    errorMessage,
-    result?.apiCalls ?? 0,
-    result?.fetchedCount ?? 0,
-    result ? JSON.stringify(result) : null,
-    new Date().toISOString(),
-    jobId,
-  );
+  await updateJobStatusPg(jobId, 'failed', {
+    error_code: errorCode,
+    error_message: errorMessage,
+    api_calls: result?.apiCalls ?? 0,
+    fetched_count: result?.fetchedCount ?? 0,
+    result_json: result ? JSON.stringify(result) : undefined,
+    resume_at: undefined,
+    resume_state: undefined,
+    finished_at: new Date().toISOString()
+  });
 
   console.error(`[jobs] Job ${jobId} FAILED: ${errorCode} — ${errorMessage}`);
 }

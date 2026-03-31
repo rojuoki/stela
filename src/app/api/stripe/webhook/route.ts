@@ -2,13 +2,14 @@ import { NextRequest, NextResponse } from "next/server";
 import { headers } from "next/headers";
 import Stripe from 'stripe';
 import { 
-  createOrUpdateSubscription, 
-  giveCredits,
-  getAccountByUsername,
-  getTweetsByAccountForGuest,
-  createTemporaryUnlock
+  createOrUpdateSubscriptionPg, 
+  giveCreditsPg,
+  getAccountByUsernamePg,
+  getTweetsByAccountForGuestPg,
+  createTemporaryUnlockPg,
+  createCheckoutSessionPg
 } from "@/lib/repository";
-import { getDb } from "@/lib/db";
+import { pgQuery } from "@/lib/db";
 import { planGuestUnlock } from "@/lib/unlockPlanning";
 import { createAndRunJob } from "@/lib/jobs";
 
@@ -101,16 +102,16 @@ export async function POST(req: NextRequest) {
             
             const plan = (metadata.plan as 'basic') || 'basic';
             console.log("[stripe/webhook] 16. Plan extracted:", plan);
-            console.log(`[stripe/webhook] 17. About to call createOrUpdateSubscription(${userId}, ${plan}, 4)`);
+            console.log(`[stripe/webhook] 17. About to call createOrUpdateSubscriptionPg(${userId}, ${plan}, 4)`);
             
             try {
-              console.log("[stripe/webhook] 18. Calling createOrUpdateSubscription...");
-              const result = createOrUpdateSubscription(userId, plan, 4);
-              console.log("🎉 [stripe/webhook] 19. createOrUpdateSubscription SUCCESS!");
+              console.log("[stripe/webhook] 18. Calling createOrUpdateSubscriptionPg...");
+              const result = await createOrUpdateSubscriptionPg(userId, plan, 4);
+              console.log("🎉 [stripe/webhook] 19. createOrUpdateSubscriptionPg SUCCESS!");
               console.log("[stripe/webhook] Result:", JSON.stringify(result, null, 2));
               console.log(`✅ [stripe/webhook] Subscription activated successfully for user ${userId}`);
             } catch (error) {
-              console.error("💥 [stripe/webhook] 19. createOrUpdateSubscription FAILED!");
+              console.error("💥 [stripe/webhook] 19. createOrUpdateSubscriptionPg FAILED!");
               console.error(`[stripe/webhook] Error for user ${userId}:`, error);
               if (error instanceof Error) {
                 console.error("[stripe/webhook] Error message:", error.message);
@@ -133,12 +134,12 @@ export async function POST(req: NextRequest) {
               return NextResponse.json({ error: "Invalid credit amount in metadata" }, { status: 400 });
             }
             
-            console.log(`[stripe/webhook] 17. About to call giveCredits(${userId}, ${creditAmount}, 'Credit package purchase')`);
+            console.log(`[stripe/webhook] 17. About to call giveCreditsPg(${userId}, ${creditAmount}, 'Credit package purchase')`);
             
             try {
-              console.log("[stripe/webhook] 18. Calling giveCredits...");
-              giveCredits(userId, creditAmount, 'Credit package purchase');
-              console.log("🎉 [stripe/webhook] 19. giveCredits SUCCESS!");
+              console.log("[stripe/webhook] 18. Calling giveCreditsPg...");
+              await giveCreditsPg(userId, creditAmount, 'Credit package purchase');
+              console.log("🎉 [stripe/webhook] 19. giveCreditsPg SUCCESS!");
               console.log(`✅ [stripe/webhook] ${creditAmount} credits added successfully for user ${userId}`);
             } catch (error) {
               console.error("💥 [stripe/webhook] 19. giveCredits FAILED!");
@@ -171,27 +172,27 @@ export async function POST(req: NextRequest) {
             console.log(`[stripe/webhook] 17. Processing guest unlock for @${username}`);
             
             try {
-              const account = getAccountByUsername(username);
+              const account = await getAccountByUsernamePg(username);
               if (!account) {
                 console.error(`[stripe/webhook] Account not found: @${username}`);
                 return NextResponse.json({ error: "Account not found" }, { status: 404 });
               }
               
               console.log("[stripe/webhook] 18. Planning guest unlock...");
-              const plan = planGuestUnlock(account.account_id, account.created_at);
+              const plan = await planGuestUnlock(account.account_id, account.created_at);
               
               let unlockToken = null;
               
               if (plan.strategy === "cache-only" && plan.guestBoundary) {
                 // キャッシュからtemporary unlock作成
                 console.log("[stripe/webhook] 19. Using cached data for guest unlock");
-                const tweets = getTweetsByAccountForGuest(account.account_id, plan.guestBoundary);
-                unlockToken = createTemporaryUnlock(account.account_id, username, tweets);
+                const tweets = await getTweetsByAccountForGuestPg(account.account_id, plan.guestBoundary);
+                unlockToken = await createTemporaryUnlockPg(account.account_id, username, tweets);
                 console.log(`[stripe/webhook] Cache-based temporary unlock created: ${unlockToken}`);
               } else {
                 // excavation job開始 + placeholder temporary unlock
                 console.log("[stripe/webhook] 19. Starting excavation job for guest unlock");
-                const jobId = createAndRunJob(username, account.created_at, undefined, 1, false, "anonymous");
+                const jobId = await createAndRunJob(username, account.created_at, undefined, 1, false, "anonymous");
                 
                 const placeholderAccountId = account.account_id;
                 const placeholderTweets = [{
@@ -206,19 +207,12 @@ export async function POST(req: NextRequest) {
                   fetched_at: new Date().toISOString()
                 }];
                 
-                unlockToken = createTemporaryUnlock(placeholderAccountId, username, placeholderTweets, jobId);
+                unlockToken = await createTemporaryUnlockPg(placeholderAccountId, username, placeholderTweets, jobId);
                 console.log(`[stripe/webhook] Job-based temporary unlock created: ${unlockToken}, jobId: ${jobId}`);
               }
               
               // session_id → token マッピング保存
-              const db = getDb();
-              const now = new Date();
-              const expiresAt = new Date(now.getTime() + 48 * 60 * 60 * 1000); // 48時間後
-              
-              db.prepare(`
-                INSERT INTO checkout_sessions (session_id, unlock_token, username, created_at, expires_at)
-                VALUES (?, ?, ?, ?, ?)
-              `).run(sessionId, unlockToken, username, now.toISOString(), expiresAt.toISOString());
+              await createCheckoutSessionPg(sessionId, unlockToken, username);
               
               console.log("🎉 [stripe/webhook] 20. Guest unlock completed successfully!");
               console.log(`✅ [stripe/webhook] Session mapping saved: ${sessionId} → ${unlockToken}`);
@@ -241,8 +235,8 @@ export async function POST(req: NextRequest) {
             // Fallback to subscription for unknown types (backward compatibility)
             console.log(`[stripe/webhook] 16. Falling back to subscription processing for user ${userId}`);
             try {
-              console.log("[stripe/webhook] 17. Calling createOrUpdateSubscription (fallback)...");
-              const result = createOrUpdateSubscription(userId, 'basic', 4);
+              console.log("[stripe/webhook] 17. Calling createOrUpdateSubscriptionPg (fallback)...");
+              const result = await createOrUpdateSubscriptionPg(userId, 'basic', 4);
               console.log("✅ [stripe/webhook] 18. Subscription activated successfully (fallback)");
               console.log("[stripe/webhook] Fallback result:", JSON.stringify(result, null, 2));
             } catch (error) {

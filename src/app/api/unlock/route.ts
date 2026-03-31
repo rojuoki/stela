@@ -197,10 +197,10 @@ export async function POST(req: NextRequest) {
     
     if (requestedStage === 1) {
       // Stage 1: Use normal job creation with planned target
-      jobId = createAndRunJob(username, account?.created_at, undefined, 1, force, userId);
+      jobId = await createAndRunJob(username, account?.created_at, undefined, 1, force, userId);
     } else {
       // Stage 2+: Use expansion job creation with prerequisite checking
-      const expansionResult = createStageExpansionJob(username, requestedStage, undefined, userId);
+      const expansionResult = await createStageExpansionJob(username, requestedStage, undefined, userId);
       if (expansionResult.error) {
         return NextResponse.json({
           error: expansionResult.error,

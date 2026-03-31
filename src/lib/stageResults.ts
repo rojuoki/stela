@@ -6,7 +6,7 @@
  * Implements immutable stage results that are reused instead of re-excavating.
  */
 
-import { getDb } from "./db";
+import { pgQuery } from "./db";
 import type { ExcavationResult } from "./excavate";
 
 export interface StageResult {
@@ -24,15 +24,14 @@ export interface StageResult {
  * Check if a stage result already exists for an account.
  * Returns the stored result if found, null otherwise.
  */
-export function getStageResult(accountId: string, stage: number): StageResult | null {
-  const db = getDb();
-  const result = db
-    .prepare(
-      "SELECT * FROM stage_results WHERE account_id = ? AND stage = ?"
-    )
-    .get(accountId, stage) as StageResult | undefined;
+export async function getStageResult(accountId: string, stage: number): Promise<StageResult | null> {
+  const result = await pgQuery(
+    "SELECT * FROM stage_results WHERE account_id = $1 AND stage = $2",
+    [accountId, stage]
+  );
 
-  return result || null;
+  if (result.rows.length === 0) return null;
+  return result.rows[0] as StageResult;
 }
 
 /**
@@ -44,34 +43,31 @@ export function getStageResult(accountId: string, stage: number): StageResult | 
  * @param excavationResult - The completed excavation result
  * @param jobId - The job that created this result
  */
-export function storeStageResult(
+export async function storeStageResult(
   accountId: string,
   stage: number,
   excavationResult: ExcavationResult,
   jobId: string
-): void {
-  const db = getDb();
-  
-  // Use INSERT OR IGNORE to handle race conditions gracefully.
+): Promise<void> {
+  // Use INSERT ... ON CONFLICT to handle race conditions gracefully.
   // If another job somehow stored a Stage 1 result for the same account
   // between our check and this insert, we respect the first one (immutability).
-  const result = db
-    .prepare(`
-      INSERT OR IGNORE INTO stage_results 
-      (account_id, stage, target_count, collected_count, status, job_id, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
-    `)
-    .run(
-      accountId,
-      stage,
-      excavationResult.requestedLimit,
-      excavationResult.fetchedCount,
-      excavationResult.stopReason,
-      jobId,
-      new Date().toISOString()
-    );
+  const result = await pgQuery(`
+    INSERT INTO stage_results 
+    (account_id, stage, target_count, collected_count, status, job_id, created_at)
+    VALUES ($1, $2, $3, $4, $5, $6, $7)
+    ON CONFLICT (account_id, stage) DO NOTHING
+  `, [
+    accountId,
+    stage,
+    excavationResult.requestedLimit,
+    excavationResult.fetchedCount,
+    excavationResult.stopReason,
+    jobId,
+    new Date().toISOString()
+  ]);
 
-  if (result.changes === 0) {
+  if (result.rowCount === 0) {
     console.log(
       `[stage] Stage ${stage} result for account ${accountId} already exists - respecting immutability`
     );
@@ -109,18 +105,17 @@ export function createSyntheticExcavationResult(
  * Check if all prerequisite stages exist for the requested stage.
  * Returns null if prerequisites are met, or missing stage number if not.
  */
-export function checkStagePrerequisites(accountId: string, targetStage: number): number | null {
+export async function checkStagePrerequisites(accountId: string, targetStage: number): Promise<number | null> {
   if (targetStage <= 1) return null; // Stage 1 has no prerequisites
 
-  const db = getDb();
-  
   // Check that all stages 1 through (targetStage - 1) exist
   for (let stage = 1; stage < targetStage; stage++) {
-    const prerequisiteStage = db
-      .prepare("SELECT 1 FROM stage_results WHERE account_id = ? AND stage = ?")
-      .get(accountId, stage);
+    const result = await pgQuery(
+      "SELECT 1 FROM stage_results WHERE account_id = $1 AND stage = $2", 
+      [accountId, stage]
+    );
     
-    if (!prerequisiteStage) {
+    if (result.rows.length === 0) {
       return stage; // Return the missing prerequisite stage number
     }
   }
@@ -132,13 +127,14 @@ export function checkStagePrerequisites(accountId: string, targetStage: number):
  * Get the highest completed stage for an account.
  * Returns 0 if no stages completed.
  */
-export function getAccountHighestStage(accountId: string): number {
-  const db = getDb();
-  const result = db
-    .prepare("SELECT MAX(stage) as max_stage FROM stage_results WHERE account_id = ?")
-    .get(accountId) as { max_stage: number | null } | undefined;
+export async function getAccountHighestStage(accountId: string): Promise<number> {
+  const result = await pgQuery(
+    "SELECT MAX(stage) as max_stage FROM stage_results WHERE account_id = $1",
+    [accountId]
+  );
   
-  return result?.max_stage ?? 0;
+  if (result.rows.length === 0) return 0;
+  return result.rows[0].max_stage ?? 0;
 }
 
 /**
@@ -156,9 +152,10 @@ export function calculateStageTarget(baselineCount: number, targetStage: number)
  * Get all stage results for an account, ordered by stage.
  * Used for stage expansion planning and UI display.
  */
-export function getAccountStageResults(accountId: string): StageResult[] {
-  const db = getDb();
-  return db
-    .prepare("SELECT * FROM stage_results WHERE account_id = ? ORDER BY stage ASC")
-    .all(accountId) as StageResult[];
+export async function getAccountStageResults(accountId: string): Promise<StageResult[]> {
+  const result = await pgQuery(
+    "SELECT * FROM stage_results WHERE account_id = $1 ORDER BY stage ASC",
+    [accountId]
+  );
+  return result.rows as StageResult[];
 }

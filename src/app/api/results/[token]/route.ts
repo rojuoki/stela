@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getTemporaryUnlock, cleanupExpiredTemporaryUnlocks } from "@/lib/repository";
+import { getTemporaryUnlockPg, cleanupExpiredTemporaryUnlocksPg } from "@/lib/repository";
 
 export async function GET(req: NextRequest, { params }: { params: Promise<{ token: string }> }) {
   try {
@@ -10,10 +10,10 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ toke
     }
 
     // Clean up expired unlocks first
-    cleanupExpiredTemporaryUnlocks();
+    await cleanupExpiredTemporaryUnlocksPg();
 
     // Get the temporary unlock
-    const tempUnlock = getTemporaryUnlock(token);
+    const tempUnlock = await getTemporaryUnlockPg(token);
     
     if (!tempUnlock) {
       return NextResponse.json({ 
@@ -40,15 +40,15 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ toke
 
     if (isPlaceholder) {
       // Try to get actual excavated data with proper boundary logic
-      const { getAccountByUsername, getTweetsByAccountForGuest } = await import("@/lib/repository");
+      const { getAccountByUsernamePg, getTweetsByAccountForGuestPg } = await import("@/lib/repository");
       const { planGuestUnlock } = await import("@/lib/unlockPlanning");
       
-      const account = getAccountByUsername(tempUnlock.username);
+      const account = await getAccountByUsernamePg(tempUnlock.username);
       if (account) {
-        const plan = planGuestUnlock(account.account_id, account.created_at);
+        const plan = await planGuestUnlock(account.account_id, account.created_at);
         if (plan.strategy === "cache-only" && plan.guestBoundary) {
           // Real data is available - return it with proper boundary
-          const actualTweets = getTweetsByAccountForGuest(account.account_id, plan.guestBoundary);
+          const actualTweets = await getTweetsByAccountForGuestPg(account.account_id, plan.guestBoundary);
           if (actualTweets.length > 0) {
             console.log(`[results] Found actual excavated data for ${tempUnlock.username}: ${actualTweets.length} tweets (boundary=${plan.guestBoundary})`);
             tweets = actualTweets;

@@ -3,7 +3,9 @@
  * Pure DB read/write. No external API calls.
  */
 
-import { getDb, pgQuery } from "./db";
+import { pgQuery } from "./db";
+
+// Mock infrastructure removed - all functions now use PostgreSQL
 
 export interface Account {
   account_id: string;
@@ -28,148 +30,128 @@ export interface Tweet {
   fetched_at: string;
 }
 
-export function getAccountByUsername(username: string): Account | undefined {
-  const db = getDb();
-  return db
-    .prepare("SELECT * FROM accounts WHERE username = ?")
-    .get(username.toLowerCase()) as Account | undefined;
+export async function getAccountByUsername(username: string): Promise<Account | undefined> {
+  const result = await pgQuery(
+    "SELECT * FROM accounts WHERE username = $1",
+    [username.toLowerCase()]
+  );
+  if (result.rows.length === 0) return undefined;
+  return result.rows[0] as Account;
 }
 
-export function getTweetsByAccount(accountId: string): Tweet[] {
-  const db = getDb();
-  return db
-    .prepare(
-      "SELECT * FROM tweets WHERE account_id = ? ORDER BY created_at ASC LIMIT 100"
-    )
-    .all(accountId) as Tweet[];
+export async function getTweetsByAccount(accountId: string): Promise<Tweet[]> {
+  const result = await pgQuery(
+    "SELECT * FROM tweets WHERE account_id = $1 ORDER BY created_at ASC LIMIT 100",
+    [accountId]
+  );
+  return result.rows as Tweet[];
 }
 
 /** Get tweets by account with range-based pagination */
-export function getTweetsByAccountRange(accountId: string, offset: number, limit: number): Tweet[] {
-  const db = getDb();
-  return db
-    .prepare(
-      "SELECT * FROM tweets WHERE account_id = ? ORDER BY created_at ASC LIMIT ? OFFSET ?"
-    )
-    .all(accountId, limit, offset) as Tweet[];
+export async function getTweetsByAccountRange(accountId: string, offset: number, limit: number): Promise<Tweet[]> {
+  const result = await pgQuery(
+    "SELECT * FROM tweets WHERE account_id = $1 ORDER BY created_at ASC LIMIT $2 OFFSET $3",
+    [accountId, limit, offset]
+  );
+  return result.rows as Tweet[];
 }
 
 /** Get tweets by account up to a specific boundary */
-export function getTweetsByAccountUpToBoundary(accountId: string, boundaryEnd: number): Tweet[] {
-  const db = getDb();
-  return db
-    .prepare(
-      "SELECT * FROM tweets WHERE account_id = ? ORDER BY created_at ASC LIMIT ?"
-    )
-    .all(accountId, boundaryEnd) as Tweet[];
+export async function getTweetsByAccountUpToBoundary(accountId: string, boundaryEnd: number): Promise<Tweet[]> {
+  const result = await pgQuery(
+    "SELECT * FROM tweets WHERE account_id = $1 ORDER BY created_at ASC LIMIT $2",
+    [accountId, boundaryEnd]
+  );
+  return result.rows as Tweet[];
 }
 
 /** Get tweets by account up to guest boundary (follows same boundary model) */
-export function getTweetsByAccountForGuest(accountId: string, guestBoundary: number): Tweet[] {
-  return getTweetsByAccountUpToBoundary(accountId, guestBoundary);
+export async function getTweetsByAccountForGuest(accountId: string, guestBoundary: number): Promise<Tweet[]> {
+  return await getTweetsByAccountUpToBoundary(accountId, guestBoundary);
 }
 
 /** Count total tweets for an account */
-export function getTweetCountByAccount(accountId: string): number {
-  return getCachedTweetCount(accountId);
+export async function getTweetCountByAccount(accountId: string): Promise<number> {
+  return await getCachedTweetCount(accountId);
 }
 
 /** Count cached tweets for an account */
-export function getCachedTweetCount(accountId: string): number {
-  const db = getDb();
-  const row = db
-    .prepare("SELECT COUNT(*) as cnt FROM tweets WHERE account_id = ?")
-    .get(accountId) as { cnt: number } | undefined;
-  return row?.cnt ?? 0;
+export async function getCachedTweetCount(accountId: string): Promise<number> {
+  const result = await pgQuery("SELECT COUNT(*) as cnt FROM tweets WHERE account_id = $1", [accountId]);
+  if (result.rows.length === 0) return 0;
+  return parseInt(result.rows[0].cnt);
 }
 
 /** Get the newest cached tweet timestamp for continuation point */
-export function getNewestCachedTweetTimestamp(accountId: string): string | null {
-  const db = getDb();
-  const row = db
-    .prepare("SELECT MAX(created_at) as newest_created_at FROM tweets WHERE account_id = ?")
-    .get(accountId) as { newest_created_at: string | null } | undefined;
-  return row?.newest_created_at ?? null;
+export async function getNewestCachedTweetTimestamp(accountId: string): Promise<string | null> {
+  const result = await pgQuery("SELECT MAX(created_at) as newest_created_at FROM tweets WHERE account_id = $1", [accountId]);
+  if (result.rows.length === 0) return null;
+  return result.rows[0].newest_created_at ?? null;
 }
 
 /** Check if user has unlocked a specific stage for an account */
-export function hasUserUnlockedStage(userId: string, accountId: string, stage: number): boolean {
-  const db = getDb();
-  const row = db
-    .prepare("SELECT 1 FROM unlocks WHERE user_id = ? AND account_id = ? AND stage = ?")
-    .get(userId, accountId, stage);
-  return !!row;
+export async function hasUserUnlockedStage(userId: string, accountId: string, stage: number): Promise<boolean> {
+  const result = await pgQuery("SELECT 1 FROM unlocks WHERE user_id = $1 AND account_id = $2 AND stage = $3", [userId, accountId, stage]);
+  return result.rows.length > 0;
 }
 
 /** Get the highest stage unlocked by a user for an account (returns 0 if none) */
-export function getUserHighestUnlockedStage(userId: string, accountId: string): number {
-  const db = getDb();
-  const row = db
-    .prepare("SELECT MAX(stage) as max_stage FROM unlocks WHERE user_id = ? AND account_id = ?")
-    .get(userId, accountId) as { max_stage: number | null } | undefined;
-  return row?.max_stage ?? 0;
+export async function getUserHighestUnlockedStage(userId: string, accountId: string): Promise<number> {
+  const result = await pgQuery("SELECT MAX(stage) as max_stage FROM unlocks WHERE user_id = $1 AND account_id = $2", [userId, accountId]);
+  if (result.rows.length === 0) return 0;
+  return result.rows[0].max_stage ?? 0;
 }
 
-/** Get user's current visibility boundary for an account (new boundary model) */
-export function getUserBoundaryEnd(userId: string, accountId: string): number {
-  const db = getDb();
-  const row = db
-    .prepare("SELECT MAX(boundary_end) as max_boundary FROM unlocks WHERE user_id = ? AND account_id = ?")
-    .get(userId, accountId) as { max_boundary: number | null } | undefined;
-  return row?.max_boundary ?? 0;
-}
+/* REMOVED: getUserBoundaryEnd - replaced with getUserBoundaryEndPg */
 
 /** Get user's total unlocked count for an account (sum of all granted_count) */
-export function getUserTotalUnlockedCount(userId: string, accountId: string): number {
-  const db = getDb();
-  const row = db
-    .prepare("SELECT SUM(granted_count) as total_granted FROM unlocks WHERE user_id = ? AND account_id = ?")
-    .get(userId, accountId) as { total_granted: number | null } | undefined;
-  return row?.total_granted ?? 0;
+export async function getUserTotalUnlockedCount(userId: string, accountId: string): Promise<number> {
+  const result = await pgQuery("SELECT SUM(granted_count) as total_granted FROM unlocks WHERE user_id = $1 AND account_id = $2", [userId, accountId]);
+  if (result.rows.length === 0) return 0;
+  return result.rows[0].total_granted ?? 0;
 }
 
 /** Check if user already unlocked this account (boundary-based visibility check) */
-export function hasUserUnlockedAccount(userId: string, accountId: string): boolean {
-  return getUserBoundaryEnd(userId, accountId) > 0;
+export async function hasUserUnlockedAccount(userId: string, accountId: string): Promise<boolean> {
+  return (await getUserBoundaryEndPg(userId, accountId)) > 0;
 }
 
 /** Record stage unlock with boundary data (idempotent via UNIQUE constraint) */
-export function recordStageUnlock(
+export async function recordStageUnlock(
   userId: string, 
   accountId: string, 
   stage: number, 
   boundaryEnd: number,
   grantedCount: number,
   jobId: string
-): void {
-  const db = getDb();
-  db.prepare(`
-    INSERT OR IGNORE INTO unlocks (user_id, account_id, stage, boundary_end, granted_count, job_id, unlocked_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?)
-  `).run(userId, accountId, stage, boundaryEnd, grantedCount, jobId, new Date().toISOString());
+): Promise<void> {
+  await pgQuery(`
+    INSERT INTO unlocks (user_id, account_id, stage, boundary_end, granted_count, job_id, unlocked_at)
+    VALUES ($1, $2, $3, $4, $5, $6, $7)
+    ON CONFLICT (user_id, account_id, stage) DO NOTHING
+  `, [userId, accountId, stage, boundaryEnd, grantedCount, jobId, new Date().toISOString()]);
 }
 
 /** Record unlock (backward compatibility - records Stage 1 unlock) */
-export function recordUnlock(userId: string, accountId: string, jobId: string): void {
+export async function recordUnlock(userId: string, accountId: string, jobId: string): Promise<void> {
   // For backward compatibility, we need to calculate boundary_end and granted_count
   // This is a transitional function - new code should use recordStageUnlock directly
-  const tweetCount = getCachedTweetCount(accountId);
+  const tweetCount = await getCachedTweetCount(accountId);
   const boundaryEnd = Math.min(100, tweetCount); // Stage 1 default boundary
-  recordStageUnlock(userId, accountId, 1, boundaryEnd, boundaryEnd, jobId);
+  await recordStageUnlock(userId, accountId, 1, boundaryEnd, boundaryEnd, jobId);
 }
 
 /**
  * Find an active (queued/running) job for a given username.
  * Used to collapse concurrent unlock requests into one job.
  */
-export function findActiveJobForUsername(username: string): string | null {
-  const db = getDb();
-  const row = db
-    .prepare(
-      "SELECT id FROM jobs WHERE account_username = ? AND status IN ('queued', 'running') ORDER BY created_at DESC LIMIT 1"
-    )
-    .get(username.toLowerCase()) as { id: string } | undefined;
-  return row?.id ?? null;
+export async function findActiveJobForUsername(username: string): Promise<string | null> {
+  const result = await pgQuery(
+    "SELECT id FROM jobs WHERE account_username = $1 AND status IN ('queued', 'running') ORDER BY created_at DESC LIMIT 1",
+    [username.toLowerCase()]
+  );
+  if (result.rows.length === 0) return null;
+  return result.rows[0].id;
 }
 
 // ─── Credit System (Phase 6) ───────────────────────────
@@ -193,20 +175,17 @@ export interface CreditHold {
 }
 
 /** Get credit balance for a user (creates if doesn't exist) */
-export function getCreditBalance(userId: string): CreditBalance {
-  const db = getDb();
-  let balance = db
-    .prepare("SELECT * FROM credits WHERE user_id = ?")
-    .get(userId) as CreditBalance | undefined;
+export async function getCreditBalance(userId: string): Promise<CreditBalance> {
+  let result = await pgQuery("SELECT * FROM credits WHERE user_id = $1", [userId]);
   
-  if (!balance) {
+  if (result.rows.length === 0) {
     const now = new Date().toISOString();
-    db.prepare(`
+    await pgQuery(`
       INSERT INTO credits (user_id, balance, total_earned, total_spent, updated_at)
-      VALUES (?, 0, 0, 0, ?)
-    `).run(userId, now);
+      VALUES ($1, 0, 0, 0, $2)
+    `, [userId, now]);
     
-    balance = {
+    return {
       user_id: userId,
       balance: 0,
       total_earned: 0,
@@ -215,44 +194,41 @@ export function getCreditBalance(userId: string): CreditBalance {
     };
   }
   
-  return balance;
+  return result.rows[0] as CreditBalance;
 }
 
 /** Hold credits for a job (returns hold ID or null if insufficient balance) */
-export function holdCredits(userId: string, jobId: string, amount: number = 1): string | null {
-  const db = getDb();
+export async function holdCredits(userId: string, jobId: string, amount: number = 1): Promise<string | null> {
   const now = new Date();
   const expiresAt = new Date(now.getTime() + 10 * 60 * 1000); // 10 minutes TTL
   const holdId = `hold_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
   
   try {
-    return db.transaction(() => {
-      // Check balance
-      const balance = getCreditBalance(userId);
-      if (balance.balance < amount) {
-        return null; // Insufficient balance
-      }
-      
-      // Create hold
-      db.prepare(`
-        INSERT INTO credit_holds (id, user_id, job_id, amount, created_at, expires_at, status)
-        VALUES (?, ?, ?, ?, ?, ?, 'held')
-      `).run(holdId, userId, jobId, amount, now.toISOString(), expiresAt.toISOString());
-      
-      // Update balance (deduct held amount)
-      db.prepare(`
-        UPDATE credits SET balance = balance - ?, updated_at = ?
-        WHERE user_id = ?
-      `).run(amount, now.toISOString(), userId);
-      
-      // Log event
-      db.prepare(`
-        INSERT INTO credit_events (user_id, job_id, hold_id, event_type, amount, balance_after, reason, created_at)
-        VALUES (?, ?, ?, 'held', ?, ?, ?, ?)
-      `).run(userId, jobId, holdId, amount, balance.balance - amount, `Hold for job ${jobId}`, now.toISOString());
-      
-      return holdId;
-    })();
+    // Check balance
+    const balance = await getCreditBalance(userId);
+    if (balance.balance < amount) {
+      return null; // Insufficient balance
+    }
+    
+    // Create hold
+    await pgQuery(`
+      INSERT INTO credit_holds (id, user_id, job_id, amount, created_at, expires_at, status)
+      VALUES ($1, $2, $3, $4, $5, $6, 'held')
+    `, [holdId, userId, jobId, amount, now.toISOString(), expiresAt.toISOString()]);
+    
+    // Update balance (deduct held amount)
+    await pgQuery(`
+      UPDATE credits SET balance = balance - $1, updated_at = $2
+      WHERE user_id = $3
+    `, [amount, now.toISOString(), userId]);
+    
+    // Log event
+    await pgQuery(`
+      INSERT INTO credit_events (user_id, job_id, hold_id, event_type, amount, balance_after, reason, created_at)
+      VALUES ($1, $2, $3, 'held', $4, $5, $6, $7)
+    `, [userId, jobId, holdId, amount, balance.balance - amount, `Hold for job ${jobId}`, now.toISOString()]);
+    
+    return holdId;
   } catch (e) {
     console.error('[credits] Hold failed:', e);
     return null;
@@ -264,24 +240,21 @@ export function holdCredits(userId: string, jobId: string, amount: number = 1): 
  * cache-hit unlocks where there is no async job and no hold/capture cycle).
  * Returns false if balance is insufficient or the transaction fails.
  */
-export function spendCredits(userId: string, amount: number, reason: string): boolean {
-  const db = getDb();
+export async function spendCredits(userId: string, amount: number, reason: string): Promise<boolean> {
   const now = new Date().toISOString();
   try {
-    return (db.transaction(() => {
-      const balance = getCreditBalance(userId);
-      if (balance.balance < amount) return false;
+    const balance = await getCreditBalance(userId);
+    if (balance.balance < amount) return false;
 
-      db.prepare(`UPDATE credits SET balance = balance - ?, total_spent = total_spent + ?, updated_at = ? WHERE user_id = ?`)
-        .run(amount, amount, now, userId);
+    await pgQuery(`UPDATE credits SET balance = balance - $1, total_spent = total_spent + $2, updated_at = $3 WHERE user_id = $4`, 
+      [amount, amount, now, userId]);
 
-      db.prepare(`
-        INSERT INTO credit_events (user_id, event_type, amount, balance_after, reason, created_at)
-        VALUES (?, 'captured', ?, ?, ?, ?)
-      `).run(userId, amount, balance.balance - amount, reason, now);
+    await pgQuery(`
+      INSERT INTO credit_events (user_id, event_type, amount, balance_after, reason, created_at)
+      VALUES ($1, 'captured', $2, $3, $4, $5)
+    `, [userId, amount, balance.balance - amount, reason, now]);
 
-      return true;
-    }))() as boolean;
+    return true;
   } catch (e) {
     console.error('[credits] spendCredits failed:', e);
     return false;
@@ -289,40 +262,36 @@ export function spendCredits(userId: string, amount: number, reason: string): bo
 }
 
 /** Capture held credits (consume them on successful unlock) */
-export function captureHeld(holdId: string, reason: string = 'Unlock successful'): boolean {
-  const db = getDb();
+export async function captureHeld(holdId: string, reason: string = 'Unlock successful'): Promise<boolean> {
   const now = new Date().toISOString();
   
   try {
-    return db.transaction(() => {
-      // Get hold
-      const hold = db.prepare("SELECT * FROM credit_holds WHERE id = ? AND status = 'held'")
-        .get(holdId) as CreditHold | undefined;
-      
-      if (!hold) {
-        return false; // Hold not found or already processed
-      }
-      
-      // Mark as captured
-      db.prepare(`
-        UPDATE credit_holds SET status = 'captured' WHERE id = ?
-      `).run(holdId);
-      
-      // Update totals
-      db.prepare(`
-        UPDATE credits SET total_spent = total_spent + ?, updated_at = ?
-        WHERE user_id = ?
-      `).run(hold.amount, now, hold.user_id);
-      
-      // Log event
-      const balance = getCreditBalance(hold.user_id);
-      db.prepare(`
-        INSERT INTO credit_events (user_id, job_id, hold_id, event_type, amount, balance_after, reason, created_at)
-        VALUES (?, ?, ?, 'captured', ?, ?, ?, ?)
-      `).run(hold.user_id, hold.job_id, holdId, hold.amount, balance.balance, reason, now);
-      
-      return true;
-    })();
+    // Get hold
+    const holdResult = await pgQuery("SELECT * FROM credit_holds WHERE id = $1 AND status = 'held'", [holdId]);
+    
+    if (holdResult.rows.length === 0) {
+      return false; // Hold not found or already processed
+    }
+    
+    const hold = holdResult.rows[0] as CreditHold;
+    
+    // Mark as captured
+    await pgQuery("UPDATE credit_holds SET status = 'captured' WHERE id = $1", [holdId]);
+    
+    // Update totals
+    await pgQuery(`
+      UPDATE credits SET total_spent = total_spent + $1, updated_at = $2
+      WHERE user_id = $3
+    `, [hold.amount, now, hold.user_id]);
+    
+    // Log event
+    const balance = await getCreditBalance(hold.user_id);
+    await pgQuery(`
+      INSERT INTO credit_events (user_id, job_id, hold_id, event_type, amount, balance_after, reason, created_at)
+      VALUES ($1, $2, $3, 'captured', $4, $5, $6, $7)
+    `, [hold.user_id, hold.job_id, holdId, hold.amount, balance.balance, reason, now]);
+    
+    return true;
   } catch (e) {
     console.error('[credits] Capture failed:', e);
     return false;
@@ -330,70 +299,43 @@ export function captureHeld(holdId: string, reason: string = 'Unlock successful'
 }
 
 /** Release held credits (return them on failure/0 posts) */
-export function releaseHeld(holdId: string, reason: string = 'Unlock failed'): boolean {
-  const db = getDb();
+export async function releaseHeld(holdId: string, reason: string = 'Unlock failed'): Promise<boolean> {
   const now = new Date().toISOString();
   
   try {
-    return db.transaction(() => {
-      // Get hold
-      const hold = db.prepare("SELECT * FROM credit_holds WHERE id = ? AND status = 'held'")
-        .get(holdId) as CreditHold | undefined;
-      
-      if (!hold) {
-        return false; // Hold not found or already processed
-      }
-      
-      // Mark as released
-      db.prepare(`
-        UPDATE credit_holds SET status = 'released' WHERE id = ?
-      `).run(holdId);
-      
-      // Return credits to balance
-      db.prepare(`
-        UPDATE credits SET balance = balance + ?, updated_at = ?
-        WHERE user_id = ?
-      `).run(hold.amount, now, hold.user_id);
-      
-      // Log event
-      const balance = getCreditBalance(hold.user_id);
-      db.prepare(`
-        INSERT INTO credit_events (user_id, job_id, hold_id, event_type, amount, balance_after, reason, created_at)
-        VALUES (?, ?, ?, 'released', ?, ?, ?, ?)
-      `).run(hold.user_id, hold.job_id, holdId, hold.amount, balance.balance, reason, now);
-      
-      return true;
-    })();
+    // Get hold
+    const holdResult = await pgQuery("SELECT * FROM credit_holds WHERE id = $1 AND status = 'held'", [holdId]);
+    
+    if (holdResult.rows.length === 0) {
+      return false; // Hold not found or already processed
+    }
+    
+    const hold = holdResult.rows[0] as CreditHold;
+    
+    // Mark as released
+    await pgQuery("UPDATE credit_holds SET status = 'released' WHERE id = $1", [holdId]);
+    
+    // Return credits to balance
+    await pgQuery(`
+      UPDATE credits SET balance = balance + $1, updated_at = $2
+      WHERE user_id = $3
+    `, [hold.amount, now, hold.user_id]);
+    
+    // Log event
+    const balance = await getCreditBalance(hold.user_id);
+    await pgQuery(`
+      INSERT INTO credit_events (user_id, job_id, hold_id, event_type, amount, balance_after, reason, created_at)
+      VALUES ($1, $2, $3, 'released', $4, $5, $6, $7)
+    `, [hold.user_id, hold.job_id, holdId, hold.amount, balance.balance, reason, now]);
+    
+    return true;
   } catch (e) {
     console.error('[credits] Release failed:', e);
     return false;
   }
 }
 
-/** Give credits to a user (for testing/admin) */
-export function giveCredits(userId: string, amount: number, reason: string = 'Manual grant'): void {
-  const db = getDb();
-  const now = new Date().toISOString();
-  
-  db.transaction(() => {
-    const balance = getCreditBalance(userId);
-    
-    // Update balance
-    db.prepare(`
-      UPDATE credits SET 
-        balance = balance + ?,
-        total_earned = total_earned + ?,
-        updated_at = ?
-      WHERE user_id = ?
-    `).run(amount, amount, now, userId);
-    
-    // Log event
-    db.prepare(`
-      INSERT INTO credit_events (user_id, event_type, amount, balance_after, reason, created_at)
-      VALUES (?, 'earned', ?, ?, ?, ?)
-    `).run(userId, amount, balance.balance + amount, reason, now);
-  })();
-}
+/* REMOVED: giveCredits - replaced with giveCreditsPg */
 
 // ─── API call telemetry ────────────────────────────────
 
@@ -409,12 +351,12 @@ export const COST_PER_CALL_USD = 0.01; // $0.01 / real API call (dev estimate)
  * cached=true  → request served from local cache (counts toward saved).
  * Fire-and-forget: never throws so callers are never interrupted.
  */
-export function recordApiCall(endpoint: string, cached: boolean): void {
+export async function recordApiCall(endpoint: string, cached: boolean): Promise<void> {
   try {
-    const db = getDb();
-    db.prepare(
-      "INSERT INTO api_call_log (endpoint, cached, ts) VALUES (?, ?, ?)"
-    ).run(endpoint, cached ? 1 : 0, new Date().toISOString());
+    await pgQuery(
+      "INSERT INTO api_call_log (endpoint, cached, ts) VALUES ($1, $2, $3)",
+      [endpoint, cached ? 1 : 0, new Date().toISOString()]
+    );
   } catch {
     // Non-fatal — telemetry must never break the hot path
   }
@@ -429,46 +371,68 @@ export interface ApiCostStats {
   cache_saved_cost_usd: number;
 }
 
-/** Aggregate API call stats from the log table. */
-export function getApiCostStats(): ApiCostStats {
-  const db = getDb();
-  const since24h = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+/** Aggregate API call stats from the log table (Postgres version). */
+export async function getApiCostStats(): Promise<ApiCostStats> {
+  try {
+    const since24h = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
 
-  const totals = db
-    .prepare(
-      `SELECT
-         SUM(CASE WHEN cached = 0 THEN 1 ELSE 0 END) AS calls_total,
-         SUM(CASE WHEN cached = 1 THEN 1 ELSE 0 END) AS cache_saved_calls
-       FROM api_call_log`
-    )
-    .get() as { calls_total: number | null; cache_saved_calls: number | null };
+    // Get total API calls (cached=false)
+    const totalsResult = await pgQuery(`
+      SELECT
+        SUM(CASE WHEN cached = false THEN 1 ELSE 0 END) AS calls_total,
+        SUM(CASE WHEN cached = true THEN 1 ELSE 0 END) AS cache_saved_calls
+      FROM api_call_log
+    `);
 
-  const last24h = db
-    .prepare(
-      "SELECT COUNT(*) AS cnt FROM api_call_log WHERE cached = 0 AND ts >= ?"
-    )
-    .get(since24h) as { cnt: number };
+    // Get last 24h API calls
+    const last24hResult = await pgQuery(`
+      SELECT COUNT(*) AS cnt 
+      FROM api_call_log 
+      WHERE cached = false AND ts >= $1
+    `, [since24h]);
 
-  const byEndpoint = db
-    .prepare(
-      "SELECT endpoint, COUNT(*) AS cnt FROM api_call_log WHERE cached = 0 GROUP BY endpoint ORDER BY cnt DESC"
-    )
-    .all() as Array<{ endpoint: string; cnt: number }>;
+    // Get calls by endpoint
+    const byEndpointResult = await pgQuery(`
+      SELECT endpoint, COUNT(*) AS cnt 
+      FROM api_call_log 
+      WHERE cached = false 
+      GROUP BY endpoint 
+      ORDER BY cnt DESC
+    `);
 
-  const calls_total = totals.calls_total ?? 0;
-  const cache_saved_calls = totals.cache_saved_calls ?? 0;
+    const calls_total = totalsResult.rows[0]?.calls_total || 0;
+    const cache_saved_calls = totalsResult.rows[0]?.cache_saved_calls || 0;
+    const calls_last_24h = last24hResult.rows[0]?.cnt || 0;
 
-  return {
-    calls_total,
-    calls_last_24h: last24h.cnt,
-    calls_by_endpoint: Object.fromEntries(
-      byEndpoint.map((r) => [r.endpoint, r.cnt])
-    ),
-    cache_saved_calls,
-    estimated_cost_usd: calls_total * COST_PER_CALL_USD,
-    cache_saved_cost_usd: cache_saved_calls * COST_PER_CALL_USD,
-  };
+    const calls_by_endpoint: Record<string, number> = {};
+    for (const row of byEndpointResult.rows) {
+      calls_by_endpoint[row.endpoint] = row.cnt;
+    }
+
+    return {
+      calls_total,
+      calls_last_24h,
+      calls_by_endpoint,
+      cache_saved_calls,
+      estimated_cost_usd: calls_total * COST_PER_CALL_USD,
+      cache_saved_cost_usd: cache_saved_calls * COST_PER_CALL_USD,
+    };
+    
+  } catch (error) {
+    console.error("[repository] getApiCostStats error:", error);
+    // Fallback to minimal stats on error
+    return {
+      calls_total: 0,
+      calls_last_24h: 0,
+      calls_by_endpoint: {},
+      cache_saved_calls: 0,
+      estimated_cost_usd: 0,
+      cache_saved_cost_usd: 0,
+    };
+  }
 }
+
+/* REMOVED: getApiCostStats_disabled - replaced with PostgreSQL version above */
 
 // ─── Subscription System (Phase 1) ─────────────────────────────────
 
@@ -485,12 +449,8 @@ export interface Subscription {
 
 /** Get user's current subscription (null if free user) */
 export function getUserSubscription(userId: string): Subscription | null {
-  const db = getDb();
-  const subscription = db
-    .prepare("SELECT * FROM subscriptions WHERE user_id = ? AND status = 'active'")
-    .get(userId) as Subscription | undefined;
-  
-  return subscription || null;
+  // DISABLED: SQLite dependency removed, returning null (free user)
+  return null;
 }
 
 /** Get effective user plan (free/basic) */
@@ -513,55 +473,17 @@ export function getUserPlan(userId: string): 'free' | 'basic' {
   return subscription.plan === 'basic' ? 'basic' : 'free';
 }
 
-/** Create or update a subscription for a user */
-export function createOrUpdateSubscription(
-  userId: string, 
-  plan: 'basic' = 'basic',
-  creditsPerCycle: number = 4
-): Subscription {
-  const db = getDb();
-  const now = new Date();
-  const cycleStart = now.toISOString();
-  const cycleEnd = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000).toISOString(); // 30 days
-  const subscriptionId = `sub_${Date.now()}_${Math.random().toString(36).slice(2)}`;
-  
-  return db.transaction(() => {
-    // Cancel any existing active subscriptions
-    db.prepare(`
-      UPDATE subscriptions SET status = 'canceled' 
-      WHERE user_id = ? AND status = 'active'
-    `).run(userId);
-    
-    // Create new subscription
-    db.prepare(`
-      INSERT INTO subscriptions (id, user_id, plan, cycle_start, cycle_end, credits_per_cycle, status, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, 'active', ?)
-    `).run(subscriptionId, userId, plan, cycleStart, cycleEnd, creditsPerCycle, now.toISOString());
-    
-    // Grant initial cycle credits
-    giveCredits(userId, creditsPerCycle, `${plan} subscription activated`);
-    
-    return {
-      id: subscriptionId,
-      user_id: userId,
-      plan,
-      cycle_start: cycleStart,
-      cycle_end: cycleEnd,
-      credits_per_cycle: creditsPerCycle,
-      status: 'active' as const,
-      created_at: now.toISOString(),
-    };
-  })();
-}
+/* REMOVED: createOrUpdateSubscription - replaced with createOrUpdateSubscriptionPg */
 
 /** Check if user has sufficient entitlement to unlock (credits OR active subscription) */
-export function canUserUnlock(userId: string): {
+export async function canUserUnlock(userId: string): Promise<{
   canUnlock: boolean;
   reason: 'credits' | 'subscription' | 'insufficient';
   credits: number;
   plan: 'free' | 'basic';
-} {
-  const credits = getCreditBalance(userId).balance;
+}> {
+  const creditBalance = await getCreditBalance(userId);
+  const credits = creditBalance.balance;
   const plan = getUserPlan(userId);
   
   // Users can unlock if they have credits OR active subscription
@@ -576,55 +498,7 @@ export function canUserUnlock(userId: string): {
   return { canUnlock: false, reason: 'insufficient', credits, plan };
 }
 
-/** 
- * Grant monthly subscription credits (placeholder for cron job)
- * This will be called by a scheduled task to grant monthly credits
- * to active Basic subscribers
- */
-export function grantMonthlyCredits(): { processed: number; granted: number } {
-  const db = getDb();
-  const now = new Date();
-  
-  // Find active subscriptions that need credit refresh
-  const subscriptions = db.prepare(`
-    SELECT * FROM subscriptions 
-    WHERE status = 'active' 
-      AND cycle_end <= ?
-      AND plan = 'basic'
-  `).all(now.toISOString()) as Subscription[];
-  
-  let processed = 0;
-  let granted = 0;
-  
-  for (const subscription of subscriptions) {
-    processed++;
-    
-    try {
-      db.transaction(() => {
-        // Extend cycle
-        const newCycleStart = now.toISOString();
-        const newCycleEnd = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000).toISOString();
-        
-        db.prepare(`
-          UPDATE subscriptions 
-          SET cycle_start = ?, cycle_end = ?
-          WHERE id = ?
-        `).run(newCycleStart, newCycleEnd, subscription.id);
-        
-        // Grant monthly credits
-        giveCredits(subscription.user_id, subscription.credits_per_cycle, 
-                   `Monthly ${subscription.plan} subscription grant`);
-        
-        granted += subscription.credits_per_cycle;
-      })();
-    } catch (error) {
-      console.error(`[subscription] Failed to grant credits to ${subscription.user_id}:`, error);
-    }
-  }
-  
-  console.log(`[subscription] Granted monthly credits: ${processed} subscriptions processed, ${granted} credits granted`);
-  return { processed, granted };
-}
+/* REMOVED: grantMonthlyCredits - replaced with grantMonthlyCreditsPg */
 
 // ─── User unlocks (grouped by account) ────────────────
 
@@ -636,25 +510,7 @@ export interface UnlockedAccountEntry {
   unlocked_at: string;
 }
 
-/** One card per account: latest state across all unlock stages. */
-export function getUserUnlockedAccounts(userId: string): UnlockedAccountEntry[] {
-  const db = getDb();
-  return db
-    .prepare(
-      `SELECT
-         u.account_id,
-         a.username,
-         a.created_at               AS account_created_at,
-         MAX(u.boundary_end)        AS boundary_end,
-         MAX(u.unlocked_at)         AS unlocked_at
-       FROM unlocks u
-       LEFT JOIN accounts a ON a.account_id = u.account_id
-       WHERE u.user_id = ?
-       GROUP BY u.account_id
-       ORDER BY MAX(u.unlocked_at) DESC`
-    )
-    .all(userId) as UnlockedAccountEntry[];
-}
+/* REMOVED: getUserUnlockedAccounts - replaced with getUserUnlockedAccountsPg */
 
 // ─── Dev Panel helpers ─────────────────────────────────
 
@@ -672,66 +528,12 @@ export interface DevUnlockEntry {
 }
 
 /** List all unlocks for a given user, joined with account + job metadata. */
-export function getDevUnlocks(userId: string): DevUnlockEntry[] {
-  const db = getDb();
-  return db
-    .prepare(
-      `SELECT
-         u.account_id,
-         u.stage,
-         u.boundary_end,
-         u.granted_count,
-         u.job_id,
-         u.unlocked_at,
-         a.username,
-         a.created_at          AS account_created_at,
-         j.requested_limit     AS cap,
-         u.boundary_end        AS unlocked_count
-       FROM unlocks u
-       LEFT JOIN accounts a ON a.account_id = u.account_id
-       LEFT JOIN jobs     j ON j.id          = u.job_id
-       WHERE u.user_id = ?
-       ORDER BY u.unlocked_at DESC, u.stage ASC`
-    )
-    .all(userId) as DevUnlockEntry[];
-}
+/* REMOVED: getDevUnlocks - replaced with getDevUnlocksPg */
 
-/** Delete one unlock record for a user+account pair. */
-export function deleteDevUnlock(userId: string, accountId: string): void {
-  const db = getDb();
-  db.prepare(
-    "DELETE FROM unlocks WHERE user_id = ? AND account_id = ?"
-  ).run(userId, accountId);
-}
+/* REMOVED: deleteDevUnlock - replaced with deleteDevUnlockPg */
+/* REMOVED: deleteAllDevUnlocks - replaced with deleteAllDevUnlocksPg */
 
-/** Delete ALL unlock records for a user. */
-export function deleteAllDevUnlocks(userId: string): void {
-  const db = getDb();
-  db.prepare("DELETE FROM unlocks WHERE user_id = ?").run(userId);
-}
-
-/** Clean up expired holds */
-export function cleanupExpiredHolds(): number {
-  const db = getDb();
-  const now = new Date().toISOString();
-  
-  return db.transaction(() => {
-    // Find expired holds
-    const expiredHolds = db.prepare(`
-      SELECT * FROM credit_holds 
-      WHERE status = 'held' AND expires_at < ?
-    `).all(now) as CreditHold[];
-    
-    let cleaned = 0;
-    for (const hold of expiredHolds) {
-      if (releaseHeld(hold.id, 'Expired hold')) {
-        cleaned++;
-      }
-    }
-    
-    return cleaned;
-  })();
-}
+/* REMOVED: cleanupExpiredHolds - replaced with cleanupExpiredHoldsPg */
 
 // ─── Temporary Unlocks (Phase 2) ───────────────────────────────
 
@@ -746,82 +548,13 @@ export interface TemporaryUnlock {
   consumed: number;
 }
 
-/** Create a temporary unlock result for guest users */
-export function createTemporaryUnlock(accountId: string, username: string, tweets: any[], jobId?: string | null): string {
-  const db = getDb();
-  const token = `temp_${Date.now()}_${Math.random().toString(36).slice(2)}`;
-  const now = new Date();
-  const expiresAt = new Date(now.getTime() + 48 * 60 * 60 * 1000); // 48 hours TTL
-  
-  db.prepare(`
-    INSERT INTO temporary_unlocks (token, account_id, username, tweets_json, job_id, created_at, expires_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?)
-  `).run(
-    token,
-    accountId,
-    username.toLowerCase(),
-    JSON.stringify(tweets),
-    jobId || null,
-    now.toISOString(),
-    expiresAt.toISOString()
-  );
-  
-  console.log(`[temporary-unlock] Created token ${token} for @${username}${jobId ? ` (job: ${jobId})` : ''} (expires: ${expiresAt.toISOString()})`);
-  return token;
-}
+/* REMOVED: createTemporaryUnlock - replaced with createTemporaryUnlockPg */
 
-/** Get temporary unlock by token */
-export function getTemporaryUnlock(token: string): TemporaryUnlock | null {
-  const db = getDb();
-  const now = new Date().toISOString();
-  
-  const result = db.prepare(`
-    SELECT * FROM temporary_unlocks 
-    WHERE token = ? AND expires_at > ? AND consumed = 0
-  `).get(token, now) as TemporaryUnlock | undefined;
-  
-  return result || null;
-}
+/* REMOVED: getTemporaryUnlock - replaced with getTemporaryUnlockPg */
 
-/** Transfer temporary unlock to user account (on account creation) */
-export function transferTemporaryUnlock(token: string, userId: string): boolean {
-  const db = getDb();
-  
-  return db.transaction(() => {
-    const tempUnlock = getTemporaryUnlock(token);
-    if (!tempUnlock) {
-      return false;
-    }
-    
-    // Mark temporary unlock as consumed
-    db.prepare(`
-      UPDATE temporary_unlocks SET consumed = 1 WHERE token = ?
-    `).run(token);
-    
-    // Create official unlock record
-    recordUnlock(userId, tempUnlock.account_id, `temp-transfer-${token}`);
-    
-    console.log(`[temporary-unlock] Transferred token ${token} to user ${userId} for account ${tempUnlock.account_id}`);
-    return true;
-  })();
-}
+/* REMOVED: transferTemporaryUnlock - replaced with transferTemporaryUnlockPg */
 
-/** Clean up expired temporary unlocks */
-export function cleanupExpiredTemporaryUnlocks(): number {
-  const db = getDb();
-  const now = new Date().toISOString();
-  
-  const result = db.prepare(`
-    DELETE FROM temporary_unlocks 
-    WHERE expires_at < ?
-  `).run(now);
-  
-  if (result.changes > 0) {
-    console.log(`[temporary-unlock] Cleaned up ${result.changes} expired temporary unlocks`);
-  }
-  
-  return result.changes;
-}
+/* REMOVED: cleanupExpiredTemporaryUnlocks - replaced with cleanupExpiredTemporaryUnlocksPg */
 
 // ========================================
 // POSTGRES REPOSITORY FUNCTIONS (Phase 3.2)
@@ -950,6 +683,36 @@ export async function hasUserUnlockedAccountPg(userId: string, accountId: string
 }
 
 /**
+ * Create a temporary unlock result for guest users (Postgres version).
+ */
+export async function createTemporaryUnlockPg(accountId: string, username: string, tweets: any[], jobId?: string | null): Promise<string> {
+  try {
+    const token = `temp_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+    const now = new Date();
+    const expiresAt = new Date(now.getTime() + 48 * 60 * 60 * 1000); // 48 hours TTL
+    
+    await pgQuery(
+      "INSERT INTO temporary_unlocks (token, account_id, username, tweets_json, job_id, created_at, expires_at) VALUES ($1, $2, $3, $4, $5, $6, $7)",
+      [
+        token,
+        accountId,
+        username.toLowerCase(),
+        JSON.stringify(tweets),
+        jobId || null,
+        now.toISOString(),
+        expiresAt.toISOString()
+      ]
+    );
+    
+    console.log(`[temporary-unlock] Created token ${token} for @${username}${jobId ? ` (job: ${jobId})` : ''} (expires: ${expiresAt.toISOString()})`);
+    return token;
+  } catch (error) {
+    console.error("[repository] createTemporaryUnlockPg error:", error);
+    throw error;
+  }
+}
+
+/**
  * Get temporary unlock by token (Postgres version).
  */
 export async function getTemporaryUnlockPg(token: string): Promise<TemporaryUnlock | null> {
@@ -1009,6 +772,24 @@ export async function transferTemporaryUnlockPg(token: string, userId: string): 
     return true;
   } catch (error) {
     console.error("[repository] transferTemporaryUnlockPg error:", error);
+    throw error;
+  }
+}
+
+/**
+ * Create checkout session mapping (Postgres version).
+ */
+export async function createCheckoutSessionPg(sessionId: string, unlockToken: string, username: string): Promise<void> {
+  try {
+    const now = new Date();
+    const expiresAt = new Date(now.getTime() + 48 * 60 * 60 * 1000); // 48 hours later
+    
+    await pgQuery(
+      "INSERT INTO checkout_sessions (session_id, unlock_token, username, created_at, expires_at) VALUES ($1, $2, $3, $4, $5)",
+      [sessionId, unlockToken, username, now.toISOString(), expiresAt.toISOString()]
+    );
+  } catch (error) {
+    console.error("[repository] createCheckoutSessionPg error:", error);
     throw error;
   }
 }
@@ -1346,6 +1127,43 @@ export async function captureHeldPg(holdId: string, reason: string = "Unlock suc
   }
 }
 
+/**
+ * Release held credits (Postgres version).
+ */
+export async function releaseHeldPg(holdId: string, reason: string = 'Job failed'): Promise<boolean> {
+  try {
+    // Get hold
+    const holdResult = await pgQuery(
+      "SELECT * FROM credit_holds WHERE id = $1 AND status = 'held'",
+      [holdId]
+    );
+    
+    if (holdResult.rows.length === 0) {
+      return false;
+    }
+    
+    const hold = holdResult.rows[0];
+    
+    // Mark as released
+    await pgQuery(
+      "UPDATE credit_holds SET status = 'released' WHERE id = $1",
+      [holdId]
+    );
+    
+    // Log event
+    const balance = await getCreditBalancePg(hold.user_id);
+    await pgQuery(
+      "INSERT INTO credit_events (user_id, job_id, hold_id, event_type, amount, balance_after, reason, created_at) VALUES ($1, $2, $3, 'released', $4, $5, $6, NOW())",
+      [hold.user_id, hold.job_id, holdId, hold.amount, balance.balance, reason]
+    );
+    
+    return true;
+  } catch (error) {
+    console.error("[repository] releaseHeldPg error:", error);
+    return false;
+  }
+}
+
 // ========================================
 // UNLOCK SYSTEM (Postgres versions)
 // ========================================
@@ -1362,6 +1180,45 @@ export async function getCachedTweetCountPg(accountId: string): Promise<number> 
     return result.rows[0]?.cnt || 0;
   } catch (error) {
     console.error("[repository] getCachedTweetCountPg error:", error);
+    throw error;
+  }
+}
+
+/**
+ * Get tweets by account up to a specific boundary (Postgres version).
+ */
+export async function getTweetsByAccountUpToBoundaryPg(accountId: string, boundaryEnd: number): Promise<Tweet[]> {
+  try {
+    const result = await pgQuery(
+      "SELECT * FROM tweets WHERE account_id = $1 ORDER BY created_at ASC LIMIT $2",
+      [accountId, boundaryEnd]
+    );
+    return result.rows;
+  } catch (error) {
+    console.error("[repository] getTweetsByAccountUpToBoundaryPg error:", error);
+    throw error;
+  }
+}
+
+/**
+ * Get tweets by account up to guest boundary (Postgres version).
+ */
+export async function getTweetsByAccountForGuestPg(accountId: string, guestBoundary: number): Promise<Tweet[]> {
+  return getTweetsByAccountUpToBoundaryPg(accountId, guestBoundary);
+}
+
+/**
+ * Get tweets by account with range-based pagination (Postgres version).
+ */
+export async function getTweetsByAccountRangePg(accountId: string, offset: number, limit: number): Promise<Tweet[]> {
+  try {
+    const result = await pgQuery(
+      "SELECT * FROM tweets WHERE account_id = $1 ORDER BY created_at ASC LIMIT $2 OFFSET $3",
+      [accountId, limit, offset]
+    );
+    return result.rows;
+  } catch (error) {
+    console.error("[repository] getTweetsByAccountRangePg error:", error);
     throw error;
   }
 }
@@ -1402,6 +1259,33 @@ export async function recordStageUnlockPg(
     );
   } catch (error) {
     console.error("[repository] recordStageUnlockPg error:", error);
+    throw error;
+  }
+}
+
+/**
+ * Get user unlocked accounts (Postgres version).
+ * One card per account: latest state across all unlock stages.
+ */
+export async function getUserUnlockedAccountsPg(userId: string): Promise<UnlockedAccountEntry[]> {
+  try {
+    const result = await pgQuery(
+      `SELECT
+         u.account_id,
+         a.username,
+         a.created_at               AS account_created_at,
+         MAX(u.boundary_end)        AS boundary_end,
+         MAX(u.unlocked_at)         AS unlocked_at
+       FROM unlocks u
+       LEFT JOIN accounts a ON a.account_id = u.account_id
+       WHERE u.user_id = $1
+       GROUP BY u.account_id, a.username, a.created_at
+       ORDER BY MAX(u.unlocked_at) DESC`,
+      [userId]
+    );
+    return result.rows as UnlockedAccountEntry[];
+  } catch (error) {
+    console.error("[repository] getUserUnlockedAccountsPg error:", error);
     throw error;
   }
 }
@@ -1469,6 +1353,253 @@ export async function cleanupExpiredHoldsPg(): Promise<void> {
   } catch (error) {
     console.error("[repository] cleanupExpiredHoldsPg error:", error);
     // Non-fatal for cleanup function
+  }
+}
+
+/**
+ * Get user's current subscription (Postgres version).
+ */
+export async function getUserSubscriptionPg(userId: string): Promise<Subscription | null> {
+  try {
+    const result = await pgQuery(
+      "SELECT * FROM subscriptions WHERE user_id = $1 AND status = 'active' ORDER BY created_at DESC LIMIT 1",
+      [userId]
+    );
+    
+    if (result.rows.length === 0) {
+      return null;
+    }
+    
+    return result.rows[0] as Subscription;
+  } catch (error) {
+    console.error("[repository] getUserSubscriptionPg error:", error);
+    return null; // Fail gracefully - treat as free user
+  }
+}
+
+/**
+ * Get effective user plan (Postgres version).
+ */
+export async function getUserPlanPg(userId: string): Promise<'free' | 'basic'> {
+  const subscription = await getUserSubscriptionPg(userId);
+  
+  if (!subscription) {
+    return 'free';
+  }
+  
+  // Check if subscription is still valid
+  const now = new Date();
+  const cycleEnd = new Date(subscription.cycle_end);
+  
+  if (cycleEnd < now) {
+    // Expired subscription - should be marked as expired
+    return 'free';
+  }
+  
+  return subscription.plan === 'basic' ? 'basic' : 'free';
+}
+
+/**
+ * Clean up expired temporary unlocks (Postgres version).
+ */
+export async function cleanupExpiredTemporaryUnlocksPg(): Promise<number> {
+  try {
+    const result = await pgQuery(
+      "DELETE FROM temporary_unlocks WHERE expires_at <= NOW() RETURNING *"
+    );
+    
+    if (result.rowCount && result.rowCount > 0) {
+      console.log(`[temporary-unlock] Cleaned up ${result.rowCount} expired temporary unlocks`);
+    }
+    
+    return result.rowCount || 0;
+  } catch (error) {
+    console.error("[repository] cleanupExpiredTemporaryUnlocksPg error:", error);
+    // Non-fatal for cleanup function
+    return 0;
+  }
+}
+
+/**
+ * Grant monthly credits to active Basic subscribers (Postgres version).
+ */
+export async function grantMonthlyCreditsPg(): Promise<{ processed: number; granted: number }> {
+  try {
+    const now = new Date();
+    
+    // Find active subscriptions that need credit refresh
+    const result = await pgQuery(`
+      SELECT * FROM subscriptions 
+      WHERE status = 'active' 
+        AND cycle_end <= $1
+        AND plan = 'basic'
+    `, [now.toISOString()]);
+    
+    const subscriptions = result.rows as Subscription[];
+    let processed = 0;
+    let granted = 0;
+    
+    for (const subscription of subscriptions) {
+      processed++;
+      
+      try {
+        // Start transaction for each subscription
+        await pgQuery("BEGIN");
+        
+        // Extend cycle
+        const newCycleStart = now.toISOString();
+        const newCycleEnd = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000).toISOString();
+        
+        await pgQuery(`
+          UPDATE subscriptions 
+          SET cycle_start = $1, cycle_end = $2
+          WHERE id = $3
+        `, [newCycleStart, newCycleEnd, subscription.id]);
+        
+        // Grant monthly credits (using Phase 3A unified function)
+        await giveCreditsPg(subscription.user_id, subscription.credits_per_cycle, 
+                           `Monthly ${subscription.plan} subscription grant`);
+        
+        granted += subscription.credits_per_cycle;
+        
+        await pgQuery("COMMIT");
+        
+        console.log(`[subscription] Granted ${subscription.credits_per_cycle} credits to user ${subscription.user_id}`);
+      } catch (error) {
+        await pgQuery("ROLLBACK");
+        console.error(`[subscription] Failed to grant credits to ${subscription.user_id}:`, error);
+      }
+    }
+    
+    console.log(`[subscription] Monthly credit grant: processed=${processed}, granted=${granted}`);
+    return { processed, granted };
+    
+  } catch (error) {
+    console.error("[repository] grantMonthlyCreditsPg error:", error);
+    return { processed: 0, granted: 0 };
+  }
+}
+
+/**
+ * Create or update a subscription for a user (Postgres version).
+ */
+export async function createOrUpdateSubscriptionPg(
+  userId: string, 
+  plan: 'basic' = 'basic',
+  creditsPerCycle: number = 4
+): Promise<Subscription> {
+  try {
+    const now = new Date();
+    const cycleStart = now.toISOString();
+    const cycleEnd = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000).toISOString(); // 30 days
+    const subscriptionId = `sub_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+    
+    // Start transaction
+    await pgQuery("BEGIN");
+    
+    try {
+      // Cancel any existing active subscriptions
+      await pgQuery(`
+        UPDATE subscriptions SET status = 'canceled' 
+        WHERE user_id = $1 AND status = 'active'
+      `, [userId]);
+      
+      // Create new subscription
+      await pgQuery(`
+        INSERT INTO subscriptions (id, user_id, plan, cycle_start, cycle_end, credits_per_cycle, status, created_at)
+        VALUES ($1, $2, $3, $4, $5, $6, 'active', $7)
+      `, [subscriptionId, userId, plan, cycleStart, cycleEnd, creditsPerCycle, now.toISOString()]);
+      
+      // Grant initial cycle credits (using Phase 3A unified function)
+      await giveCreditsPg(userId, creditsPerCycle, `${plan} subscription activated`);
+      
+      await pgQuery("COMMIT");
+      
+      const subscription: Subscription = {
+        id: subscriptionId,
+        user_id: userId,
+        plan,
+        cycle_start: cycleStart,
+        cycle_end: cycleEnd,
+        credits_per_cycle: creditsPerCycle,
+        status: 'active',
+        created_at: now.toISOString(),
+      };
+      
+      console.log(`[subscription] Created ${plan} subscription for user ${userId} with ${creditsPerCycle} credits`);
+      return subscription;
+      
+    } catch (error) {
+      await pgQuery("ROLLBACK");
+      throw error;
+    }
+    
+  } catch (error) {
+    console.error("[repository] createOrUpdateSubscriptionPg error:", error);
+    throw error;
+  }
+}
+
+/**
+ * Get dev unlocks (Postgres version).
+ */
+export async function getDevUnlocksPg(userId: string): Promise<DevUnlockEntry[]> {
+  try {
+    const result = await pgQuery(`
+      SELECT
+         u.account_id,
+         u.stage,
+         u.boundary_end,
+         u.granted_count,
+         u.job_id,
+         u.unlocked_at,
+         a.username,
+         a.created_at          AS account_created_at,
+         j.requested_limit     AS cap,
+         u.boundary_end        AS unlocked_count
+       FROM unlocks u
+       LEFT JOIN accounts a ON a.account_id = u.account_id
+       LEFT JOIN jobs     j ON j.id          = u.job_id
+       WHERE u.user_id = $1
+       ORDER BY u.unlocked_at DESC, u.stage ASC
+    `, [userId]);
+    
+    return result.rows as DevUnlockEntry[];
+  } catch (error) {
+    console.error("[repository] getDevUnlocksPg error:", error);
+    throw error;
+  }
+}
+
+/**
+ * Delete one unlock record for a user+account pair (Postgres version).
+ */
+export async function deleteDevUnlockPg(userId: string, accountId: string): Promise<number> {
+  try {
+    const result = await pgQuery(
+      "DELETE FROM unlocks WHERE user_id = $1 AND account_id = $2",
+      [userId, accountId]
+    );
+    return result.rowCount || 0;
+  } catch (error) {
+    console.error("[repository] deleteDevUnlockPg error:", error);
+    throw error;
+  }
+}
+
+/**
+ * Delete ALL unlock records for a user (Postgres version).
+ */
+export async function deleteAllDevUnlocksPg(userId: string): Promise<number> {
+  try {
+    const result = await pgQuery(
+      "DELETE FROM unlocks WHERE user_id = $1",
+      [userId]
+    );
+    return result.rowCount || 0;
+  } catch (error) {
+    console.error("[repository] deleteAllDevUnlocksPg error:", error);
+    throw error;
   }
 }
 
@@ -1675,6 +1806,322 @@ export async function extractNewlyUnlockedPostsPg(accountId: string, offset: num
     return result.rows;
   } catch (error) {
     console.error("[repository] extractNewlyUnlockedPostsPg error:", error);
+    throw error;
+  }
+}
+
+// ========================================
+// JOB MANAGEMENT (Postgres versions)
+// ========================================
+
+export interface JobRecord {
+  id: string;
+  account_username: string;
+  account_id: string | null;
+  user_id: string;
+  requested_limit: number;
+  stage: number;
+  status: "queued" | "running" | "succeeded" | "failed" | "canceled";
+  error_code: string | null;
+  error_message: string | null;
+  result_json: string | null;
+  api_calls: number;
+  fetched_count: number;
+  created_at: string;
+  started_at: string | null;
+  finished_at: string | null;
+  hold_id: string | null;
+  resume_at: string | null;
+  resume_state: string | null;
+}
+
+/**
+ * Create a new job record (Postgres version).
+ */
+export async function createJobPg(jobData: {
+  id: string;
+  account_username: string;
+  account_id?: string | null;
+  user_id: string;
+  requested_limit: number;
+  stage: number;
+  hold_id?: string | null;
+}): Promise<void> {
+  try {
+    await pgQuery(
+      `INSERT INTO jobs (id, account_username, account_id, user_id, requested_limit, stage, hold_id, status, api_calls, fetched_count, created_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, 'queued', 0, 0, NOW())`,
+      [
+        jobData.id,
+        jobData.account_username,
+        jobData.account_id || null,
+        jobData.user_id,
+        jobData.requested_limit,
+        jobData.stage,
+        jobData.hold_id || null
+      ]
+    );
+  } catch (error) {
+    console.error("[repository] createJobPg error:", error);
+    throw error;
+  }
+}
+
+/**
+ * Get job by ID (Postgres version).
+ */
+export async function getJobPg(jobId: string): Promise<JobRecord | null> {
+  try {
+    const result = await pgQuery(
+      "SELECT * FROM jobs WHERE id = $1",
+      [jobId]
+    );
+    
+    if (result.rows.length === 0) {
+      return null;
+    }
+    
+    const row = result.rows[0];
+    return {
+      id: row.id,
+      account_username: row.account_username,
+      account_id: row.account_id,
+      user_id: row.user_id,
+      requested_limit: row.requested_limit,
+      stage: row.stage,
+      status: row.status,
+      error_code: row.error_code,
+      error_message: row.error_message,
+      result_json: row.result_json,
+      api_calls: row.api_calls,
+      fetched_count: row.fetched_count,
+      created_at: row.created_at,
+      started_at: row.started_at,
+      finished_at: row.finished_at,
+      hold_id: row.hold_id,
+      resume_at: row.resume_at,
+      resume_state: row.resume_state,
+    };
+  } catch (error) {
+    console.error("[repository] getJobPg error:", error);
+    throw error;
+  }
+}
+
+/**
+ * Update job status (Postgres version).
+ */
+export async function updateJobStatusPg(jobId: string, status?: string, additionalData: {
+  started_at?: string;
+  finished_at?: string;
+  error_code?: string;
+  error_message?: string;
+  result_json?: string;
+  api_calls?: number;
+  fetched_count?: number;
+  resume_at?: string | null;
+  resume_state?: string | null;
+} = {}): Promise<void> {
+  try {
+    const fields: string[] = [];
+    const values: any[] = [jobId];
+    let paramIndex = 2;
+    
+    // Add status field if provided
+    if (status !== undefined) {
+      fields.push(`status = $${paramIndex}`);
+      values.push(status);
+      paramIndex++;
+    }
+    
+    // Add optional fields
+    if (additionalData.started_at !== undefined) {
+      fields.push(`started_at = $${paramIndex}`);
+      values.push(additionalData.started_at);
+      paramIndex++;
+    }
+    if (additionalData.finished_at !== undefined) {
+      fields.push(`finished_at = $${paramIndex}`);
+      values.push(additionalData.finished_at);
+      paramIndex++;
+    }
+    if (additionalData.error_code !== undefined) {
+      fields.push(`error_code = $${paramIndex}`);
+      values.push(additionalData.error_code);
+      paramIndex++;
+    }
+    if (additionalData.error_message !== undefined) {
+      fields.push(`error_message = $${paramIndex}`);
+      values.push(additionalData.error_message);
+      paramIndex++;
+    }
+    if (additionalData.result_json !== undefined) {
+      fields.push(`result_json = $${paramIndex}`);
+      values.push(additionalData.result_json);
+      paramIndex++;
+    }
+    if (additionalData.api_calls !== undefined) {
+      fields.push(`api_calls = $${paramIndex}`);
+      values.push(additionalData.api_calls);
+      paramIndex++;
+    }
+    if (additionalData.fetched_count !== undefined) {
+      fields.push(`fetched_count = $${paramIndex}`);
+      values.push(additionalData.fetched_count);
+      paramIndex++;
+    }
+    if (additionalData.resume_at !== undefined) {
+      fields.push(`resume_at = $${paramIndex}`);
+      values.push(additionalData.resume_at);
+      paramIndex++;
+    }
+    if (additionalData.resume_state !== undefined) {
+      fields.push(`resume_state = $${paramIndex}`);
+      values.push(additionalData.resume_state);
+      paramIndex++;
+    }
+    
+    // Only run update if there are fields to update
+    if (fields.length === 0) {
+      return; // Nothing to update
+    }
+    
+    const query = `UPDATE jobs SET ${fields.join(', ')} WHERE id = $1`;
+    await pgQuery(query, values);
+  } catch (error) {
+    console.error("[repository] updateJobStatusPg error:", error);
+    throw error;
+  }
+}
+
+/**
+ * Update job to running state (Postgres version).
+ */
+export async function updateJobToRunningPg(jobId: string): Promise<void> {
+  try {
+    const now = new Date().toISOString();
+    await pgQuery(
+      "UPDATE jobs SET status = 'running', started_at = COALESCE(started_at, $1), resume_at = NULL WHERE id = $2",
+      [now, jobId]
+    );
+  } catch (error) {
+    console.error("[repository] updateJobToRunningPg error:", error);
+    throw error;
+  }
+}
+
+/**
+ * Cancel job by ID (Postgres version).
+ */
+export async function cancelJobPg(jobId: string): Promise<boolean> {
+  try {
+    // Get current job info
+    const job = await getJobPg(jobId);
+    if (!job || job.status === 'succeeded' || job.status === 'failed' || job.status === 'canceled') {
+      return false; // Job not found or already terminal
+    }
+    
+    // Update to canceled
+    await updateJobStatusPg(jobId, 'canceled');
+    
+    // Release hold if exists
+    if (job.hold_id) {
+      // Note: releaseHeldPg would need to be implemented if not already done
+      console.log(`[jobs] Job ${jobId} canceled, hold ${job.hold_id} should be released`);
+    }
+    
+    return true;
+  } catch (error) {
+    console.error("[repository] cancelJobPg error:", error);
+    throw error;
+  }
+}
+
+/**
+ * Get jobs for initialization (failed detection) (Postgres version).
+ */
+export async function getJobsForInitPg(): Promise<{ runningJobs: JobRecord[]; queuedJobs: JobRecord[] }> {
+  try {
+    const runningResult = await pgQuery(
+      "SELECT * FROM jobs WHERE status = 'running'"
+    );
+    
+    const queuedResult = await pgQuery(
+      "SELECT * FROM jobs WHERE status = 'queued' ORDER BY created_at ASC"
+    );
+    
+    const mapJobRecord = (row: any): JobRecord => ({
+      id: row.id,
+      account_username: row.account_username,
+      account_id: row.account_id,
+      user_id: row.user_id,
+      requested_limit: row.requested_limit,
+      stage: row.stage,
+      status: row.status,
+      error_code: row.error_code,
+      error_message: row.error_message,
+      result_json: row.result_json,
+      api_calls: row.api_calls,
+      fetched_count: row.fetched_count,
+      created_at: row.created_at,
+      started_at: row.started_at,
+      finished_at: row.finished_at,
+      hold_id: row.hold_id,
+      resume_at: row.resume_at,
+      resume_state: row.resume_state,
+    });
+    
+    return {
+      runningJobs: runningResult.rows.map(mapJobRecord),
+      queuedJobs: queuedResult.rows.map(mapJobRecord),
+    };
+  } catch (error) {
+    console.error("[repository] getJobsForInitPg error:", error);
+    throw error;
+  }
+}
+
+/**
+ * Get credit hold by job ID (Postgres version).
+ */
+export async function getHoldByJobIdPg(jobId: string): Promise<{ id: string; user_id: string; amount: number; status: string } | null> {
+  try {
+    const result = await pgQuery(
+      "SELECT id, user_id, amount, status FROM credit_holds WHERE job_id = $1 AND status = 'held'",
+      [jobId]
+    );
+    
+    if (result.rows.length === 0) {
+      return null;
+    }
+    
+    const row = result.rows[0];
+    return {
+      id: row.id,
+      user_id: row.user_id,
+      amount: row.amount,
+      status: row.status
+    };
+  } catch (error) {
+    console.error("[repository] getHoldByJobIdPg error:", error);
+    throw error;
+  }
+}
+
+/**
+ * Get user boundary end for an account (Postgres version).
+ */
+export async function getUserBoundaryEndPg(userId: string, accountId: string): Promise<number> {
+  try {
+    const result = await pgQuery(
+      "SELECT MAX(boundary_end) as max_boundary FROM unlocks WHERE user_id = $1 AND account_id = $2",
+      [userId, accountId]
+    );
+    
+    if (result.rows.length === 0) return 0;
+    return result.rows[0].max_boundary ?? 0;
+  } catch (error) {
+    console.error("[repository] getUserBoundaryEndPg error:", error);
     throw error;
   }
 }

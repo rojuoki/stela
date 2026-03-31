@@ -1,9 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
 import { 
-  getAccountByUsername, 
+  getAccountByUsernamePg, 
   getTweetsByAccountForGuest, 
-  createTemporaryUnlock,
-  cleanupExpiredTemporaryUnlocks 
+  createTemporaryUnlockPg,
+  cleanupExpiredTemporaryUnlocksPg 
 } from "@/lib/repository";
 import { planGuestUnlock } from "@/lib/unlockPlanning";
 import { normalizeUsername } from "@/lib/validation";
@@ -22,10 +22,10 @@ export async function POST(req: NextRequest) {
     }
 
     // Clean up expired temporary unlocks
-    cleanupExpiredTemporaryUnlocks();
+    await cleanupExpiredTemporaryUnlocksPg();
 
     // Check if account exists
-    const account = getAccountByUsername(normalizedUsername);
+    const account = await getAccountByUsernamePg(normalizedUsername);
     if (!account) {
       return NextResponse.json({ 
         error: "Account not found or not yet excavated" 
@@ -39,7 +39,7 @@ export async function POST(req: NextRequest) {
     }
 
     // Use unified guest planning logic
-    const plan = planGuestUnlock(account.account_id, account.created_at);
+    const plan = await planGuestUnlock(account.account_id, account.created_at);
     
     if (plan.strategy !== "cache-only" || !plan.guestBoundary) {
       return NextResponse.json({ 
@@ -48,7 +48,7 @@ export async function POST(req: NextRequest) {
     }
 
     // Get tweets respecting guest boundary (follows same model as logged-in users)
-    const tweets = getTweetsByAccountForGuest(account.account_id, plan.guestBoundary);
+    const tweets = await getTweetsByAccountForGuest(account.account_id, plan.guestBoundary);
     if (tweets.length === 0) {
       return NextResponse.json({ 
         error: "No cached data available for this account" 
@@ -58,7 +58,7 @@ export async function POST(req: NextRequest) {
     console.log(`[unlock/guest] Guest plan for @${normalizedUsername}: boundary=${plan.guestBoundary}, cached=${plan.currentCachedCount}`);
 
     // Create temporary unlock
-    const token = createTemporaryUnlock(account.account_id, normalizedUsername, tweets);
+    const token = await createTemporaryUnlockPg(account.account_id, normalizedUsername, tweets);
 
     // TODO: Phase 4 - Replace with actual Stripe Checkout
     // For now, return the token directly for development

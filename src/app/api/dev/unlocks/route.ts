@@ -9,10 +9,10 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import {
-  getDevUnlocks,
-  deleteDevUnlock,
-  deleteAllDevUnlocks,
-  getAccountByUsername,
+  getDevUnlocksPg,
+  deleteDevUnlockPg,
+  deleteAllDevUnlocksPg,
+  getAccountByUsernamePg,
 } from "@/lib/repository";
 
 const DEV_USER_ID = "anonymous"; // mirrors the rest of Phase 6
@@ -24,12 +24,12 @@ function guardDev(): NextResponse | null {
   return null;
 }
 
-export function GET() {
+export async function GET() {
   const block = guardDev();
   if (block) return block;
 
   try {
-    const unlocks = getDevUnlocks(DEV_USER_ID);
+    const unlocks = await getDevUnlocksPg(DEV_USER_ID);
     return NextResponse.json({ userId: DEV_USER_ID, unlocks });
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : "unknown";
@@ -48,22 +48,22 @@ export async function DELETE(req: NextRequest) {
 
     if (username) {
       // Reset a single unlock by username
-      const account = getAccountByUsername(username);
+      const account = await getAccountByUsernamePg(username);
       if (!account) {
         return NextResponse.json(
           { error: `Account not found: ${username}` },
           { status: 404 }
         );
       }
-      deleteDevUnlock(DEV_USER_ID, account.account_id);
-      console.log(`[dev/unlocks] reset userId=${DEV_USER_ID} username=${username}`);
-      return NextResponse.json({ ok: true, reset: username });
+      const deleted = await deleteDevUnlockPg(DEV_USER_ID, account.account_id);
+      console.log(`[dev/unlocks] reset userId=${DEV_USER_ID} username=${username} (deleted=${deleted})`);
+      return NextResponse.json({ ok: true, reset: username, deleted });
     }
 
     // Reset ALL unlocks for this dev user
-    deleteAllDevUnlocks(DEV_USER_ID);
-    console.log(`[dev/unlocks] reset ALL userId=${DEV_USER_ID}`);
-    return NextResponse.json({ ok: true, reset: "all" });
+    const deleted = await deleteAllDevUnlocksPg(DEV_USER_ID);
+    console.log(`[dev/unlocks] reset ALL userId=${DEV_USER_ID} (deleted=${deleted})`);
+    return NextResponse.json({ ok: true, reset: "all", deleted });
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : "unknown";
     console.error("[dev/unlocks] DELETE error:", msg);

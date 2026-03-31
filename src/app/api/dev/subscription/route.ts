@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getUserFromRequest } from "@/lib/auth";
-import { createOrUpdateSubscription, getUserSubscription, getUserPlan, grantMonthlyCredits } from "@/lib/repository";
+import { createOrUpdateSubscriptionPg, getUserSubscriptionPg, getUserPlanPg, grantMonthlyCreditsPg } from "@/lib/repository";
 
 const DEV_PANEL = process.env.NEXT_PUBLIC_DEV_PANEL === "1";
 
@@ -23,7 +23,7 @@ export async function POST(req: NextRequest) {
     const { action, plan = 'basic', creditsPerCycle = 4 } = body;
 
     if (action === 'create') {
-      const subscription = createOrUpdateSubscription(user.id, plan, creditsPerCycle);
+      const subscription = await createOrUpdateSubscriptionPg(user.id, plan, creditsPerCycle);
       
       return NextResponse.json({
         success: true,
@@ -33,7 +33,7 @@ export async function POST(req: NextRequest) {
     }
 
     if (action === 'grant-monthly') {
-      const result = grantMonthlyCredits();
+      const result = await grantMonthlyCreditsPg();
       return NextResponse.json({
         success: true,
         ...result,
@@ -67,8 +67,8 @@ export async function GET(req: NextRequest) {
       );
     }
 
-    const subscription = getUserSubscription(user.id);
-    const plan = getUserPlan(user.id);
+    const subscription = await getUserSubscriptionPg(user.id);
+    const plan = await getUserPlanPg(user.id);
 
     return NextResponse.json({
       userId: user.id,

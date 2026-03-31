@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getUserId } from "@/lib/getUserId";
-import { giveCredits } from "@/lib/repository";
+import { giveCreditsPg } from "@/lib/repository";
 import { withDevMeasure } from "@/lib/devMeasure";
 
 interface PurchaseRequest {
@@ -34,7 +34,7 @@ export async function POST(req: NextRequest) {
       // For Phase 4: Simple credit granting (no real payment processing)
       // In production, this would integrate with Stripe or other payment processor
       const reason = `Credit purchase - ${amount} credits`;
-      giveCredits(userId, amount, reason);
+      await giveCreditsPg(userId, amount, reason);
 
       return NextResponse.json({
         success: true,

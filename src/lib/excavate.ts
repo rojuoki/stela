@@ -39,7 +39,7 @@ import {
   type TimelinePage,
   type ApiCallStats,
 } from "./xclient";
-import { getDb } from "./db";
+import { pgQuery } from "./db";
 
 // ─── Custom Errors ─────────────────────────────────────
 
@@ -266,7 +266,7 @@ export async function excavateStageExpansion(
     );
   }
 
-  upsertAccount(user);
+  await upsertAccount(user);
 
   console.log(
     `[excavate-expansion] @${username} Stage ${targetStage}: expanding from ${baselineStageResult.collected_count} to target ${effectiveLimit} (+100)`
@@ -342,7 +342,7 @@ export async function excavateEarliest(
     );
   }
 
-  upsertAccount(user);
+  await upsertAccount(user);
 
   // Attempt full-archive; fall back if the token lacks that access (403).
   const query = `from:${user.username} -is:retweet`;
@@ -426,7 +426,7 @@ async function excavateFullArchive(
     earliestHitYear = cp.earliest_hit_year;
 
     if (cp.collected_ids && cp.collected_ids.length > 0) {
-      const restored = loadTweetsFromDbByIds(user.id, cp.collected_ids);
+      const restored = await loadTweetsFromDbByIds(user.id, cp.collected_ids);
       for (const t of restored) collected.set(t.id, t);
       console.log(
         `[checkpoint] Restored ${collected.size} tweets for @${user.username} (${cp.collected_ids.length} IDs)`,
@@ -897,7 +897,7 @@ async function excavateFullArchive(
       .sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime())
       .slice(0, effectiveTargetCount);
 
-    storeTweets(user.id, sorted, []); // Safety net — tweets already stored during whole-collect
+    await storeTweets(user.id, sorted, []); // Safety net — tweets already stored during whole-collect
     
     return {
       username: user.username,
@@ -1023,7 +1023,7 @@ async function excavateFullArchive(
     .sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime())
     .slice(0, effectiveTargetCount);
 
-  storeTweets(user.id, sorted, []); // Safety net — tweets already stored during incremental saves
+  await storeTweets(user.id, sorted, []); // Safety net — tweets already stored during incremental saves
 
   console.log(
     `[excavate] @${user.username} done: fetched=${sorted.length} stored_new=${totalStoredNew} api_calls=${stats.totalCalls} mode=full_archive stop=${stopReason}`,
@@ -1147,7 +1147,7 @@ async function wholeCollectFromProbe(
   if (probeResponse.tweets.length > 0) {
     // Store tweets immediately for persistence
     if (userId) {
-      storedNew += storeTweets(userId, probeResponse.tweets, probeResponse.media);
+      storedNew += await storeTweets(userId, probeResponse.tweets, probeResponse.media);
     }
 
     // Add to collection (Map handles deduplication)
@@ -1516,7 +1516,7 @@ async function collectWindowPass(
 
       // Store page 1 tweets immediately so they survive a 429 on the next call.
       if (checkpointOpts?.userId && page.tweets.length > 0) {
-        storedNewAccumulated += storeTweets(checkpointOpts.userId, page.tweets, page.media);
+        storedNewAccumulated += await storeTweets(checkpointOpts.userId, page.tweets, page.media);
       }
 
       // Save page checkpoint BEFORE making the next API call (if more pages remain).
@@ -1577,7 +1577,7 @@ async function collectWindowPass(
 
       // Store this page's tweets immediately for the same reason.
       if (checkpointOpts?.userId && nextPage.tweets.length > 0) {
-        storedNewAccumulated += storeTweets(checkpointOpts.userId, nextPage.tweets, nextPage.media);
+        storedNewAccumulated += await storeTweets(checkpointOpts.userId, nextPage.tweets, nextPage.media);
       }
 
       // Save page checkpoint when more pages remain.
@@ -1884,7 +1884,7 @@ async function excavateTimeline(
 
     // Store tweets with media immediately
     if (page.tweets.length > 0) {
-      totalStoredNew += storeTweets(user.id, page.tweets, page.media);
+      totalStoredNew += await storeTweets(user.id, page.tweets, page.media);
     }
 
     // Sort tweets by created_at (earliest first) for consistent processing
@@ -1918,7 +1918,7 @@ async function excavateTimeline(
       
       // Store paginated tweets with media immediately  
       if (page.tweets.length > 0) {
-        totalStoredNew += storeTweets(user.id, page.tweets, page.media);
+        totalStoredNew += await storeTweets(user.id, page.tweets, page.media);
       }
       
       // Sort paginated tweets by created_at (earliest first) for consistent processing
@@ -1980,25 +1980,24 @@ async function excavateTimeline(
 
 // ─── DB helpers ─────────────────────────────────────────
 
-function upsertAccount(user: XUser) {
-  const db = getDb();
-  db.prepare(`
+async function upsertAccount(user: XUser) {
+  await pgQuery(`
     INSERT INTO accounts (account_id, username, display_name, avatar_url, created_at, protected, fetched_at)
-    VALUES (?, ?, ?, NULL, ?, ?, ?)
+    VALUES ($1, $2, $3, NULL, $4, $5, $6)
     ON CONFLICT(account_id) DO UPDATE SET
       username = excluded.username,
       display_name = excluded.display_name,
       created_at = excluded.created_at,
       protected = excluded.protected,
       fetched_at = excluded.fetched_at
-  `).run(
+  `, [
     user.id,
     user.username.toLowerCase(),
     user.name,
     user.created_at,
-    user.protected ? 1 : 0,
+    user.protected,
     new Date().toISOString(),
-  );
+  ]);
 }
 
 /**
@@ -2036,19 +2035,18 @@ function createMediaJson(tweet: XTweet, mediaObjects: XMedia[]): string | null {
   return tweetMedia.length > 0 ? JSON.stringify(tweetMedia) : null;
 }
 
-function storeTweets(userId: string, tweets: XTweet[], mediaObjects: XMedia[] = []): number {
+async function storeTweets(userId: string, tweets: XTweet[], mediaObjects: XMedia[] = []): Promise<number> {
   if (!tweets.length) return 0;
-  const db = getDb();
-  const insert = db.prepare(`
-    INSERT OR IGNORE INTO tweets (post_id, account_id, created_at, full_text, media_json, like_count, retweet_count, reply_count, fetched_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `);
-
+  
   let newCount = 0;
-  const tx = db.transaction(() => {
-    for (const t of tweets) {
-      const mediaJson = createMediaJson(t, mediaObjects);
-      const r = insert.run(
+  for (const t of tweets) {
+    const mediaJson = createMediaJson(t, mediaObjects);
+    try {
+      await pgQuery(`
+        INSERT INTO tweets (post_id, account_id, created_at, full_text, media_json, like_count, retweet_count, reply_count, fetched_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+        ON CONFLICT (post_id) DO NOTHING
+      `, [
         t.id,
         userId,
         t.created_at,
@@ -2058,11 +2056,17 @@ function storeTweets(userId: string, tweets: XTweet[], mediaObjects: XMedia[] = 
         t.public_metrics?.retweet_count ?? 0,
         t.public_metrics?.reply_count ?? 0,
         new Date().toISOString(),
-      );
-      if (r.changes > 0) newCount++;
+      ]);
+      newCount++;
+    } catch (error) {
+      // If it's a unique constraint violation, the tweet already exists, so skip
+      if (error instanceof Error && error.message.includes('duplicate key')) {
+        // Skip, tweet already exists
+      } else {
+        throw error;
+      }
     }
-  });
-  tx();
+  }
   return newCount;
 }
 
@@ -2071,28 +2075,19 @@ function storeTweets(userId: string, tweets: XTweet[], mediaObjects: XMedia[] = 
  * Used on resume to reconstruct the in-memory `collected` Map without
  * loading tweets from prior jobs (which would give a wrong size count).
  */
-function loadTweetsFromDbByIds(accountId: string, ids: string[]): XTweet[] {
+async function loadTweetsFromDbByIds(accountId: string, ids: string[]): Promise<XTweet[]> {
   if (!ids.length) return [];
-  const db = getDb();
-  const placeholders = ids.map(() => "?").join(",");
-  const rows = db
-    .prepare(
-      `SELECT post_id AS id, created_at, full_text AS text,
-              like_count, retweet_count, reply_count, media_json
-       FROM tweets
-       WHERE account_id = ? AND post_id IN (${placeholders})`,
-    )
-    .all(accountId, ...ids) as Array<{
-    id: string;
-    created_at: string;
-    text: string;
-    like_count: number;
-    retweet_count: number;
-    reply_count: number;
-    media_json: string | null;
-  }>;
+  
+  const placeholders = ids.map((_, i) => `$${i + 2}`).join(",");
+  const result = await pgQuery(
+    `SELECT post_id AS id, created_at, full_text AS text,
+            like_count, retweet_count, reply_count, media_json
+     FROM tweets
+     WHERE account_id = $1 AND post_id IN (${placeholders})`,
+    [accountId, ...ids]
+  );
 
-  return rows.map((r) => ({
+  return result.rows.map((r: any) => ({
     id: r.id,
     author_id: accountId,
     created_at: r.created_at,
@@ -2128,7 +2123,7 @@ async function excavateStageExpansionInternal(
 
   // Load existing tweets to avoid duplicates and build expansion from baseline
   const collected = new Map<string, XTweet>();
-  const existingTweets = loadTweetsFromDbByAccount(user.id);
+  const existingTweets = await loadTweetsFromDbByAccount(user.id);
   for (const tweet of existingTweets) {
     collected.set(tweet.id, tweet);
   }
@@ -2143,7 +2138,7 @@ async function excavateStageExpansionInternal(
     console.log(
       `[excavate-expansion] Stage ${targetStage} target already satisfied with existing tweets`
     );
-    return createExpansionResult(user, collected, targetLimit, baselineCount, targetStage, stats);
+    return await createExpansionResult(user, collected, targetLimit, baselineCount, targetStage, stats);
   }
 
   console.log(
@@ -2169,7 +2164,7 @@ async function excavateStageExpansionInternal(
     `[excavate-expansion] Stage ${targetStage} expansion complete: collected=${collected.size}, stop=${expansionStop}`
   );
 
-  return createExpansionResult(user, collected, targetLimit, baselineCount, targetStage, stats, expansionStop);
+  return await createExpansionResult(user, collected, targetLimit, baselineCount, targetStage, stats, expansionStop);
 }
 
 async function excavateStageExpansionTimeline(
@@ -2186,14 +2181,14 @@ async function excavateStageExpansionTimeline(
 
   // For timeline fallback, load existing tweets and try to extend via timeline API
   const collected = new Map<string, XTweet>();
-  const existingTweets = loadTweetsFromDbByAccount(user.id);
+  const existingTweets = await loadTweetsFromDbByAccount(user.id);
   for (const tweet of existingTweets) {
     collected.set(tweet.id, tweet);
   }
 
   const additionalNeeded = targetLimit - collected.size;
   if (additionalNeeded <= 0) {
-    return createExpansionResult(user, collected, targetLimit, baselineCount, targetStage, stats);
+    return await createExpansionResult(user, collected, targetLimit, baselineCount, targetStage, stats);
   }
 
   // Use timeline API to try to get additional tweets
@@ -2218,7 +2213,7 @@ async function excavateStageExpansionTimeline(
     console.log(`[excavate-expansion] Timeline expansion failed: ${e instanceof Error ? e.message : e}`);
   }
 
-  return createExpansionResult(user, collected, targetLimit, baselineCount, targetStage, stats, "ACCOUNT_HAS_LESS_THAN_LIMIT");
+  return await createExpansionResult(user, collected, targetLimit, baselineCount, targetStage, stats, "ACCOUNT_HAS_LESS_THAN_LIMIT");
 }
 
 async function collectExpansionTweets(
@@ -2309,7 +2304,7 @@ async function collectExpansionTweets(
   return stopReason;
 }
 
-function createExpansionResult(
+async function createExpansionResult(
   user: XUser, 
   collected: Map<string, XTweet>, 
   targetLimit: number,
@@ -2317,14 +2312,14 @@ function createExpansionResult(
   targetStage: number, 
   stats: ApiCallStats,
   stopReason: StopReason = "OK_LIMIT_REACHED"
-): ExcavationResult {
+): Promise<ExcavationResult> {
   // Sort tweets chronologically and take the earliest ones up to target
   const sorted = [...collected.values()]
     .sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime())
     .slice(0, targetLimit);
 
   // Store the final sorted set
-  const storedNewCount = storeTweets(user.id, sorted, []); // Media already stored during collection
+  const storedNewCount = await storeTweets(user.id, sorted, []); // Media already stored during collection
 
   const actualStopReason = sorted.length >= targetLimit ? "OK_LIMIT_REACHED" : stopReason;
 
@@ -2350,27 +2345,17 @@ function createExpansionResult(
  * Load tweets for an account from the database.
  * Used as baseline for stage expansions.
  */
-function loadTweetsFromDbByAccount(accountId: string): XTweet[] {
-  const db = getDb();
-  const rows = db
-    .prepare(
-      `SELECT post_id AS id, created_at, full_text AS text,
-              like_count, retweet_count, reply_count, media_json
-       FROM tweets
-       WHERE account_id = ?
-       ORDER BY created_at ASC`
-    )
-    .all(accountId) as Array<{
-    id: string;
-    created_at: string;
-    text: string;
-    like_count: number;
-    retweet_count: number;
-    reply_count: number;
-    media_json: string | null;
-  }>;
+async function loadTweetsFromDbByAccount(accountId: string): Promise<XTweet[]> {
+  const result = await pgQuery(
+    `SELECT post_id AS id, created_at, full_text AS text,
+            like_count, retweet_count, reply_count, media_json
+     FROM tweets
+     WHERE account_id = $1
+     ORDER BY created_at ASC`,
+    [accountId]
+  );
 
-  return rows.map((r) => ({
+  return result.rows.map((r: any) => ({
     id: r.id,
     author_id: accountId,
     created_at: r.created_at,

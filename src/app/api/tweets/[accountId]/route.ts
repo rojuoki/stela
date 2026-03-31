@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getTweetsByAccountUpToBoundary, getTweetsByAccountRange, getUserBoundaryEnd } from "@/lib/repository";
+import { getTweetsByAccountUpToBoundaryPg, getTweetsByAccountRangePg, getUserBoundaryEndPg } from "@/lib/repository";
 import { getUserId } from "@/lib/getUserId";
 
 export async function GET(
@@ -16,7 +16,7 @@ export async function GET(
   const userId = await getUserId(req);
   
   // Get user's boundary for this account
-  const userBoundary = getUserBoundaryEnd(userId, accountId);
+  const userBoundary = await getUserBoundaryEndPg(userId, accountId);
   
   if (userBoundary === 0) {
     // User hasn't unlocked this account
@@ -46,11 +46,11 @@ export async function GET(
     const offset = start - 1;
     const limit = end - start + 1;
     
-    const tweets = getTweetsByAccountRange(accountId, offset, limit);
+    const tweets = await getTweetsByAccountRangePg(accountId, offset, limit);
     return NextResponse.json({ tweets });
   }
 
   // Default behavior - return tweets up to user's boundary
-  const tweets = getTweetsByAccountUpToBoundary(accountId, userBoundary);
+  const tweets = await getTweetsByAccountUpToBoundaryPg(accountId, userBoundary);
   return NextResponse.json({ tweets });
 }

@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getCreditBalance, giveCredits, spendCredits } from "@/lib/repository";
+import { getCreditBalance, giveCreditsPg, spendCreditsPg } from "@/lib/repository";
 
 const DEV_PANEL = process.env.NEXT_PUBLIC_DEV_PANEL === "1";
 
@@ -28,16 +28,16 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Invalid balance" }, { status: 400 });
   }
 
-  const current = getCreditBalance(userId).balance;
+  const current = (await getCreditBalance(userId)).balance;
   const delta = target - current;
 
   if (delta > 0) {
-    giveCredits(userId, delta, "[dev] panel set");
+    await giveCreditsPg(userId, delta, "[dev] panel set");
   } else if (delta < 0) {
-    spendCredits(userId, -delta, "[dev] panel set");
+    await spendCreditsPg(userId, -delta, "[dev] panel set");
   }
 
-  const updated = getCreditBalance(userId).balance;
+  const updated = (await getCreditBalance(userId)).balance;
   console.log(`[dev] credits set user_id=${userId} ${current} → ${updated}`);
 
   return NextResponse.json({ ok: true, userId, balance: updated });

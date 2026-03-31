@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getJob, globalQueue } from "@/lib/jobs";
+import { globalQueue } from "@/lib/jobs";
+import { getJobPg } from "@/lib/repository";
 import { withDevMeasure } from "@/lib/devMeasure";
 
 /**
@@ -23,7 +24,7 @@ export async function GET(
       return NextResponse.json({ error: "Job ID is required" }, { status: 400 });
     }
 
-    const job = getJob(id);
+    const job = await getJobPg(id);
     if (!job) {
       return NextResponse.json({ error: "Job not found" }, { status: 404 });
     }

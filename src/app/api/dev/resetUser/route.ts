@@ -14,7 +14,7 @@ export async function POST(req: NextRequest) {
   const userId = sanitizeDevUserId(body.userId);
   if (!userId) return NextResponse.json({ error: "Invalid userId" }, { status: 400 });
 
-  const deleted = devResetUser(userId);
+  const deleted = await devResetUser(userId);
   console.log(`[dev] resetUser userId=${userId} deleted=${deleted}`);
   return NextResponse.json({ ok: true, userId, deleted });
 }

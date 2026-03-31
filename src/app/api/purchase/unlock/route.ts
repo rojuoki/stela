@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getUserFromRequest } from "@/lib/auth";
-import { giveCredits } from "@/lib/repository";
+import { giveCreditsPg } from "@/lib/repository";
 
 export async function POST(req: NextRequest) {
   try {
@@ -27,7 +27,7 @@ export async function POST(req: NextRequest) {
     }
 
     // Grant the credit
-    giveCredits(user.id, 1, "Single unlock purchase ($4)");
+    await giveCreditsPg(user.id, 1, "Single unlock purchase ($4)");
 
     console.log(`[purchase] Single unlock purchased by ${user.email} (${user.id})`);
 

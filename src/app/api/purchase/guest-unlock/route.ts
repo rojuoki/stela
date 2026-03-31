@@ -1,10 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createAndRunJob } from "@/lib/jobs";
 import { 
-  getAccountByUsername, 
-  getTweetsByAccountForGuest, 
-  createTemporaryUnlock,
-  cleanupExpiredTemporaryUnlocks,
+  getAccountByUsernamePg, 
+  getTweetsByAccountForGuestPg, 
+  createTemporaryUnlockPg,
+  cleanupExpiredTemporaryUnlocksPg,
   findActiveJobForUsername 
 } from "@/lib/repository";
 import { planGuestUnlock } from "@/lib/unlockPlanning";
@@ -26,7 +26,7 @@ export async function POST(req: NextRequest) {
     console.log(`[purchase/guest-unlock] Processing guest paid unlock for @${normalizedUsername}`);
 
     // Clean up expired temporary unlocks
-    cleanupExpiredTemporaryUnlocks();
+    await cleanupExpiredTemporaryUnlocksPg();
 
     // Simulate successful one-time purchase (no Stripe yet)
     const paymentSuccessful = true; // In real implementation, this would come from Stripe
@@ -38,7 +38,7 @@ export async function POST(req: NextRequest) {
     }
 
     // Check if account exists and plan guest unlock
-    const account = getAccountByUsername(normalizedUsername);
+    const account = await getAccountByUsernamePg(normalizedUsername);
     
     if (account) {
       // Account exists - check for protected status
@@ -49,12 +49,12 @@ export async function POST(req: NextRequest) {
       }
 
       // Use unified guest planning logic
-      const plan = planGuestUnlock(account.account_id, account.created_at);
+      const plan = await planGuestUnlock(account.account_id, account.created_at);
       
       if (plan.strategy === "cache-only" && plan.guestBoundary) {
         // Path 3: Cached result already exists - use it with proper boundary
-        const tweets = getTweetsByAccountForGuest(account.account_id, plan.guestBoundary);
-        const token = createTemporaryUnlock(account.account_id, normalizedUsername, tweets);
+        const tweets = await getTweetsByAccountForGuestPg(account.account_id, plan.guestBoundary);
+        const token = await createTemporaryUnlockPg(account.account_id, normalizedUsername, tweets);
         console.log(`[purchase/guest-unlock] Using cached data for @${normalizedUsername}: ${token} (boundary=${plan.guestBoundary})`);
         
         const response = NextResponse.json({
@@ -80,11 +80,11 @@ export async function POST(req: NextRequest) {
     console.log(`[purchase/guest-unlock] No cached data for @${normalizedUsername}, starting excavation`);
 
     // Check for existing active job to avoid duplicates
-    let jobId = findActiveJobForUsername(normalizedUsername);
+    let jobId = await findActiveJobForUsername(normalizedUsername);
     
     if (!jobId) {
       // Start new excavation job
-      jobId = createAndRunJob(
+      jobId = await createAndRunJob(
         normalizedUsername, 
         account?.created_at, 
         undefined, // no credit hold for guest purchases
@@ -111,7 +111,7 @@ export async function POST(req: NextRequest) {
       fetched_at: new Date().toISOString()
     }];
 
-    const token = createTemporaryUnlock(placeholderAccountId, normalizedUsername, placeholderTweets, jobId);
+    const token = await createTemporaryUnlockPg(placeholderAccountId, normalizedUsername, placeholderTweets, jobId);
     console.log(`[purchase/guest-unlock] Created pending result token for @${normalizedUsername}: ${token} (job: ${jobId})`);
 
     const response = NextResponse.json({

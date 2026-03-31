@@ -14,7 +14,6 @@
     "@types/bcryptjs": "^2.4.6",
     "@types/pg": "^8.20.0",
     "bcryptjs": "^3.0.3",
-    "better-sqlite3": "^12.6.2",
     "jose": "^6.2.1",
     "next": "16.1.6",
     "pg": "^8.20.0",
@@ -24,7 +23,6 @@
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4",
-    "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^20",
     "@types/react": "^19",
     "@types/react-dom": "^19",

@@ -12,13 +12,13 @@
 import { NextResponse } from "next/server";
 import { getApiCostStats, COST_PER_CALL_USD } from "@/lib/repository";
 
-export function GET() {
+export async function GET() {
   if (process.env.NEXT_PUBLIC_DEV_PANEL !== "1") {
     return NextResponse.json({ error: "Not found" }, { status: 404 });
   }
 
   try {
-    const stats = getApiCostStats();
+    const stats = await getApiCostStats();
     return NextResponse.json({
       ...stats,
       cost_per_call_usd: COST_PER_CALL_USD,

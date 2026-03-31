@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getUserFromRequest } from "@/lib/auth";
-import { getUserSubscription, getUserPlan } from "@/lib/repository";
+import { getUserSubscriptionPg, getUserPlanPg } from "@/lib/repository";
 
 export async function GET(req: NextRequest) {
   try {
@@ -13,8 +13,8 @@ export async function GET(req: NextRequest) {
       );
     }
 
-    const subscription = getUserSubscription(user.id);
-    const plan = getUserPlan(user.id);
+    const subscription = await getUserSubscriptionPg(user.id);
+    const plan = await getUserPlanPg(user.id);
 
     if (!subscription) {
       return NextResponse.json({

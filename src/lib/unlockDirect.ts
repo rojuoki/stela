@@ -7,10 +7,10 @@ import {
   hasUserUnlockedAccount,
   hasUserUnlockedStage,
   getCreditBalance,
-  spendCredits,
+  spendCreditsPg,
   recordStageUnlock,
-  cleanupExpiredHolds,
-  giveCredits,
+  cleanupExpiredHoldsPg,
+  giveCreditsPg,
   recordApiCall
 } from "./repository";
 import { planInitialUnlock } from "./unlockPlanning";
@@ -32,11 +32,11 @@ export interface UnlockResult {
  * Perform direct unlock operation - core logic extracted from /api/unlock
  * Used by webhook handlers to process paid unlocks without HTTP layer
  */
-export function performDirectUnlock(
+export async function performDirectUnlock(
   userId: string,
   username: string,
   stage: number = 1
-): UnlockResult {
+): Promise<UnlockResult> {
   try {
     console.log(`[unlockDirect] Processing unlock for user ${userId}, @${username}, stage ${stage}`);
 
@@ -53,16 +53,16 @@ export function performDirectUnlock(
     const requestedStage = Math.max(1, Math.min(3, Math.floor(stage)));
 
     // Clean up expired holds and ensure user has starting credits
-    cleanupExpiredHolds();
-    const userBalance = getCreditBalance(userId);
+    await cleanupExpiredHoldsPg();
+    const userBalance = await getCreditBalance(userId);
     if (userBalance.total_earned === 0) {
       // First time user - give starting credits
-      giveCredits(userId, 3, "Initial allocation");
+      await giveCreditsPg(userId, 3, "Initial allocation");
     }
 
     // Unified decision planning
-    const account = getAccountByUsername(normalizedUsername);
-    const plan = planInitialUnlock(userId, account?.account_id || null, requestedStage, account?.created_at || null);
+    const account = await getAccountByUsername(normalizedUsername);
+    const plan = await planInitialUnlock(userId, account?.account_id || null, requestedStage, account?.created_at || null);
     
     console.log(`[unlockDirect] @${normalizedUsername} Stage ${requestedStage} plan:`, {
       targetCount: plan.targetCount,
@@ -79,12 +79,12 @@ export function performDirectUnlock(
 
     // Cache-only path: sufficient posts already cached
     if (plan.strategy === "cache-only" && plan.grantBoundary) {
-      const alreadyUnlocked = hasUserUnlockedAccount(userId, account.account_id);
+      const alreadyUnlocked = await hasUserUnlockedAccount(userId, account.account_id);
       
       if (alreadyUnlocked) {
         // Free re-unlock for same user (already unlocked)
-        recordStageUnlock(userId, account.account_id, requestedStage, plan.grantBoundary, plan.grantBoundary, "paid-unlock-free");
-        recordApiCall("cache/unlock", true);
+        await recordStageUnlock(userId, account.account_id, requestedStage, plan.grantBoundary, plan.grantBoundary, "paid-unlock-free");
+        await recordApiCall("cache/unlock", true);
         console.log(`[unlockDirect] Free cache hit for @${normalizedUsername} Stage ${requestedStage}`);
         
         return {
@@ -98,8 +98,8 @@ export function performDirectUnlock(
         };
       } else {
         // First time unlock from cache - credit already paid via Stripe
-        recordStageUnlock(userId, account.account_id, requestedStage, plan.grantBoundary, plan.grantBoundary, "paid-unlock-cache");
-        recordApiCall("cache/unlock", true);
+        await recordStageUnlock(userId, account.account_id, requestedStage, plan.grantBoundary, plan.grantBoundary, "paid-unlock-cache");
+        await recordApiCall("cache/unlock", true);
 
         console.log(`[unlockDirect] Paid cache hit for @${normalizedUsername} Stage ${requestedStage}`);
         
@@ -117,7 +117,7 @@ export function performDirectUnlock(
 
     // Stage-specific prerequisite checking for stage 2+
     if (requestedStage > 1) {
-      if (hasUserUnlockedStage(userId, account.account_id, requestedStage)) {
+      if (await hasUserUnlockedStage(userId, account.account_id, requestedStage)) {
         return {
           success: false,
           error: `You already have Stage ${requestedStage} unlocked for @${normalizedUsername}`,
@@ -132,10 +132,10 @@ export function performDirectUnlock(
     
     if (requestedStage === 1) {
       // Stage 1: Use normal job creation
-      jobId = createAndRunJob(normalizedUsername, account?.created_at, undefined, 1, false, userId);
+      jobId = await createAndRunJob(normalizedUsername, account?.created_at, undefined, 1, false, userId);
     } else {
       // Stage 2+: Use expansion job creation
-      const expansionResult = createStageExpansionJob(normalizedUsername, requestedStage, undefined, userId);
+      const expansionResult = await createStageExpansionJob(normalizedUsername, requestedStage, undefined, userId);
       if (expansionResult.error) {
         return {
           success: false,

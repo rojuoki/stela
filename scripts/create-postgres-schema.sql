@@ -88,6 +88,19 @@ CREATE TABLE IF NOT EXISTS users (
     created_at TIMESTAMP NOT NULL DEFAULT NOW()
 );
 
+-- User subscriptions (plan, cycle)
+CREATE TABLE IF NOT EXISTS subscriptions (
+    id VARCHAR(100) PRIMARY KEY,
+    user_id VARCHAR(100) NOT NULL,
+    plan VARCHAR(50) NOT NULL DEFAULT 'basic',
+    cycle_start TIMESTAMP NOT NULL,
+    cycle_end TIMESTAMP NOT NULL,
+    credits_per_cycle INTEGER NOT NULL DEFAULT 3,
+    status VARCHAR(20) NOT NULL DEFAULT 'active' CHECK(status IN ('active','canceled','expired')),
+    created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+    UNIQUE(user_id)
+);
+
 -- Credit balances per user
 CREATE TABLE IF NOT EXISTS credits (
     user_id VARCHAR(100) PRIMARY KEY,

@@ -1,12 +1,12 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getUserFromRequest } from "@/lib/auth";
 import { 
-  getAccountByUsername, 
+  getAccountByUsernamePg, 
   getTweetsByAccount, 
-  createTemporaryUnlock,
-  cleanupExpiredTemporaryUnlocks,
-  spendCredits,
-  recordUnlock
+  createTemporaryUnlockPg,
+  cleanupExpiredTemporaryUnlocksPg,
+  spendCreditsPg,
+  recordUnlockPg
 } from "@/lib/repository";
 import { normalizeUsername } from "@/lib/validation";
 
@@ -33,10 +33,10 @@ export async function POST(req: NextRequest) {
     }
 
     // Clean up expired temporary unlocks
-    cleanupExpiredTemporaryUnlocks();
+    await cleanupExpiredTemporaryUnlocksPg();
 
     // Check if account exists and has cached data
-    const account = getAccountByUsername(normalizedUsername);
+    const account = await getAccountByUsernamePg(normalizedUsername);
     if (!account) {
       return NextResponse.json({ 
         error: "Account not found or not yet excavated" 
@@ -50,7 +50,7 @@ export async function POST(req: NextRequest) {
     }
 
     // Spend credit (this will check balance and fail if insufficient)
-    const spendResult = spendCredits(user.id, 1, `Unlock @${normalizedUsername}`);
+    const spendResult = await spendCreditsPg(user.id, 1, `Unlock @${normalizedUsername}`);
     if (!spendResult) {
       return NextResponse.json({ 
         error: "Insufficient credits" 
@@ -58,10 +58,10 @@ export async function POST(req: NextRequest) {
     }
 
     // Record the unlock in the official table
-    recordUnlock(user.id, account.account_id, `logged-in-unlock-${Date.now()}`);
+    await recordUnlockPg(user.id, account.account_id, `logged-in-unlock-${Date.now()}`);
 
     // Get cached tweets
-    const tweets = getTweetsByAccount(account.account_id);
+    const tweets = await getTweetsByAccount(account.account_id);
     if (tweets.length === 0) {
       return NextResponse.json({ 
         error: "No cached data available for this account" 
@@ -70,7 +70,7 @@ export async function POST(req: NextRequest) {
 
     // Create temporary unlock for results page
     // This will be auto-transferred since user is logged in
-    const token = createTemporaryUnlock(account.account_id, normalizedUsername, tweets);
+    const token = await createTemporaryUnlockPg(account.account_id, normalizedUsername, tweets);
 
     console.log(`[unlock/logged-in] Created unlock token for @${normalizedUsername} by user ${user.id}: ${token}`);
 

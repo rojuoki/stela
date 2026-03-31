@@ -19,7 +19,7 @@
 
 import { 
   getCachedTweetCountPg, 
-  getUserBoundaryEnd,
+  getUserBoundaryEndPg,
   getNewestCachedTweetTimestampPg,
   extractNewlyUnlockedPostsPg
 } from "./repository";
@@ -146,8 +146,8 @@ export interface AdditionalExcavationPlan {
  * 
  * Updated for Phase 6: Uses MAX(unlocks.boundary_end) instead of summing stage_results.
  */
-export function calculateUnlockedBoundary(userId: string, accountId: string): number {
-  return getUserBoundaryEnd(userId, accountId);
+export async function calculateUnlockedBoundary(userId: string, accountId: string): Promise<number> {
+  return await getUserBoundaryEndPg(userId, accountId);
 }
 
 /**
@@ -165,7 +165,7 @@ export async function planInitialUnlockPg(
   const targetCount = requestedStage === 1 ? computeTargetCount(accountCreatedAt) : 100 * requestedStage;
   
   // Step 2: Current user boundary (should be 0 for initial unlock, but check anyway)
-  const currentUserBoundary = accountId ? getUserBoundaryEnd(userId, accountId) : 0;
+  const currentUserBoundary = accountId ? await getUserBoundaryEndPg(userId, accountId) : 0;
   
   // Step 3: Current cached count (0 if account doesn't exist yet)
   const currentCachedCount = accountId ? await getCachedTweetCountPg(accountId) : 0;
@@ -191,22 +191,25 @@ export async function planInitialUnlockPg(
  * Plan initial unlock for user+account (Legacy SQLite version - kept for backward compatibility).
  * This is the master planning function - all initial unlock logic flows through here.
  * Used by both cache-hit and fresh excavation flows to ensure consistent decisions.
+ * 
+ * NOTE: This function is deprecated and only exists for backward compatibility.
+ * Use planInitialUnlockPg instead for new code.
  */
-export function planInitialUnlock(
+export async function planInitialUnlock(
   userId: string, 
   accountId: string | null, 
   requestedStage: number,
   accountCreatedAt: string | null
-): InitialUnlockPlan {
+): Promise<InitialUnlockPlan> {
   // Step 1: Determine target count based on account age and stage
   const targetCount = requestedStage === 1 ? computeTargetCount(accountCreatedAt) : 100 * requestedStage;
   
   // Step 2: Current user boundary (should be 0 for initial unlock, but check anyway)
-  const currentUserBoundary = accountId ? getUserBoundaryEnd(userId, accountId) : 0;
+  const currentUserBoundary = accountId ? await getUserBoundaryEndPg(userId, accountId) : 0;
   
   // Step 3: Current cached count (0 if account doesn't exist yet)
-  // TEMPORARY: This still uses SQLite version for backward compatibility
-  const currentCachedCount = accountId ? 0 : 0; // TODO: Remove SQLite dependency
+  // UPDATED: Now uses Postgres version
+  const currentCachedCount = accountId ? await getCachedTweetCountPg(accountId) : 0;
   
   // Step 4: Determine if excavation is needed
   const excavationNeeded = currentCachedCount < targetCount;
@@ -230,15 +233,15 @@ export function planInitialUnlock(
  * Follows the same core principles as logged-in users but for guest-specific access.
  * Guests always get Stage 1 equivalent access.
  */
-export function planGuestUnlock(
+export async function planGuestUnlock(
   accountId: string | null,
   accountCreatedAt: string | null
-): GuestUnlockPlan {
+): Promise<GuestUnlockPlan> {
   // Step 1: Determine target count based on account age (always Stage 1 for guests)
   const targetCount = computeTargetCount(accountCreatedAt);
   
   // Step 2: Current cached count (0 if account doesn't exist yet)
-  const currentCachedCount = accountId ? getCachedTweetCount(accountId) : 0;
+  const currentCachedCount = accountId ? await getCachedTweetCountPg(accountId) : 0;
   
   // Step 3: Determine if excavation is needed
   const excavationNeeded = currentCachedCount < targetCount;
@@ -260,16 +263,16 @@ export function planGuestUnlock(
  * This is the Phase 7 planning function for extend/additional excavation requests.
  * Provides explicit and inspectable planning results following core data model rules.
  */
-export function planAdditionalExcavation(
+export async function planAdditionalExcavation(
   userId: string,
   accountId: string, 
   requestedStage: number
-): AdditionalExcavationPlan {
+): Promise<AdditionalExcavationPlan> {
   // Step 1: Determine target count from requested stage (stage as planning label)
   const targetCount = requestedStage * 100; // Stage 2 = 200, Stage 3 = 300, etc.
   
   // Step 2: Current cached count (account progress from cached tweets only)
-  let currentCachedCount = getCachedTweetCount(accountId);
+  let currentCachedCount = await getCachedTweetCountPg(accountId);
   
   // TEMPORARY: For testing excavate_more path, simulate insufficient cache (anonymous only)
   if (userId === 'anonymous' && requestedStage > 2) {
@@ -278,7 +281,7 @@ export function planAdditionalExcavation(
   }
   
   // Step 3: Current visible boundary (user entitlement from boundary_end only)
-  let currentVisibleBoundary = getUserBoundaryEnd(userId, accountId);
+  let currentVisibleBoundary = await getUserBoundaryEndPg(userId, accountId);
   
   // TEMPORARY: For testing with anonymous users only
   if (userId === 'anonymous' && currentVisibleBoundary === 0) {
@@ -358,13 +361,13 @@ export function validateAdditionalExcavationPlan(plan: AdditionalExcavationPlan)
  * Get current unlock boundary and plan for next +100 extension.
  * This is the master planning function - all extend logic flows through here.
  */
-export function planExtension(userId: string, accountId: string): ExtendPlan {
+export async function planExtension(userId: string, accountId: string): Promise<ExtendPlan> {
   // Step 1: Current user boundary
-  const currentBoundary = calculateUnlockedBoundary(userId, accountId);
+  const currentBoundary = await calculateUnlockedBoundary(userId, accountId);
   const nextBoundary = currentBoundary + 100;
   
   // Step 2: Account cached total (planning only)
-  const cachedTotal = getCachedTweetCount(accountId);
+  const cachedTotal = await getCachedTweetCountPg(accountId);
   
   // Step 3: Cache sufficiency check
   const missingCount = Math.max(0, nextBoundary - cachedTotal);
@@ -459,8 +462,8 @@ export function getExcavationContinuePoint(accountId: string, cachedCount: numbe
  * Validate that extend is possible and safe for this user+account.
  * Returns error message if invalid, null if valid.
  */
-export function validateExtendRequest(userId: string, accountId: string): string | null {
-  const currentBoundary = calculateUnlockedBoundary(userId, accountId);
+export async function validateExtendRequest(userId: string, accountId: string): Promise<string | null> {
+  const currentBoundary = await calculateUnlockedBoundary(userId, accountId);
   
   if (userId === 'anonymous') {
     console.log(`[DEBUG] validateExtendRequest: userId=${userId}, accountId=${accountId}, currentBoundary=${currentBoundary}`);
@@ -542,8 +545,4 @@ export async function extractNewlyUnlockedPostsPgByRange(accountId: string, resu
   return extractedPosts;
 }
 
-export function extractNewlyUnlockedPosts(accountId: string, resultRange: ResultRange): any[] {
-  // TEMPORARY: Legacy function - should be migrated to Postgres version
-  console.warn(`[extract] Using legacy SQLite version for range ${resultRange.rangeString}`);
-  return [];
-}
+/* REMOVED: extractNewlyUnlockedPosts - replaced with extractNewlyUnlockedPostsPgByRange */

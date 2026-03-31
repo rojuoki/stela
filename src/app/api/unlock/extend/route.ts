@@ -19,17 +19,18 @@ import {
   planAdditionalExcavation,
   validateExtendRequest, 
   calculateResultRange,
-  extractNewlyUnlockedPosts 
+  extractNewlyUnlockedPostsPgByRange
 } from "@/lib/unlockPlanning";
 import { 
-  getAccountByUsername, 
-  getCreditBalance, 
-  holdCredits, 
-  captureHeld,
-  releaseHeld,
-  spendCredits,
-  recordStageUnlock,
-  cleanupExpiredHolds 
+  getAccountByUsernamePg, 
+  getCreditBalancePg, 
+  holdCreditsPg, 
+  captureHeldPg,
+  releaseHeldPg,
+  spendCreditsPg,
+  recordStageUnlockPg,
+  cleanupExpiredHoldsPg,
+  getUserBoundaryEndPg
 } from "@/lib/repository";
 import { normalizeUsername, checkRateLimit } from "@/lib/validation";
 import { createAndRunJob, createStageExpansionJob, createAdditionalExcavationJob } from "@/lib/jobs";
@@ -82,16 +83,16 @@ export async function POST(req: NextRequest) {
     }
 
     // Clean up expired holds and ensure user credits
-    cleanupExpiredHolds();
-    const userBalance = getCreditBalance(userId);
+    await cleanupExpiredHoldsPg();
+    const userBalance = await getCreditBalancePg(userId);
     if (userBalance.total_earned === 0) {
       // First time user - give starting credits (should not happen for extend, but safety)
-      const { giveCredits } = await import("@/lib/repository");
-      giveCredits(userId, 3, "Initial allocation");
+      const { giveCreditsPg } = await import("@/lib/repository");
+      await giveCreditsPg(userId, 3, "Initial allocation");
     }
 
     // Find account
-    const account = getAccountByUsername(username);
+    const account = await getAccountByUsernamePg(username);
     if (!account) {
       return NextResponse.json({ 
         error: `Account @${username} not found. Use regular unlock first.` 
@@ -99,13 +100,13 @@ export async function POST(req: NextRequest) {
     }
 
     // Validate extend request
-    const validationError = validateExtendRequest(userId, account.account_id);
+    const validationError = await validateExtendRequest(userId, account.account_id);
     if (validationError) {
       return NextResponse.json({ error: validationError }, { status: 400 });
     }
 
     // Phase 8: Use additional excavation planning result for execution
-    let currentBoundary = account ? require("@/lib/repository").getUserBoundaryEnd(userId, account.account_id) : 0;
+    let currentBoundary = account ? await getUserBoundaryEndPg(userId, account.account_id) : 0;
     
     // TEMPORARY: For testing with anonymous users only
     if (userId === 'anonymous' && currentBoundary === 0) {
@@ -115,7 +116,7 @@ export async function POST(req: NextRequest) {
     
     const nextStage = Math.ceil((currentBoundary + 100) / 100);
     
-    const plan = planAdditionalExcavation(userId, account.account_id, nextStage);
+    const plan = await planAdditionalExcavation(userId, account.account_id, nextStage);
     console.log(`[extend] @${username} Phase 8 execution plan:`, {
       executionMode: plan.executionMode,
       targetCount: plan.targetCount,
@@ -128,7 +129,7 @@ export async function POST(req: NextRequest) {
     // Phase 8 Execution: Grant Only Path
     if (plan.executionMode === "grant_only") {
       // Check credit balance
-      const currentBalance = getCreditBalance(userId);
+      const currentBalance = await getCreditBalancePg(userId);
       if (currentBalance.balance < 1) {
         return NextResponse.json({
           error: "Insufficient credits",
@@ -138,7 +139,7 @@ export async function POST(req: NextRequest) {
       }
 
       // Spend credit immediately (no excavation needed)
-      const spent = spendCredits(userId, 1, `Grant access to ${plan.targetCount} posts for @${username} (no excavation)`);
+      const spent = await spendCreditsPg(userId, 1, `Grant access to ${plan.targetCount} posts for @${username} (no excavation)`);
       if (!spent) {
         return NextResponse.json({
           error: "Failed to deduct credits",
@@ -149,7 +150,7 @@ export async function POST(req: NextRequest) {
       // Phase 8: Update user entitlement to targetCount without excavating
       // granted_count reflects newly granted amount (targetCount - currentVisibleBoundary)
       const grantedCount = plan.targetCount - plan.currentVisibleBoundary;
-      recordStageUnlock(
+      await recordStageUnlockPg(
         userId, 
         account.account_id, 
         plan.requestedStage, 
@@ -162,7 +163,7 @@ export async function POST(req: NextRequest) {
       const resultRange = calculateResultRange(plan.currentVisibleBoundary, plan.targetCount);
       
       // Extract posts from existing cache (no excavation occurred)
-      const newlyUnlockedPosts = extractNewlyUnlockedPosts(account.account_id, resultRange);
+      const newlyUnlockedPosts = await extractNewlyUnlockedPostsPgByRange(account.account_id, resultRange);
 
       console.log(`[extend] Grant-only for @${username}: ${plan.currentVisibleBoundary} → ${plan.targetCount}, granted=${grantedCount} (no excavation)`);
 
@@ -189,7 +190,7 @@ export async function POST(req: NextRequest) {
     // Phase 8 Execution: Excavate More Path
     if (plan.executionMode === "excavate_more") {
       // Check credit balance for excavation
-      const creditBalance = getCreditBalance(userId);
+      const creditBalance = await getCreditBalancePg(userId);
       if (creditBalance.balance < 1) {
         return NextResponse.json({
           error: "Insufficient credits",
@@ -213,11 +214,11 @@ export async function POST(req: NextRequest) {
       }
       
       // Hold credit for excavation job
-      const holdId = holdCredits(userId, jobId, 1);
+      const holdId = await holdCreditsPg(userId, jobId, 1);
       if (!holdId) {
         return NextResponse.json({
           error: "Failed to hold credits",
-          balance: getCreditBalance(userId).balance,
+          balance: (await getCreditBalancePg(userId)).balance,
         }, { status: 500 });
       }
 

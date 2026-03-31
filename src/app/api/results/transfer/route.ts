@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getUserFromRequest } from "@/lib/auth";
-import { transferTemporaryUnlock } from "@/lib/repository";
+import { transferTemporaryUnlockPg } from "@/lib/repository";
 
 export async function POST(req: NextRequest) {
   try {
@@ -23,7 +23,7 @@ export async function POST(req: NextRequest) {
     }
 
     // Transfer the temporary unlock to the user's account
-    const success = transferTemporaryUnlock(token, user.id);
+    const success = await transferTemporaryUnlockPg(token, user.id);
     
     if (!success) {
       return NextResponse.json({ 

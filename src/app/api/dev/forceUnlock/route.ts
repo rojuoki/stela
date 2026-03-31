@@ -21,7 +21,7 @@ export async function POST(req: NextRequest) {
   const cap = Number(body.cap);
   if (!VALID_CAPS.has(cap)) return NextResponse.json({ error: "cap must be 50 or 100" }, { status: 400 });
 
-  devForceUnlock(userId, username, cap);
+  await devForceUnlock(userId, username, cap);
   console.log(`[dev] forceUnlock userId=${userId} username=${username} cap=${cap}`);
   return NextResponse.json({ ok: true, userId, username, cap });
 }
