@@ -195,7 +195,10 @@ class GlobalJobQueue {
     this._ensureInitialized().catch(console.error);
     
     if (this._runningJobIds.size < tokenPool.M && tokenPool.hasAvailableToken()) {
-      this._launch(jobId);
+      this._launch(jobId).catch((e) => {
+        console.error(`[queue] Failed to launch job ${jobId}:`, e);
+        this.complete(jobId);
+      });
     } else {
       this._pendingIds.push(jobId);
       console.log(`[queue] Job ${jobId} → QUEUED (position ${this._pendingIds.length})`);
@@ -257,17 +260,20 @@ class GlobalJobQueue {
 
   // ── Private helpers ───────────────────────────────────────────────────────
 
-  private _launch(jobId: string): void {
+  private async _launch(jobId: string): Promise<void> {
     this._runningJobIds.add(jobId);
-    updateJobToRunningPg(jobId)
-      .then(() => {
-        console.log(
-          `[queue] Job ${jobId} → RUNNING (${this._runningJobIds.size}/${tokenPool.M})`,
-        );
-      })
-      .catch((e) => {
-        console.error(`[queue] Failed to mark job ${jobId} RUNNING:`, e);
-      });
+    
+    try {
+      await updateJobToRunningPg(jobId);
+      console.log(
+        `[queue] Job ${jobId} → RUNNING (${this._runningJobIds.size}/${tokenPool.M})`,
+      );
+    } catch (e) {
+      console.error(`[queue] Failed to mark job ${jobId} RUNNING:`, e);
+      // Remove from running set since DB update failed
+      this._runningJobIds.delete(jobId);
+      return;
+    }
 
     // runJobAsync is a hoisted function declaration.
     runJobAsync(jobId).catch((e) => {
@@ -284,7 +290,10 @@ class GlobalJobQueue {
     ) {
       const nextId = this._pendingIds.shift()!;
       console.log(`[queue] Starting next: ${nextId}`);
-      this._launch(nextId);
+      this._launch(nextId).catch((e) => {
+        console.error(`[queue] Failed to launch job ${nextId}:`, e);
+        this.complete(nextId);
+      });
     }
   }
 
