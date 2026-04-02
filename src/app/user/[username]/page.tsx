@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { useParams, useRouter } from "next/navigation";
 import Link from "next/link";
 import { notFound } from "next/navigation";
@@ -35,7 +35,7 @@ export default function UserPage() {
   const username = Array.isArray(params.username) ? params.username[0] : params.username;
 
   // User context - MUST be called before any early returns
-  const { user, credits, subscription, refreshCredits } = useUser();
+  const { user, credits, subscription, refreshCredits, loading: authLoading } = useUser();
 
   // Account state
   const [accountStatus, setAccountStatus] = useState<AccountStatus>("loading");
@@ -46,7 +46,11 @@ export default function UserPage() {
   const [tweets, setTweets] = useState<TweetData[]>([]);
   const [jobInfo, setJobInfo] = useState<string>("");
   const [isAlreadyUnlocked, setIsAlreadyUnlocked] = useState(false);
-  const [checkingUnlockStatus, setCheckingUnlockStatus] = useState(false);
+
+  /** Prevents re-running unlock-status fetch for the same (user, account) pair (not in effect deps). */
+  const unlockCheckKeyRef = useRef<string | null>(null);
+  /** Prevents duplicate tweet fetches for the same account + range/full slice. */
+  const tweetsFetchedKeyRef = useRef<string | null>(null);
 
   const [showExtendModal, setShowExtendModal] = useState(false);
   const [currentBoundary, setCurrentBoundary] = useState<number | null>(null);
@@ -157,65 +161,116 @@ export default function UserPage() {
     }
   }, [username]);
 
-  // Check for range mode on mount
+  // Guest range deep-links + logged-in unlock check + one tweet load (no polling; refs dedupe).
   useEffect(() => {
-    const searchParams = new URLSearchParams(window.location.search);
-    const rangeStart = searchParams.get('rangeStart');
-    const rangeEnd = searchParams.get('rangeEnd');
+    if (!accountData) return;
+    if (authLoading) return;
 
-    if (rangeStart && rangeEnd && accountData) {
-      const start = parseInt(rangeStart, 10);
-      const end = parseInt(rangeEnd, 10);
+    let cancelled = false;
 
-      if (!isNaN(start) && !isNaN(end) && start > 0 && end >= start) {
-        // Load range-specific tweets
-        loadTweets(accountData.account_id, start, end).then(loadedTweets => {
-          if (loadedTweets.length > 0) {
-            setTweets(loadedTweets);
-            setCurrentBoundary(end);
-            setJobInfo(`${loadedTweets.length} posts · showing ${start}-${end}`);
-          }
-        });
+    const urlParams = new URLSearchParams(window.location.search);
+    const rangeStartParam = urlParams.get("rangeStart");
+    const rangeEndParam = urlParams.get("rangeEnd");
+    const hasRangeParams = Boolean(rangeStartParam && rangeEndParam);
+    const rangeStart = hasRangeParams ? parseInt(rangeStartParam!, 10) : undefined;
+    const rangeEnd = hasRangeParams ? parseInt(rangeEndParam!, 10) : undefined;
+    const rangeValid =
+      hasRangeParams &&
+      rangeStart !== undefined &&
+      rangeEnd !== undefined &&
+      !Number.isNaN(rangeStart) &&
+      !Number.isNaN(rangeEnd) &&
+      rangeStart > 0 &&
+      rangeEnd >= rangeStart;
+
+    const tweetFetchKey = (accountId: string, rs?: number, re?: number) =>
+      rs != null && re != null ? `${accountId}:${rs}:${re}` : `${accountId}:full`;
+
+    const applyTweetResult = (
+      loadedTweets: TweetData[],
+      jobInfoFor: (n: number) => string,
+      boundary?: number,
+    ) => {
+      if (cancelled || loadedTweets.length === 0) return;
+      setTweets(loadedTweets);
+      setJobInfo(jobInfoFor(loadedTweets.length));
+      if (boundary !== undefined) setCurrentBoundary(boundary);
+    };
+
+    const fetchTweetsOnce = async (
+      accountId: string,
+      rs: number | undefined,
+      re: number | undefined,
+      jobInfoFor: (n: number) => string,
+      boundary?: number,
+    ) => {
+      const key = tweetFetchKey(accountId, rs, re);
+      if (tweetsFetchedKeyRef.current === key) return;
+      tweetsFetchedKeyRef.current = key;
+      const loaded = await loadTweets(accountId, rs, re);
+      applyTweetResult(loaded, jobInfoFor, boundary);
+    };
+
+    // Guest: load range from URL only (no unlock API).
+    if (!user) {
+      if (rangeValid) {
+        void fetchTweetsOnce(
+          accountData.account_id,
+          rangeStart,
+          rangeEnd,
+          (n) => `${n} posts · showing ${rangeStart}-${rangeEnd}`,
+          rangeEnd,
+        );
       }
+      return () => {
+        cancelled = true;
+      };
     }
-  }, [accountData]);
 
-  // Check unlock status and load existing tweets when user and account are available
-  useEffect(() => {
-    if (user && accountData && !checkingUnlockStatus) {
-      setCheckingUnlockStatus(true);
-      apiFetch(`/api/account/unlock-status?username=${encodeURIComponent(accountData.username)}`)
-        .then(res => res.json())
-        .then(data => {
-          if (data.unlocked) {
-            setIsAlreadyUnlocked(true);
-            setCurrentBoundary(data.boundaryEnd || data.count || 100); // Store current boundary
-            // Load existing tweets if available, respecting any range params in the URL
-            const urlParams = new URLSearchParams(window.location.search);
-            const rangeStartParam = urlParams.get('rangeStart');
-            const rangeEndParam = urlParams.get('rangeEnd');
-            const hasRange = rangeStartParam && rangeEndParam;
-            const rangeStart = hasRange ? parseInt(rangeStartParam, 10) : undefined;
-            const rangeEnd = hasRange ? parseInt(rangeEndParam, 10) : undefined;
-            loadTweets(data.accountId, rangeStart, rangeEnd).then(loadedTweets => {
-              if (loadedTweets.length > 0) {
-                setTweets(loadedTweets);
-                setJobInfo(hasRange
-                  ? `${loadedTweets.length} posts · showing ${rangeStart}-${rangeEnd}`
-                  : `${loadedTweets.length} posts • previously unlocked`
-                );
-              }
-            });
-          }
-        })
-        .catch(error => {
-          console.error('Failed to check unlock status:', error);
-        })
-        .finally(() => {
-          setCheckingUnlockStatus(false);
-        });
+    const unlockKey = `${user.id}:${accountData.account_id}`;
+    if (unlockCheckKeyRef.current === unlockKey) {
+      return () => {
+        cancelled = true;
+      };
     }
-  }, [user, accountData, checkingUnlockStatus]);
+    unlockCheckKeyRef.current = unlockKey;
+
+    void (async () => {
+      try {
+        const res = await apiFetch(
+          `/api/account/unlock-status?username=${encodeURIComponent(accountData.username)}`,
+        );
+        if (cancelled) return;
+        const data = await res.json();
+        if (cancelled) return;
+        if (!data.unlocked) return;
+
+        setIsAlreadyUnlocked(true);
+        setCurrentBoundary(data.boundaryEnd || data.count || 100);
+
+        const rs = rangeValid ? rangeStart : undefined;
+        const re = rangeValid ? rangeEnd : undefined;
+
+        await fetchTweetsOnce(
+          data.accountId,
+          rs,
+          re,
+          (n) =>
+            rangeValid
+              ? `${n} posts · showing ${rangeStart}-${rangeEnd}`
+              : `${n} posts • previously unlocked`,
+          rangeValid ? rangeEnd : undefined,
+        );
+      } catch (error) {
+        if (!cancelled) console.error("Failed to check unlock status:", error);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+      unlockCheckKeyRef.current = null;
+    };
+  }, [authLoading, user?.id, accountData?.account_id, accountData?.username]);
 
   // Handle scroll for back to top visibility
   useEffect(() => {
