@@ -139,9 +139,9 @@ export function EngagementChart({
       : null;
 
   return (
-    <div className="mb-6">
-      <div className="flex items-center justify-between mb-2">
-        <h2 className="text-xs font-semibold text-zinc-400 uppercase tracking-wide">
+    <div className="mb-4">
+      <div className="flex items-center justify-between mb-1.5">
+        <h2 className="text-xs text-zinc-500">
           Engagement across earliest {n} posts
         </h2>
         <div className="flex items-center gap-3">
@@ -168,7 +168,7 @@ export function EngagementChart({
         {/* Bars — Likes */}
         <div
           ref={containerRef}
-          className="flex items-end gap-px h-24 bg-zinc-900 rounded-lg p-2 border border-zinc-800 cursor-crosshair"
+          className="flex items-end gap-px h-32 bg-zinc-900 rounded-lg p-2 border border-zinc-800 cursor-crosshair"
           onMouseMove={handleMouseMove}
           onMouseLeave={() => {
             setHoverIdx(null);

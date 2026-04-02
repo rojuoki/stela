@@ -486,7 +486,7 @@ export default function UserPage() {
       </div>
 
       {/* Account Header & Excavation CTA - always visible */}
-      <div className={hasResults ? "sticky top-0 z-20 -mx-4 px-4 py-2 bg-black/80 backdrop-blur-sm mb-4" : "mb-4"}>
+      <div className={hasResults ? "sticky top-0 z-20 -mx-4 px-4 py-2 bg-black/80 backdrop-blur-sm mb-0" : "mb-4"}>
         <AccountHeader
           status={accountStatus}
           data={accountData}
@@ -495,30 +495,24 @@ export default function UserPage() {
 
         {/* Excavate More CTA - part of sticky header group */}
         {isLoggedIn && hasResults && (
-          <div className="flex items-center justify-center gap-3 mt-3 mb-1">
+          <div className="text-center mt-0.5">
             <button
               onClick={() => setShowExtendModal(true)}
               disabled={credits <= 0}
-              className={`inline-flex items-center gap-1.5 text-sm font-medium px-4 py-2 rounded-lg transition-colors ${
+              className={`text-xs underline transition-colors ${
                 credits <= 0
-                  ? "bg-zinc-700 text-zinc-500 cursor-not-allowed"
-                  : "bg-white text-black hover:bg-zinc-200"
+                  ? "text-zinc-500 cursor-not-allowed"
+                  : "text-zinc-400 hover:text-zinc-200"
               }`}
             >
-              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
-              </svg>
-              Excavate more
+              Excavate more · +100 posts for 1 credit
             </button>
-            <span className="text-xs text-zinc-500">
-              Want to see more? Extend your excavation for 1 credit.
-            </span>
           </div>
         )}
 
         {/* Back to Top Control - appears after scrolling */}
         {showBackToTop && hasResults && (
-          <div className="text-center mt-2">
+          <div className="text-center mt-0.5">
             <button
               onClick={() => window.scrollTo({ top: 0, behavior: "smooth" })}
               className="text-xs text-zinc-500 opacity-60 hover:opacity-100 transition-opacity inline-flex items-center gap-1"
