@@ -168,7 +168,7 @@ export function EngagementChart({
         {/* Bars — Likes */}
         <div
           ref={containerRef}
-          className="flex items-end gap-px h-32 bg-zinc-900 rounded-lg p-2 border border-zinc-800 cursor-crosshair"
+          className="cursor-pointer flex items-end gap-px h-32 bg-zinc-900 rounded-lg p-2 border border-zinc-800"
           onMouseMove={handleMouseMove}
           onMouseLeave={() => {
             setHoverIdx(null);

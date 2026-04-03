@@ -326,7 +326,7 @@ export default function ResultsPage() {
           <div className="space-y-4">
             <Link
               href="/"
-              className="inline-flex items-center gap-2 bg-white text-black font-semibold px-6 py-3 rounded-lg hover:bg-zinc-200 transition-colors"
+              className="cursor-pointer inline-flex items-center gap-2 bg-white text-black font-semibold px-6 py-3 rounded-lg hover:bg-zinc-200 transition-colors"
             >
               <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
@@ -348,7 +348,7 @@ export default function ResultsPage() {
       <div className="mb-8">
         <Link 
           href="/" 
-          className="text-zinc-400 hover:text-white transition-colors text-sm inline-flex items-center gap-2"
+          className="cursor-pointer text-zinc-400 hover:text-white transition-colors text-sm inline-flex items-center gap-2"
         >
           <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 19l-7-7m0 0l7-7m-7 7h18" />
@@ -385,13 +385,13 @@ export default function ResultsPage() {
             <div className="flex items-center justify-center gap-3">
               <Link
                 href={`/signup?returnTo=${encodeURIComponent(`/results/${token}`)}`}
-                className="bg-gradient-to-r from-blue-600 to-purple-600 text-white font-semibold px-6 py-3 rounded-lg hover:from-blue-700 hover:to-purple-700 transition-all"
+                className="cursor-pointer bg-gradient-to-r from-blue-600 to-purple-600 text-white font-semibold px-6 py-3 rounded-lg hover:from-blue-700 hover:to-purple-700 transition-all"
               >
                 Create Account
               </Link>
               <Link
                 href={`/login?returnTo=${encodeURIComponent(`/results/${token}`)}`}
-                className="bg-zinc-800 text-white font-semibold px-6 py-3 rounded-lg hover:bg-zinc-700 transition-colors border border-zinc-600"
+                className="cursor-pointer bg-zinc-800 text-white font-semibold px-6 py-3 rounded-lg hover:bg-zinc-700 transition-colors border border-zinc-600"
               >
                 Sign In
               </Link>
@@ -482,7 +482,7 @@ export default function ResultsPage() {
         </p>
         <Link
           href="/"
-          className="inline-flex items-center gap-2 bg-white text-black font-semibold px-6 py-3 rounded-lg hover:bg-zinc-200 transition-colors"
+          className="cursor-pointer inline-flex items-center gap-2 bg-white text-black font-semibold px-6 py-3 rounded-lg hover:bg-zinc-200 transition-colors"
         >
           <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />

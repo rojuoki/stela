@@ -1,6 +1,7 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect, useCallback } from "react";
+import { createPortal } from "react-dom";
 import type { TweetData } from "./types";
 import { fmt } from "./types";
 
@@ -32,7 +33,66 @@ function parseMedia(mediaJson: string | null): ParsedMedia {
   }
 }
 
-function MediaGrid({ urls }: { urls: string[] }) {
+function MediaLightbox({ url, onClose }: { url: string; onClose: () => void }) {
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  useEffect(() => {
+    const prev = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      document.body.style.overflow = prev;
+    };
+  }, []);
+
+  if (typeof document === "undefined") return null;
+
+  return createPortal(
+    <div
+      className="cursor-pointer fixed inset-0 z-[100] flex items-center justify-center bg-black/90 p-4 sm:p-6"
+      onClick={onClose}
+      role="dialog"
+      aria-modal="true"
+      aria-label="Enlarged image"
+    >
+      <button
+        type="button"
+        aria-label="Close"
+        className="cursor-pointer absolute top-2 right-2 sm:top-4 sm:right-4 z-[101] rounded-lg p-2 text-zinc-300 hover:bg-white/10 hover:text-white transition-colors touch-manipulation"
+        onClick={(e) => {
+          e.stopPropagation();
+          onClose();
+        }}
+      >
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden>
+          <path d="M18 6L6 18M6 6l12 12" strokeLinecap="round" strokeLinejoin="round" />
+        </svg>
+      </button>
+      {/* External tweet media URLs — same as inline grid */}
+      <img
+        src={url}
+        alt=""
+        className="max-h-[min(90vh,90dvh)] max-w-full w-auto h-auto object-contain select-none"
+        onClick={(e) => e.stopPropagation()}
+        draggable={false}
+      />
+    </div>,
+    document.body,
+  );
+}
+
+function MediaGrid({
+  urls,
+  onImageClick,
+}: {
+  urls: string[];
+  onImageClick?: (url: string) => void;
+}) {
   const [failed, setFailed] = useState<Set<string>>(new Set());
 
   const live = urls.filter((u) => !failed.has(u));
@@ -43,15 +103,29 @@ function MediaGrid({ urls }: { urls: string[] }) {
   };
 
   if (live.length === 1) {
+    const url = live[0];
+    const inner = (
+      <img
+        src={url}
+        alt=""
+        className="w-full h-48 object-cover bg-zinc-800"
+        loading="lazy"
+        onError={() => handleError(url)}
+      />
+    );
     return (
       <div className="mb-2 rounded-lg overflow-hidden border border-zinc-800">
-        <img
-          src={live[0]}
-          alt=""
-          className="w-full h-48 object-cover bg-zinc-800"
-          loading="lazy"
-          onError={() => handleError(live[0])}
-        />
+        {onImageClick ? (
+          <button
+            type="button"
+            className="cursor-pointer block w-full p-0 border-0 bg-transparent focus:outline-none focus-visible:ring-2 focus-visible:ring-zinc-500 focus-visible:ring-offset-2 focus-visible:ring-offset-black rounded-lg touch-manipulation"
+            onClick={() => onImageClick(url)}
+          >
+            {inner}
+          </button>
+        ) : (
+          inner
+        )}
       </div>
     );
   }
@@ -59,14 +133,31 @@ function MediaGrid({ urls }: { urls: string[] }) {
   return (
     <div className="mb-2 grid grid-cols-2 gap-0.5 rounded-lg overflow-hidden border border-zinc-800">
       {live.slice(0, 4).map((url, i) => (
-        <img
-          key={i}
-          src={url}
-          alt=""
-          className="w-full h-28 object-cover bg-zinc-800"
-          loading="lazy"
-          onError={() => handleError(url)}
-        />
+        onImageClick ? (
+          <button
+            key={i}
+            type="button"
+            className="cursor-pointer relative w-full h-28 p-0 border-0 bg-zinc-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-zinc-500 touch-manipulation"
+            onClick={() => onImageClick(url)}
+          >
+            <img
+              src={url}
+              alt=""
+              className="absolute inset-0 w-full h-full object-cover"
+              loading="lazy"
+              onError={() => handleError(url)}
+            />
+          </button>
+        ) : (
+          <img
+            key={i}
+            src={url}
+            alt=""
+            className="w-full h-28 object-cover bg-zinc-800"
+            loading="lazy"
+            onError={() => handleError(url)}
+          />
+        )
       ))}
     </div>
   );
@@ -104,7 +195,17 @@ export function tweetElementId(postId: string): string {
   return `tweet-${postId}`;
 }
 
-export function TweetCard({ tweet }: { tweet: TweetData }) {
+export function TweetCard({
+  tweet,
+  mediaLightbox = true,
+}: {
+  tweet: TweetData;
+  /** When true, tap/click opens enlarged image on a dark overlay. Default on for all tweet lists. */
+  mediaLightbox?: boolean;
+}) {
+  const [lightboxUrl, setLightboxUrl] = useState<string | null>(null);
+  const closeLightbox = useCallback(() => setLightboxUrl(null), []);
+
   const date = new Date(tweet.created_at);
   const dateStr = date.toLocaleDateString("en-US", {
     month: "short",
@@ -137,7 +238,16 @@ export function TweetCard({ tweet }: { tweet: TweetData }) {
         {tweet.full_text}
       </p>
 
-      {media.urls.length > 0 && <MediaGrid urls={media.urls} />}
+      {media.urls.length > 0 && (
+        <MediaGrid
+          urls={media.urls}
+          onImageClick={mediaLightbox ? setLightboxUrl : undefined}
+        />
+      )}
+
+      {mediaLightbox && lightboxUrl ? (
+        <MediaLightbox url={lightboxUrl} onClose={closeLightbox} />
+      ) : null}
 
       <div className="flex gap-4 text-xs text-zinc-500">
         <span className="flex items-center gap-1 hover:text-rose-400 transition-colors">

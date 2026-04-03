@@ -379,7 +379,7 @@ export default function UserPage() {
         <div className="mb-8">
           <Link
             href="/"
-            className="text-zinc-400 hover:text-white transition-colors text-sm inline-flex items-center gap-2"
+            className="cursor-pointer text-zinc-400 hover:text-white transition-colors text-sm inline-flex items-center gap-2"
           >
             <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 19l-7-7m0 0l7-7m-7 7h18" />
@@ -400,7 +400,7 @@ export default function UserPage() {
         <div className="mb-8">
           <Link
             href="/"
-            className="text-zinc-400 hover:text-white transition-colors text-sm inline-flex items-center gap-2"
+            className="cursor-pointer text-zinc-400 hover:text-white transition-colors text-sm inline-flex items-center gap-2"
           >
             <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 19l-7-7m0 0l7-7m-7 7h18" />
@@ -432,7 +432,7 @@ export default function UserPage() {
           <div className="space-y-4">
             <Link
               href="/"
-              className="inline-flex items-center gap-2 bg-white text-black font-semibold px-6 py-3 rounded-lg hover:bg-zinc-200 transition-colors"
+              className="cursor-pointer inline-flex items-center gap-2 bg-white text-black font-semibold px-6 py-3 rounded-lg hover:bg-zinc-200 transition-colors"
             >
               <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
@@ -476,7 +476,7 @@ export default function UserPage() {
       <div className="mb-8">
         <Link
           href="/"
-          className="text-zinc-400 hover:text-white transition-colors text-sm inline-flex items-center gap-2"
+          className="cursor-pointer text-zinc-400 hover:text-white transition-colors text-sm inline-flex items-center gap-2"
         >
           <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 19l-7-7m0 0l7-7m-7 7h18" />
@@ -502,10 +502,10 @@ export default function UserPage() {
               className={`text-xs underline transition-colors ${
                 credits <= 0
                   ? "text-zinc-500 cursor-not-allowed"
-                  : "text-zinc-400 hover:text-zinc-200"
+                  : "cursor-pointer text-zinc-400 hover:text-zinc-200"
               }`}
             >
-              Excavate more · +100 posts for 1 credit
+              ⛏️ Excavate more 🧨   +100 posts for 1 credit
             </button>
           </div>
         )}
@@ -515,7 +515,7 @@ export default function UserPage() {
           <div className="text-center mt-0.5">
             <button
               onClick={() => window.scrollTo({ top: 0, behavior: "smooth" })}
-              className="text-xs text-zinc-500 opacity-60 hover:opacity-100 transition-opacity inline-flex items-center gap-1"
+              className="cursor-pointer text-xs text-zinc-500 opacity-60 hover:opacity-100 transition-opacity inline-flex items-center gap-1"
               aria-label="Back to top"
             >
               <svg className="w-3 h-3" fill="currentColor" viewBox="0 0 12 12">
@@ -546,7 +546,7 @@ export default function UserPage() {
                     {DEV_PANEL && (
                       <button
                         onClick={() => handleExcavate(true)}
-                        className="bg-zinc-800 text-white font-semibold px-6 py-3 rounded-lg hover:bg-zinc-700 transition-colors border border-zinc-600 mb-2"
+                        className="cursor-pointer bg-zinc-800 text-white font-semibold px-6 py-3 rounded-lg hover:bg-zinc-700 transition-colors border border-zinc-600 mb-2"
                       >
                         Re-run Excavation
                       </button>
@@ -562,7 +562,7 @@ export default function UserPage() {
                   <div className="text-center">
                     <button
                       onClick={() => handleExcavate(false)}
-                      className="bg-white text-black font-semibold px-6 py-3 rounded-lg hover:bg-zinc-200 transition-colors mb-2"
+                      className="cursor-pointer bg-white text-black font-semibold px-6 py-3 rounded-lg hover:bg-zinc-200 transition-colors mb-2"
                     >
                       Excavate Earliest Posts
                     </button>
@@ -577,7 +577,7 @@ export default function UserPage() {
                 <div className="text-center">
                   <button
                     onClick={handleUnlockForPrice}
-                    className="bg-white text-black font-semibold px-6 py-3 rounded-lg hover:bg-zinc-200 transition-colors mb-3"
+                    className="cursor-pointer bg-white text-black font-semibold px-6 py-3 rounded-lg hover:bg-zinc-200 transition-colors mb-3"
                   >
                     Unlock for $4
                   </button>
@@ -586,7 +586,7 @@ export default function UserPage() {
                       Have an account?{" "}
                       <Link
                         href="/login"
-                        className="text-white hover:text-zinc-300 underline"
+                        className="cursor-pointer text-white hover:text-zinc-300 underline"
                       >
                         Sign in
                       </Link>
@@ -759,7 +759,7 @@ export default function UserPage() {
                 <span className="text-blue-400">Showing newly unlocked range</span>
                 <button
                   onClick={showFullRange}
-                  className="ml-3 text-blue-300 hover:text-blue-200 underline text-xs"
+                  className="cursor-pointer ml-3 text-blue-300 hover:text-blue-200 underline text-xs"
                 >
                   Show all posts
                 </button>
@@ -784,13 +784,13 @@ export default function UserPage() {
                 <div className="flex items-center justify-center gap-3">
                   <Link
                     href={`/signup?returnTo=${encodeURIComponent(`/user/${username}`)}`}
-                    className="bg-gradient-to-r from-blue-600 to-purple-600 text-white font-semibold px-6 py-3 rounded-lg hover:from-blue-700 hover:to-purple-700 transition-all"
+                    className="cursor-pointer bg-gradient-to-r from-blue-600 to-purple-600 text-white font-semibold px-6 py-3 rounded-lg hover:from-blue-700 hover:to-purple-700 transition-all"
                   >
                     Create Account
                   </Link>
                   <Link
                     href={`/login?returnTo=${encodeURIComponent(`/user/${username}`)}`}
-                    className="bg-zinc-800 text-white font-semibold px-6 py-3 rounded-lg hover:bg-zinc-700 transition-colors border border-zinc-600"
+                    className="cursor-pointer bg-zinc-800 text-white font-semibold px-6 py-3 rounded-lg hover:bg-zinc-700 transition-colors border border-zinc-600"
                   >
                     Sign In
                   </Link>
@@ -822,7 +822,7 @@ export default function UserPage() {
             <div className="mt-8 text-center">
               <button
                 onClick={() => handleExcavate(true)}
-                className="inline-flex items-center gap-2 bg-zinc-800 text-zinc-200 font-semibold px-4 py-2 rounded-lg hover:bg-zinc-700 transition-colors"
+                className="cursor-pointer inline-flex items-center gap-2 bg-zinc-800 text-zinc-200 font-semibold px-4 py-2 rounded-lg hover:bg-zinc-700 transition-colors"
               >
                 <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
@@ -846,13 +846,13 @@ export default function UserPage() {
             <div className="flex gap-3">
               <button
                 onClick={handleExcavateMore}
-                className="flex-1 bg-blue-600 text-white font-medium px-4 py-2 rounded-lg hover:bg-blue-700 transition-colors"
+                className="cursor-pointer flex-1 bg-blue-600 text-white font-medium px-4 py-2 rounded-lg hover:bg-blue-700 transition-colors"
               >
                 Confirm
               </button>
               <button
                 onClick={() => setShowExtendModal(false)}
-                className="flex-1 bg-zinc-800 text-zinc-300 font-medium px-4 py-2 rounded-lg hover:bg-zinc-700 transition-colors"
+                className="cursor-pointer flex-1 bg-zinc-800 text-zinc-300 font-medium px-4 py-2 rounded-lg hover:bg-zinc-700 transition-colors"
               >
                 Cancel
               </button>

@@ -133,7 +133,7 @@ export function AccountHeader({
               {shouldShowToggle && (
                 <button
                   onClick={() => setIsDescriptionExpanded(!isDescriptionExpanded)}
-                  className="text-xs text-zinc-500 hover:text-zinc-400 mt-1 transition-colors"
+                  className="cursor-pointer text-xs text-zinc-500 hover:text-zinc-400 mt-1 transition-colors"
                 >
                   {isDescriptionExpanded ? 'Show less' : 'Show more'}
                 </button>
