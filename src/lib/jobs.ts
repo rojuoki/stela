@@ -50,6 +50,59 @@ import { XApiStop } from "./xclient";
 import { createSyntheticExcavationResult } from "./stageResults";
 import { computeTargetCount } from "./unlockPlanning";
 
+/** Persisted inside jobs.resume_state next to ExcavationCheckpoint so 429 resume keeps Phase 8 parameters. */
+const ADDITIONAL_EXCAVATION_TYPE = "additional_excavation" as const;
+
+export interface AdditionalExcavationContext {
+  type: typeof ADDITIONAL_EXCAVATION_TYPE;
+  targetStage: number;
+  missingCount: number;
+  continuationStartTime: string;
+  continuationBased?: boolean;
+  created_at?: string;
+}
+
+function isAdditionalExcavationShape(obj: unknown): obj is Record<string, unknown> {
+  if (!obj || typeof obj !== "object") return false;
+  const o = obj as Record<string, unknown>;
+  return (
+    o.type === ADDITIONAL_EXCAVATION_TYPE &&
+    typeof o.targetStage === "number" &&
+    typeof o.missingCount === "number" &&
+    typeof o.continuationStartTime === "string"
+  );
+}
+
+function normalizeAdditionalExcavationContext(src: Record<string, unknown>): AdditionalExcavationContext {
+  const ctx: AdditionalExcavationContext = {
+    type: ADDITIONAL_EXCAVATION_TYPE,
+    targetStage: Number(src.targetStage),
+    missingCount: Number(src.missingCount),
+    continuationStartTime: String(src.continuationStartTime),
+  };
+  if (src.continuationBased !== undefined) ctx.continuationBased = Boolean(src.continuationBased);
+  if (src.created_at !== undefined) ctx.created_at = String(src.created_at);
+  return ctx;
+}
+
+function stripAdditionalExcavationContext(
+  raw: Record<string, unknown>,
+): Record<string, unknown> {
+  const { additional_excavation_context: _ctx, ...rest } = raw;
+  return rest;
+}
+
+function logJobCheckpointResume(jobId: string, cp: ExcavationCheckpoint): void {
+  console.log(
+    `[jobs] Job ${jobId} resuming from checkpoint phase=${cp.phase}` +
+      (cp.phase === "collect"
+        ? ` window=${cp.collect_window_start?.slice(0, 10)} ids=${cp.collected_ids?.length ?? 0}`
+        : cp.phase === "explore_month"
+          ? ` year=${cp.month_scan_year} month=${cp.next_month}`
+          : ` next_year=${cp.next_year}`),
+  );
+}
+
 export interface JobRecord {
   id: string;
   account_username: string;
@@ -586,29 +639,62 @@ async function runJobAsync(jobId: string): Promise<void> {
 
     const { account_username: username, user_id: requestingUserId, requested_limit: limit, stage: jobStage, hold_id: holdId } = job;
 
-    // Restore checkpoint from previous run (if any).
-    let initialCheckpoint: ExcavationCheckpoint | null = null;
+    // ── Parse resume_state once (checkpoint ± additional_excavation_context) ─────
+    let rawResume: Record<string, unknown> | null = null;
     if (job.resume_state) {
       try {
-        initialCheckpoint = JSON.parse(job.resume_state) as ExcavationCheckpoint;
-        console.log(
-          `[jobs] Job ${jobId} resuming from checkpoint phase=${initialCheckpoint.phase}` +
-            (initialCheckpoint.phase === "collect"
-              ? ` window=${initialCheckpoint.collect_window_start?.slice(0, 10)} ids=${initialCheckpoint.collected_ids?.length ?? 0}`
-              : initialCheckpoint.phase === "explore_month"
-                ? ` year=${initialCheckpoint.month_scan_year} month=${initialCheckpoint.next_month}`
-                : ` next_year=${initialCheckpoint.next_year}`),
-        );
+        rawResume = JSON.parse(job.resume_state) as Record<string, unknown>;
       } catch {
         console.warn(`[jobs] Job ${jobId} corrupt resume_state — starting fresh`);
+        rawResume = null;
       }
     }
 
+    let additionalContextPayload: AdditionalExcavationContext | null = null;
+    let initialCheckpoint: ExcavationCheckpoint | null = null;
+
+    if (rawResume) {
+      const nested = rawResume.additional_excavation_context;
+      if (nested && typeof nested === "object" && isAdditionalExcavationShape(nested)) {
+        additionalContextPayload = normalizeAdditionalExcavationContext(
+          nested as Record<string, unknown>,
+        );
+        const stripped = stripAdditionalExcavationContext(rawResume);
+        if (stripped.phase !== undefined && typeof stripped.phase === "string") {
+          initialCheckpoint = stripped as unknown as ExcavationCheckpoint;
+          logJobCheckpointResume(jobId, initialCheckpoint);
+        }
+      } else if (isAdditionalExcavationShape(rawResume) && rawResume.phase === undefined) {
+        // Legacy initial Phase 8 row (metadata only, before first checkpoint save)
+        additionalContextPayload = normalizeAdditionalExcavationContext(rawResume);
+      } else if (rawResume.phase !== undefined && typeof rawResume.phase === "string") {
+        // Normal excavation checkpoint, or legacy Phase 8 checkpoint without nested context
+        initialCheckpoint = rawResume as unknown as ExcavationCheckpoint;
+        logJobCheckpointResume(jobId, initialCheckpoint);
+      }
+    }
+
+    const isAdditionalExcavation = additionalContextPayload !== null;
+    const missingCount = additionalContextPayload?.missingCount ?? limit;
+    const additionalExcavationData: AdditionalExcavationContext | null = additionalContextPayload;
+
+    if (isAdditionalExcavation && additionalExcavationData) {
+      console.log(
+        `[additional-excavation] @${username} IDENTIFIED as Phase 8: missing=${missingCount} targetStage=${additionalExcavationData.targetStage}`,
+      );
+    }
+
     // Persist checkpoint to DB at every safe boundary inside the excavation.
-    // On RATE_LIMIT suspend we do NOT clear this — it survives until terminal state.
+    // Phase 8: merge additional_excavation_context so 429 resume keeps targetStage / missingCount / continuation.
     const saveCheckpoint = (cp: ExcavationCheckpoint): void => {
+      const payload: Record<string, unknown> = additionalContextPayload
+        ? {
+            ...(cp as unknown as Record<string, unknown>),
+            additional_excavation_context: additionalContextPayload,
+          }
+        : (cp as unknown as Record<string, unknown>);
       updateJobStatusPg(jobId, undefined, {
-        resume_state: JSON.stringify(cp)
+        resume_state: JSON.stringify(payload),
       }).catch(console.error);
     };
 
@@ -634,29 +720,6 @@ async function runJobAsync(jobId: string): Promise<void> {
 
     let result: ExcavationResult | null = null;
     let rateLimitResumeAtMs: number | null = null;
-
-    // ── CRITICAL: Check Additional Excavation FIRST ──────────────────────────────
-    
-    // Check if this is an additional excavation job (Phase 8)
-    let isAdditionalExcavation = false;
-    let missingCount = limit; // Default to requested limit for normal jobs
-    let additionalExcavationData: any = null;
-    
-    if (job.resume_state) {
-      try {
-        const resumeData = JSON.parse(job.resume_state);
-        if (resumeData.type === 'additional_excavation') {
-          isAdditionalExcavation = true;
-          missingCount = resumeData.missingCount || limit;
-          additionalExcavationData = resumeData;
-          console.log(
-            `[additional-excavation] @${username} IDENTIFIED as Phase 8: missing=${missingCount} targetStage=${resumeData.targetStage}`
-          );
-        }
-      } catch (e) {
-        console.warn(`[jobs] Job ${jobId} corrupt resume_state — treating as normal excavation, error:`, e);
-      }
-    }
 
     // Check if this is a force rerun (admin bypass)
     const isForceRerun = globalQueue.hasForceFlag(jobId);
@@ -696,7 +759,7 @@ async function runJobAsync(jobId: string): Promise<void> {
     if (!result) {
 
       try {
-        if (isAdditionalExcavation) {
+        if (isAdditionalExcavation && additionalExcavationData) {
           // ── Additional Excavation: Normal engine with continuation ──
           if (!existingAccount) {
             throw new Error(`Account not found for additional excavation`);
@@ -824,81 +887,119 @@ async function runJobAsync(jobId: string): Promise<void> {
     // Use credit_holds.job_id as canonical billing link instead of jobs.hold_id
     const hold = await getHoldByJobIdPg(jobId);
 
-    if (hold && result.fetchedCount > 0) {
-      const captured = await captureHeldPg(hold.id, `Excavation success: ${result.fetchedCount} posts`);
-      console.log(
-        `[jobs] Credit ${captured ? "captured" : "capture failed"} for job ${jobId}`,
+    if (result.accountId) {
+      const previousBoundary = await getUserBoundaryEndPg(
+        requestingUserId,
+        result.accountId,
       );
-    } else if (hold && result.fetchedCount === 0) {
-      const released = await releaseHeldPg(hold.id, "Excavation returned 0 posts");
-      console.log(
-        `[jobs] Credit ${released ? "released" : "release failed"} for job ${jobId} (0 posts)`,
-      );
-    }
 
-    if (result.accountId && result.fetchedCount > 0) {
-      // Check if this was an additional excavation job (Phase 8)
-      let isAdditionalExcavation = false;
-      let additionalExcavationData: any = null;
-      
-      try {
-        if (job.resume_state) {
-          const resumeData = JSON.parse(job.resume_state);
-          if (resumeData.type === 'additional_excavation') {
-            isAdditionalExcavation = true;
-            additionalExcavationData = resumeData;
-          }
-        }
-      } catch {
-        // Not additional excavation, continue with normal logic
-      }
-
-      if (isAdditionalExcavation) {
-        // Phase 8 post-execution behavior
-        console.log(`[additional-excavation] Phase 8 post-execution: storedNew=${result.storedNewCount}, fetchedCount=${result.fetchedCount}, target=${additionalExcavationData.targetStage * 100}`);
-        
-        // Step 1: Re-read current cached tweet count to get the ACTUAL count after excavation
+      if (isAdditionalExcavation && additionalExcavationData) {
+        // Phase 8: entitlement from cache totals — not gated on fetchedCount (timeline may be exhausted with 0 in-run fetch).
         const newCachedCount = await getCachedTweetCountPg(result.accountId);
-        
-        // Step 2: Compute finalBoundary = min(targetCount, newCachedCount)
         const targetCount = additionalExcavationData.targetStage * 100;
         const finalBoundary = Math.min(targetCount, newCachedCount);
-        
-        // Step 3: Update user entitlement using finalBoundary
-        // CRITICAL: granted_count MUST equal storedNewCount (actual new tweets stored)
-        const previousBoundary = await getUserBoundaryEndPg(requestingUserId, result.accountId);
-        
-        // FIXED: Ensure storedNewCount is preserved and used correctly
-        const grantedCount = result.storedNewCount; // This is the actual number of new tweets stored
-        
-        console.log(`[additional-excavation] Boundary calculation: storedNewCount=${result.storedNewCount}, fetchedCount=${result.fetchedCount}, newCachedCount=${newCachedCount}, previousBoundary=${previousBoundary}, targetCount=${targetCount}, finalBoundary=${finalBoundary}`);
-        
-        await recordStageUnlockPg(
-          requestingUserId, 
-          result.accountId, 
-          additionalExcavationData.targetStage, 
-          finalBoundary,  // boundary_end reaches finalBoundary (MUST reflect actual cache)
-          grantedCount,   // newly granted amount (MUST equal storedNewCount)
-          "additional-excavation"
+        const grantedCount = Math.max(0, finalBoundary - previousBoundary);
+
+        console.log(
+          `[additional-excavation] Phase 8 post-execution: timelineExhausted=${result.timelineExhausted === true}, ` +
+            `storedNew=${result.storedNewCount}, fetchedCount=${result.fetchedCount}, newCachedCount=${newCachedCount}, ` +
+            `previousBoundary=${previousBoundary}, targetCount=${targetCount}, finalBoundary=${finalBoundary}`,
         );
-        
-        // Add boundary info to result for frontend polling
+
+        if (finalBoundary > previousBoundary) {
+          await recordStageUnlockPg(
+            requestingUserId,
+            result.accountId,
+            additionalExcavationData.targetStage,
+            finalBoundary,
+            grantedCount,
+            "additional-excavation",
+          );
+        }
+
         (result as any).previousBoundary = previousBoundary;
         (result as any).finalBoundary = finalBoundary;
         (result as any).newCachedCount = newCachedCount;
-        
-        console.log(`[additional-excavation] Phase 8 unlock recorded: user=${requestingUserId}, account=${result.accountId}, ` +
-          `targetCount=${targetCount}, newCachedCount=${newCachedCount}, finalBoundary=${finalBoundary}, ` +
-          `previousBoundary=${previousBoundary}, granted=${grantedCount} (storedNewCount preserved)`);
-      } else {
-        // Normal excavation path (Stage 1, Stage 2+, etc.)
+
+        console.log(
+          `[additional-excavation] Phase 8 unlock: user=${requestingUserId}, account=${result.accountId}, ` +
+            `finalBoundary=${finalBoundary}, previousBoundary=${previousBoundary}, granted=${grantedCount}`,
+        );
+      } else if (jobStage === 1) {
+        const useCacheForBoundary =
+          result.timelineExhausted === true &&
+          result.stopReason === "ACCOUNT_HAS_LESS_THAN_LIMIT";
+
+        if (useCacheForBoundary) {
+          const newCached = await getCachedTweetCountPg(result.accountId);
+          const boundaryEnd = Math.min(limit, newCached);
+          const grantedCount = Math.max(0, boundaryEnd - previousBoundary);
+
+          console.log(
+            `[jobs] Stage 1 timeline exhausted — cache-based boundary: cached=${newCached}, limit=${limit}, ` +
+              `boundaryEnd=${boundaryEnd}, previousBoundary=${previousBoundary}`,
+          );
+
+          if (boundaryEnd > previousBoundary && boundaryEnd > 0) {
+            await recordStageUnlockPg(
+              requestingUserId,
+              result.accountId,
+              jobStage,
+              boundaryEnd,
+              grantedCount,
+              jobId,
+            );
+          }
+        } else if (result.fetchedCount > 0) {
+          const boundaryEnd = result.fetchedCount;
+          const grantedCount = result.fetchedCount;
+
+          await recordStageUnlockPg(
+            requestingUserId,
+            result.accountId,
+            jobStage,
+            boundaryEnd,
+            grantedCount,
+            jobId,
+          );
+
+          console.log(
+            `[jobs] Recorded unlock: user=${requestingUserId}, account=${result.accountId}, stage=${jobStage}, boundary=${boundaryEnd}, granted=${grantedCount}`,
+          );
+        }
+      } else if (result.fetchedCount > 0) {
         const boundaryEnd = result.fetchedCount;
-        const grantedCount = result.fetchedCount; // For now, simple case where all fetched posts are new
-        
-        // Use proper recordStageUnlock function with the requesting user_id
-        await recordStageUnlockPg(requestingUserId, result.accountId, jobStage, boundaryEnd, grantedCount, jobId);
-        
-        console.log(`[jobs] Recorded unlock: user=${requestingUserId}, account=${result.accountId}, stage=${jobStage}, boundary=${boundaryEnd}, granted=${grantedCount}`);
+        const grantedCount = result.fetchedCount;
+
+        await recordStageUnlockPg(
+          requestingUserId,
+          result.accountId,
+          jobStage,
+          boundaryEnd,
+          grantedCount,
+          jobId,
+        );
+
+        console.log(
+          `[jobs] Recorded unlock: user=${requestingUserId}, account=${result.accountId}, stage=${jobStage}, boundary=${boundaryEnd}, granted=${grantedCount}`,
+        );
+      }
+
+      if (hold) {
+        const newVisible = await getUserBoundaryEndPg(requestingUserId, result.accountId);
+        if (newVisible > previousBoundary) {
+          const captured = await captureHeldPg(
+            hold.id,
+            `Excavation success: visible boundary ${previousBoundary} → ${newVisible}`,
+          );
+          console.log(`[jobs] Credit ${captured ? "captured" : "capture failed"} for job ${jobId}`);
+        } else {
+          const released = await releaseHeldPg(
+            hold.id,
+            "No visible boundary advance from this job",
+          );
+          console.log(`[jobs] Credit ${released ? "released" : "release failed"} for job ${jobId}`);
+        }
       }
     }
 

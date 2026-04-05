@@ -146,6 +146,12 @@ export interface ExcavationResult {
   errors: ApiCallStats["errors"];
   /** "full_archive" = /2/tweets/search/all; "fallback" = /2/users/:id/tweets */
   acquisitionMode: "full_archive" | "fallback";
+  /**
+   * True when the searchable timeline was fully walked to the present (or explore
+   * completed with no tweets) without hitting the requested count. Stronger completion
+   * signal than OK_LIMIT_REACHED for entitlement: finalize using actual cache totals.
+   */
+  timelineExhausted?: boolean;
   /** True when deep backfill was triggered (zeroStreak ≥ threshold + later month hit). */
   deepTriggered?: boolean;
   /** Number of additional unique tweets added by the deep backfill pass. */
@@ -873,6 +879,7 @@ async function excavateFullArchive(
       storedNewCount: 0,
       errors: stats.errors,
       acquisitionMode: "full_archive",
+      timelineExhausted: true,
       deepTriggered: false,
     };
   }
@@ -910,6 +917,7 @@ async function excavateFullArchive(
       storedNewCount: totalStoredNew,
       errors: stats.errors,
       acquisitionMode: "full_archive",
+      timelineExhausted: false,
       deepTriggered: false,
     };
   }
@@ -1007,6 +1015,7 @@ async function excavateFullArchive(
   );
   totalStoredNew += collectResult.storedNewCount;
   let stopReason: StopReason = collectResult.stopReason;
+  let timelineExhausted = collectResult.timelineExhausted;
 
   // ── Phase C: Deep backfill (DISABLED) ──
   // Disabled: Main explore→collect pipeline already guarantees earliest region coverage.
@@ -1016,6 +1025,7 @@ async function excavateFullArchive(
 
   if (stats.totalCalls >= MAX_API_CALLS && stopReason === "ACCOUNT_HAS_LESS_THAN_LIMIT") {
     stopReason = "MAX_API_CALLS_REACHED";
+    timelineExhausted = false;
   }
 
   // Merge all phases: sort ascending, take earliest `effectiveTargetCount`.
@@ -1042,6 +1052,7 @@ async function excavateFullArchive(
     acquisitionMode: "full_archive",
     deepTriggered: false, // Deep backfill is disabled
     deepAddedCount: undefined, // No deep backfill performed
+    timelineExhausted,
   };
 }
 
@@ -1254,7 +1265,7 @@ async function collectWindowPass(
   username: string,
   onProgress?: (apiCalls: number) => void,
   checkpointOpts?: CollectCheckpointOpts,
-): Promise<{ stopReason: StopReason; storedNewCount: number }> {
+): Promise<{ stopReason: StopReason; storedNewCount: number; timelineExhausted: boolean }> {
   // ── Separated state management ──────────────────────────────────────────
   
   // Normal window progression (independent of splits)
@@ -1315,7 +1326,11 @@ async function collectWindowPass(
     console.log(
       `[collect] @${username} collect phase already complete (resumeFrom=${normalWindowStart.toISOString().slice(0, 10)} >= end=${end.toISOString().slice(0, 10)})`,
     );
-    return { stopReason: "ACCOUNT_HAS_LESS_THAN_LIMIT", storedNewCount: 0 };
+    return {
+      stopReason: "ACCOUNT_HAS_LESS_THAN_LIMIT",
+      storedNewCount: 0,
+      timelineExhausted: true,
+    };
   }
 
   if (checkpointOpts?.resumeFrom || splitQueue.length > 0) {
@@ -1824,7 +1839,16 @@ async function collectWindowPass(
     stopReason = "MAX_API_CALLS_REACHED";
   }
 
-  return { stopReason, storedNewCount: storedNewAccumulated };
+  const timelineExhausted =
+    stopReason === "ACCOUNT_HAS_LESS_THAN_LIMIT" &&
+    normalWindowStart >= end &&
+    splitQueue.length === 0;
+
+  return {
+    stopReason,
+    storedNewCount: storedNewAccumulated,
+    timelineExhausted: stopReason === "MAX_API_CALLS_REACHED" ? false : timelineExhausted,
+  };
 }
 
 // ─── Fallback (timeline) ────────────────────────────────
@@ -1954,6 +1978,9 @@ async function excavateTimeline(
     stopReason = "MAX_API_CALLS_REACHED";
   }
 
+  const timelineExhausted =
+    stopReason === "ACCOUNT_HAS_LESS_THAN_LIMIT" && windowStart >= now;
+
   const sorted = [...collected.values()]
     .sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime())
     .slice(0, effectiveTargetCount);
@@ -1975,6 +2002,7 @@ async function excavateTimeline(
     storedNewCount: totalStoredNew,
     errors: stats.errors,
     acquisitionMode: "fallback",
+    timelineExhausted: stopReason === "MAX_API_CALLS_REACHED" ? false : timelineExhausted,
   };
 }
 

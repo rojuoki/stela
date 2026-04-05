@@ -12,10 +12,13 @@ const LINES = [
 export function EngagementChart({
   tweets,
   onBarSelect,
+  heading,
 }: {
   tweets: TweetData[];
   /** Called with `post_id` when the user clicks a bar (same mapping as hover). */
   onBarSelect?: (postId: string) => void;
+  /** When set (e.g. URL range slice), replaces the default “earliest N posts” title. */
+  heading?: string;
 }) {
   const [hoverIdx, setHoverIdx] = useState<number | null>(null);
   const [barRect, setBarRect] = useState<DOMRect | null>(null);
@@ -142,7 +145,7 @@ export function EngagementChart({
     <div className="mb-4">
       <div className="flex items-center justify-between mb-1.5">
         <h2 className="text-xs text-zinc-500">
-          Engagement across earliest {n} posts
+          {heading ?? `Engagement across earliest ${n} posts`}
         </h2>
         <div className="flex items-center gap-3">
           <div className="flex items-center gap-1.5">

@@ -1,13 +1,15 @@
 "use client";
 
 import { useState, useEffect, useCallback, useRef } from "react";
-import { useParams, useRouter } from "next/navigation";
+import { useParams, useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import type {
   TweetData,
   AccountData,
   AccountStatus,
+  Status,
+  JobPhase,
 } from "../../../components/types";
 import { EngagementChart } from "../../../components/EngagementChart";
 import { TweetCard, tweetElementId } from "../../../components/TweetCard";
@@ -29,10 +31,32 @@ const DUMMY_TWEET_STATS = [
   { likes: 9, retweets: 1, replies: 3 },
 ];
 
+const POLL_INTERVAL_MS = 2500;
+const MIN_EXCAVATING_MS = 3000;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
 export default function UserPage() {
   const params = useParams();
   const router = useRouter();
+  const searchParamsFromRouter = useSearchParams();
   const username = Array.isArray(params.username) ? params.username[0] : params.username;
+
+  const rangeStartParam = searchParamsFromRouter.get("rangeStart");
+  const rangeEndParam = searchParamsFromRouter.get("rangeEnd");
+  const hasRangeParams = Boolean(rangeStartParam && rangeEndParam);
+  const parsedRangeStart = hasRangeParams ? parseInt(rangeStartParam!, 10) : NaN;
+  const parsedRangeEnd = hasRangeParams ? parseInt(rangeEndParam!, 10) : NaN;
+  const rangeValid =
+    hasRangeParams &&
+    !Number.isNaN(parsedRangeStart) &&
+    !Number.isNaN(parsedRangeEnd) &&
+    parsedRangeStart > 0 &&
+    parsedRangeEnd >= parsedRangeStart;
+  /** Stable dependency so query-only navigations re-run the data effect (same page instance). */
+  const rangeQueryKey = rangeValid ? `${parsedRangeStart}-${parsedRangeEnd}` : "full";
 
   // User context - MUST be called before any early returns
   const { user, credits, subscription, refreshCredits, loading: authLoading } = useUser();
@@ -56,10 +80,376 @@ export default function UserPage() {
   const [currentBoundary, setCurrentBoundary] = useState<number | null>(null);
   const [showBackToTop, setShowBackToTop] = useState(false);
 
+  // Excavation state management - replaces /excavating page functionality
+  const [excavationState, setExcavationState] = useState<{
+    active: boolean;
+    flow: 'initial-cached' | 'initial' | 'extend-granted' | 'extend' | null;
+    jobId: string | null;
+    status: Status;
+    jobPhase: JobPhase;
+    jobInfo: string;
+    error: string | null;
+    resumeAt: string | null;
+    startedAt: number;
+    sessionData: any;
+    resyncPhase: boolean; // New: track resync phase
+  }>({
+    active: false,
+    flow: null,
+    jobId: null,
+    status: 'idle',
+    jobPhase: null,
+    jobInfo: '',
+    error: null,
+    resumeAt: null,
+    startedAt: 0,
+    sessionData: null,
+    resyncPhase: false,
+  });
+
   const scrollToTweetByPostId = useCallback((postId: string) => {
     const el = document.getElementById(tweetElementId(postId));
     if (!el) return;
     el.scrollIntoView({ behavior: "smooth", block: "start" });
+  }, []);
+
+  // Excavation helper functions - migrated from /excavating page
+  const ensureMinTime = async (startTime: number) => {
+    const elapsed = Date.now() - startTime;
+    if (elapsed < MIN_EXCAVATING_MS) {
+      await sleep(MIN_EXCAVATING_MS - elapsed);
+    }
+  };
+
+  const navigateToResults = (
+    targetUsername: string,
+    rangeStart: number,
+    rangeEnd: number,
+  ) => {
+    router.replace(
+      `/user/${encodeURIComponent(targetUsername)}?rangeStart=${rangeStart}&rangeEnd=${rangeEnd}`,
+    );
+  };
+
+  const exitExcavationMode = useCallback(() => {
+    setExcavationState({
+      active: false,
+      flow: null,
+      jobId: null,
+      status: 'idle',
+      jobPhase: null,
+      jobInfo: '',
+      error: null,
+      resumeAt: null,
+      startedAt: 0,
+      sessionData: null,
+      resyncPhase: false,
+    });
+  }, []);
+
+  // Start resync phase after job completion - keeps excavation UI active
+  const startResyncPhase = useCallback(() => {
+    console.log('[excavation] Starting resync phase');
+    setExcavationState(prev => ({
+      ...prev,
+      resyncPhase: true,
+      status: 'running' as Status,
+      jobPhase: null,
+      jobInfo: 'Preparing results...',
+    }));
+    
+    // Invalidate fetch guards to force data reload
+    console.log('[excavation] Invalidating fetch guards');
+    unlockCheckKeyRef.current = null;
+    tweetsFetchedKeyRef.current = null;
+    
+    // The main data loading useEffect will handle the reload automatically
+    // when the keys are invalidated and resyncPhase is added to dependencies
+  }, []);
+
+  // Job polling logic - migrated from /excavating page
+  const pollJob = useCallback(async (jobId: string, onSuccess: (job: any) => void, signal?: AbortSignal) => {
+    const tick = async (): Promise<void> => {
+      if (signal?.aborted) return;
+      
+      try {
+        const res = await apiFetch(`/api/jobs/${jobId}`);
+
+        if (res.status === 404) {
+          setExcavationState(prev => ({
+            ...prev,
+            status: "failed",
+            error: "Job not found — may have expired",
+            jobPhase: null,
+          }));
+          return;
+        }
+
+        if (!res.ok) {
+          setExcavationState(prev => ({
+            ...prev,
+            jobInfo: `Polling error (HTTP ${res.status}) — retrying…`,
+          }));
+          await sleep(POLL_INTERVAL_MS);
+          if (!signal?.aborted) return tick();
+          return;
+        }
+
+        const job = await res.json();
+
+        if (job.status === "succeeded") {
+          setExcavationState(prev => ({
+            ...prev,
+            jobInfo: "Finishing up...",
+          }));
+          await ensureMinTime(excavationState.startedAt);
+          refreshCredits();
+          onSuccess(job);
+          return;
+        }
+
+        if (job.status === "failed") {
+          setExcavationState(prev => ({
+            ...prev,
+            status: "failed",
+            error: job.error?.message || "Excavation failed",
+            jobPhase: null,
+            resumeAt: null,
+          }));
+          return;
+        }
+
+        if (job.status === "canceled") {
+          setExcavationState(prev => ({
+            ...prev,
+            status: "failed",
+            error: "Job was canceled",
+            jobPhase: null,
+          }));
+          return;
+        }
+
+        if (job.status === "waiting_rate_limit") {
+          setExcavationState(prev => ({
+            ...prev,
+            jobPhase: "waiting_rate_limit",
+            resumeAt: job.resumeAt ?? null,
+            jobInfo: `API calls: ${job.apiCalls}`,
+          }));
+        } else if (job.status === "queued") {
+          setExcavationState(prev => ({
+            ...prev,
+            jobPhase: "queued",
+            resumeAt: null,
+            jobInfo: job.queuePosition != null
+              ? `Position ${job.queuePosition} in queue — waiting for slot…`
+              : `Waiting for slot…`,
+          }));
+        } else {
+          setExcavationState(prev => ({
+            ...prev,
+            jobPhase: "running",
+            resumeAt: null,
+            jobInfo: `Excavating… (API calls: ${job.apiCalls})`,
+          }));
+        }
+
+        await sleep(POLL_INTERVAL_MS);
+        if (!signal?.aborted) return tick();
+      } catch {
+        setExcavationState(prev => ({
+          ...prev,
+          jobInfo: "Network error — retrying…",
+        }));
+        await sleep(POLL_INTERVAL_MS);
+        if (!signal?.aborted) return tick();
+      }
+    };
+
+    await tick();
+  }, [excavationState.startedAt, refreshCredits]);
+
+  // Flow handling logic - migrated from /excavating page
+  const handleExtendGranted = useCallback(async () => {
+    const raw = sessionStorage.getItem("stela-extend-result");
+    sessionStorage.removeItem("stela-extend-result");
+
+    if (!raw || !username) {
+      setExcavationState(prev => ({
+        ...prev,
+        status: "failed",
+        error: "Session expired. Please try again.",
+        jobPhase: null,
+      }));
+      return;
+    }
+
+    let result: {
+      boundary: { previous: number; new: number };
+      range: { start: number; end: number; count: number; rangeString: string };
+    };
+    try {
+      result = JSON.parse(raw);
+    } catch {
+      setExcavationState(prev => ({
+        ...prev,
+        status: "failed",
+        error: "Invalid session data. Please try again.",
+        jobPhase: null,
+      }));
+      return;
+    }
+
+    setExcavationState(prev => ({
+      ...prev,
+      jobInfo: `Processing ${result.range.count} posts...`,
+    }));
+    await ensureMinTime(excavationState.startedAt);
+    refreshCredits();
+    
+    // For extend flows, navigate to range view and exit immediately
+    // Range navigation will handle data loading
+    navigateToResults(username, result.range.start, result.range.end);
+    exitExcavationMode();
+  }, [username, excavationState.startedAt, refreshCredits, exitExcavationMode]);
+
+  const handleExtendJob = useCallback(async (jobId: string) => {
+    setExcavationState(prev => ({
+      ...prev,
+      jobInfo: "Excavating additional posts...",
+      jobPhase: "running",
+    }));
+
+    const raw = sessionStorage.getItem("stela-extend-result");
+    let previousBoundary = 0;
+    if (raw) {
+      try {
+        const data = JSON.parse(raw);
+        previousBoundary = data.previousBoundary ?? 0;
+      } catch { /* ignore */ }
+      sessionStorage.removeItem("stela-extend-result");
+    }
+
+    await pollJob(jobId, (job) => {
+      const prevBound = job.result?.previousBoundary ?? previousBoundary;
+      const finalBound = job.result?.finalBoundary ?? prevBound;
+      
+      // Navigate to range view and exit excavation mode
+      navigateToResults(username!, prevBound + 1, finalBound);
+      exitExcavationMode();
+    });
+  }, [username, pollJob, exitExcavationMode]);
+
+  const handleInitialCached = useCallback(async () => {
+    setExcavationState(prev => ({
+      ...prev,
+      jobInfo: "Unlocking...",
+    }));
+    await ensureMinTime(excavationState.startedAt);
+    refreshCredits();
+    
+    // Start resync phase instead of exiting immediately
+    startResyncPhase();
+  }, [excavationState.startedAt, refreshCredits, startResyncPhase]);
+
+  const handleInitialJob = useCallback(async (jobId: string) => {
+    setExcavationState(prev => ({
+      ...prev,
+      jobInfo: "Excavating earliest posts...",
+      jobPhase: "running",
+    }));
+
+    await pollJob(jobId, () => {
+      // Start resync phase instead of exiting immediately
+      startResyncPhase();
+    });
+  }, [pollJob, startResyncPhase]);
+
+  // Main excavation flow orchestration - migrated from /excavating page useEffect
+  useEffect(() => {
+    if (!excavationState.active || !username) return;
+
+    const { flow, jobId } = excavationState;
+
+    if (flow === "extend-granted") {
+      handleExtendGranted();
+    } else if (flow === "extend" && jobId) {
+      handleExtendJob(jobId);
+    } else if (flow === "initial-cached") {
+      handleInitialCached();
+    } else if (flow === "initial" && jobId) {
+      handleInitialJob(jobId);
+    } else if (!jobId && (flow === "initial" || flow === "extend")) {
+      // Missing jobId for flows that require it
+      setExcavationState(prev => ({
+        ...prev,
+        status: "failed",
+        error: "Missing job ID",
+        jobPhase: null,
+      }));
+    }
+  }, [excavationState.active, excavationState.flow, excavationState.jobId, username, 
+      handleExtendGranted, handleExtendJob, handleInitialCached, handleInitialJob]);
+
+  // Detect resync completion and exit excavation mode
+  useEffect(() => {
+    if (!excavationState.resyncPhase) return;
+    
+    console.log('[excavation] Checking resync completion:', {
+      isAlreadyUnlocked,
+      tweetsLength: tweets.length,
+      hasResults: tweets.length > 0,
+    });
+    
+    // Define conditions for resync completion
+    const resyncComplete = (
+      isAlreadyUnlocked &&   // Unlock status loaded and account is unlocked
+      tweets.length > 0      // Tweets loaded and available
+    );
+    
+    if (resyncComplete) {
+      console.log('[excavation] Resync complete, exiting excavation mode');
+      exitExcavationMode();
+      return;
+    }
+    
+    // Fallback timeout to prevent getting stuck in resync
+    const fallbackTimeout = setTimeout(() => {
+      console.log('[excavation] Resync timeout, forcing exit');
+      exitExcavationMode();
+    }, 5000); // 5 second fallback
+    
+    return () => clearTimeout(fallbackTimeout);
+  }, [excavationState.resyncPhase, isAlreadyUnlocked, tweets.length, exitExcavationMode]);
+
+  // Cleanup on unmount
+  useEffect(() => {
+    return () => {
+      if (excavationState.active) {
+        sessionStorage.removeItem("stela-extend-result");
+      }
+    };
+  }, [excavationState.active]);
+
+  // Function to start excavation - replaces router.push('/excavating?...')
+  const startExcavation = useCallback((
+    flow: 'initial-cached' | 'initial' | 'extend-granted' | 'extend',
+    jobId?: string,
+    sessionData?: any
+  ) => {
+    setExcavationState({
+      active: true,
+      flow,
+      jobId: jobId || null,
+      status: 'running',
+      jobPhase: jobId ? 'running' : null,
+      jobInfo: 'Starting...',
+      error: null,
+      resumeAt: null,
+      startedAt: Date.now(),
+      sessionData: sessionData || null,
+      resyncPhase: false,
+    });
   }, []);
 
   if (!username || typeof username !== "string") {
@@ -87,17 +477,23 @@ export default function UserPage() {
 
       const extendResponse = await res.json();
 
+      // Start in-page excavation instead of redirecting
       if (extendResponse.executionMode === "grant_only") {
         sessionStorage.setItem("stela-extend-result", JSON.stringify({
           boundary: extendResponse.boundary,
           range: extendResponse.range,
         }));
-        router.push(`/excavating?flow=extend-granted&username=${encodeURIComponent(accountData.username)}`);
+        startExcavation('extend-granted', undefined, {
+          boundary: extendResponse.boundary,
+          range: extendResponse.range,
+        });
       } else if (extendResponse.executionMode === "excavate_more") {
         sessionStorage.setItem("stela-extend-result", JSON.stringify({
           previousBoundary: extendResponse.planning.currentVisibleBoundary,
         }));
-        router.push(`/excavating?flow=extend&username=${encodeURIComponent(accountData.username)}&jobId=${extendResponse.jobId}`);
+        startExcavation('extend', extendResponse.jobId, {
+          previousBoundary: extendResponse.planning.currentVisibleBoundary,
+        });
       }
     } catch {
       setError("Network error");
@@ -142,7 +538,7 @@ export default function UserPage() {
 
   const loadTweets = async (accountId: string, rangeStart?: number, rangeEnd?: number): Promise<TweetData[]> => {
     let url = `/api/tweets/${accountId}`;
-    if (rangeStart && rangeEnd) {
+    if (rangeStart !== undefined && rangeEnd !== undefined) {
       url += `?rangeStart=${rangeStart}&rangeEnd=${rangeEnd}`;
     }
     const res = await apiFetch(url);
@@ -168,20 +564,8 @@ export default function UserPage() {
 
     let cancelled = false;
 
-    const urlParams = new URLSearchParams(window.location.search);
-    const rangeStartParam = urlParams.get("rangeStart");
-    const rangeEndParam = urlParams.get("rangeEnd");
-    const hasRangeParams = Boolean(rangeStartParam && rangeEndParam);
-    const rangeStart = hasRangeParams ? parseInt(rangeStartParam!, 10) : undefined;
-    const rangeEnd = hasRangeParams ? parseInt(rangeEndParam!, 10) : undefined;
-    const rangeValid =
-      hasRangeParams &&
-      rangeStart !== undefined &&
-      rangeEnd !== undefined &&
-      !Number.isNaN(rangeStart) &&
-      !Number.isNaN(rangeEnd) &&
-      rangeStart > 0 &&
-      rangeEnd >= rangeStart;
+    const rangeStart = rangeValid ? parsedRangeStart : undefined;
+    const rangeEnd = rangeValid ? parsedRangeEnd : undefined;
 
     const tweetFetchKey = (accountId: string, rs?: number, re?: number) =>
       rs != null && re != null ? `${accountId}:${rs}:${re}` : `${accountId}:full`;
@@ -191,8 +575,9 @@ export default function UserPage() {
       jobInfoFor: (n: number) => string,
       boundary?: number,
     ) => {
-      if (cancelled || loadedTweets.length === 0) return;
+      if (cancelled) return;
       setTweets(loadedTweets);
+      if (loadedTweets.length === 0) return;
       setJobInfo(jobInfoFor(loadedTweets.length));
       if (boundary !== undefined) setCurrentBoundary(boundary);
     };
@@ -205,9 +590,14 @@ export default function UserPage() {
       boundary?: number,
     ) => {
       const key = tweetFetchKey(accountId, rs, re);
-      if (tweetsFetchedKeyRef.current === key) return;
+      if (tweetsFetchedKeyRef.current === key) {
+        console.log('[excavation] Skipping tweet fetch - already fetched');
+        return;
+      }
       tweetsFetchedKeyRef.current = key;
+      console.log('[excavation] Fetching tweets, resyncPhase:', excavationState.resyncPhase);
       const loaded = await loadTweets(accountId, rs, re);
+      console.log('[excavation] Loaded tweets:', loaded.length);
       applyTweetResult(loaded, jobInfoFor, boundary);
     };
 
@@ -229,11 +619,13 @@ export default function UserPage() {
 
     const unlockKey = `${user.id}:${accountData.account_id}`;
     if (unlockCheckKeyRef.current === unlockKey) {
+      console.log('[excavation] Skipping unlock check - already checked');
       return () => {
         cancelled = true;
       };
     }
     unlockCheckKeyRef.current = unlockKey;
+    console.log('[excavation] Starting unlock status check, resyncPhase:', excavationState.resyncPhase);
 
     void (async () => {
       try {
@@ -270,7 +662,15 @@ export default function UserPage() {
       cancelled = true;
       unlockCheckKeyRef.current = null;
     };
-  }, [authLoading, user?.id, accountData?.account_id, accountData?.username]);
+  }, [
+    authLoading,
+    user?.id,
+    accountData?.account_id,
+    accountData?.username,
+    excavationState.active,
+    excavationState.resyncPhase,
+    rangeQueryKey,
+  ]);
 
   // Handle scroll for back to top visibility
   useEffect(() => {
@@ -304,12 +704,12 @@ export default function UserPage() {
       }
 
       const unlock = await res.json();
-      const encodedUsername = encodeURIComponent(raw);
 
+      // Start in-page excavation instead of redirecting
       if (!force && unlock.status === "cache-hit" && unlock.accountId) {
-        router.push(`/excavating?flow=initial-cached&username=${encodedUsername}`);
+        startExcavation('initial-cached');
       } else if (unlock.jobId) {
-        router.push(`/excavating?flow=initial&username=${encodedUsername}&jobId=${unlock.jobId}`);
+        startExcavation('initial', unlock.jobId);
       }
     } catch {
       setError("Network error");
@@ -450,25 +850,112 @@ export default function UserPage() {
 
   const isLoggedIn = !!user; // Check if user is authenticated
 
+  // Excavation UI component - replaces /excavating page
+  const ExcavationUI = () => {
+    if (!excavationState.active) return null;
+
+    const isError = excavationState.status === "failed";
+
+    return (
+      <div className="min-h-screen bg-black">
+        <div className="max-w-2xl mx-auto px-4 py-12">
+          <div className="mb-8">
+            <Link
+              href={username ? `/user/${encodeURIComponent(username)}` : "/"}
+              onClick={(e) => {
+                e.preventDefault();
+                exitExcavationMode();
+              }}
+              className="text-zinc-400 hover:text-white transition-colors text-sm inline-flex items-center gap-2"
+            >
+              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 19l-7-7m0 0l7-7m-7 7h18" />
+              </svg>
+              Back to @{username || "Stela"}
+            </Link>
+          </div>
+
+          {username && (
+            <div className="mb-6 text-center">
+              <h1 className="text-xl font-bold text-white">@{username}</h1>
+              <p className="text-sm text-zinc-500 mt-1">
+                {excavationState.flow?.startsWith("extend") ? "Additional excavation" : "Excavating earliest posts"}
+              </p>
+            </div>
+          )}
+
+          {!isError && (
+            <JobStatus
+              status={excavationState.status}
+              jobPhase={excavationState.resyncPhase ? null : excavationState.jobPhase}
+              jobInfo={excavationState.jobInfo}
+              error={null}
+              credits={credits}
+              cacheHit={false}
+              resumeAt={excavationState.resumeAt}
+            />
+          )}
+
+          <div className="border border-zinc-800 rounded-xl min-h-[200px] flex items-center justify-center">
+            {isError ? (
+              <div className="text-center px-6 max-w-md">
+                <svg
+                  className="w-12 h-12 mx-auto text-red-500 mb-4"
+                  fill="none"
+                  viewBox="0 0 24 24"
+                  stroke="currentColor"
+                >
+                  <path
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    strokeWidth={1.5}
+                    d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L4.082 16.5c-.77.833.192 2.5 1.732 2.5z"
+                  />
+                </svg>
+                <p className="text-red-300 font-medium mb-2">{excavationState.error}</p>
+                <button
+                  onClick={exitExcavationMode}
+                  className="mt-4 bg-zinc-800 text-zinc-300 font-medium px-4 py-2 rounded-lg hover:bg-zinc-700 transition-colors"
+                >
+                  Go back
+                </button>
+              </div>
+            ) : (
+              <div className="text-center">
+                <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-white mx-auto mb-4" />
+                <p className="text-zinc-400 text-sm">
+                  {excavationState.resyncPhase ? "Preparing results..." : (excavationState.jobInfo || "Excavating...")}
+                </p>
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+    );
+  };
+
   // Determine if user can unlock (has credits OR basic subscription)
   const canUnlock = isLoggedIn && (credits > 0 || subscription.plan === 'basic');
 
-  // Check if we're in range mode
-  const searchParams = new URLSearchParams(window.location.search);
-  const isRangeMode = !!(searchParams.get('rangeStart') && searchParams.get('rangeEnd'));
+  const isRangeMode = rangeValid;
 
   // Function to show full range (clear range params)
   const showFullRange = () => {
     if (accountData) {
       router.replace(`/user/${username}`, { scroll: false });
-      // Reload full tweet set
-      loadTweets(accountData.account_id).then(loadedTweets => {
+      tweetsFetchedKeyRef.current = `${accountData.account_id}:full`;
+      loadTweets(accountData.account_id).then((loadedTweets) => {
         setTweets(loadedTweets);
         const boundary = currentBoundary || loadedTweets.length;
         setJobInfo(`${loadedTweets.length} posts • showing 1-${boundary}`);
       });
     }
   };
+
+  // Show excavation UI when in excavation mode
+  if (excavationState.active) {
+    return <ExcavationUI />;
+  }
 
   return (
     <main className="max-w-2xl mx-auto px-4 py-12">
@@ -801,7 +1288,15 @@ export default function UserPage() {
 
           {/* Engagement Chart */}
           {hasResults && (
-            <EngagementChart tweets={tweets} onBarSelect={scrollToTweetByPostId} />
+            <EngagementChart
+              tweets={tweets}
+              onBarSelect={scrollToTweetByPostId}
+              heading={
+                isRangeMode
+                  ? `Engagement for posts ${parsedRangeStart}–${parsedRangeEnd}`
+                  : undefined
+              }
+            />
           )}
 
           {/* Tweet list */}
