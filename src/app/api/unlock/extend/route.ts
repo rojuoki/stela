@@ -35,7 +35,7 @@ import {
   EXTEND_COOLDOWN_AFTER_EXHAUST_CODE,
 } from "@/lib/repository";
 import { normalizeUsername, checkRateLimit } from "@/lib/validation";
-import { createAndRunJob, createStageExpansionJob, createAdditionalExcavationJob } from "@/lib/jobs";
+import { createAdditionalExcavationJob } from "@/lib/jobs";
 import { maybeInjectDevError } from "@/lib/devError";
 
 export async function POST(req: NextRequest) {

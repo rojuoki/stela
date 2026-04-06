@@ -6,7 +6,6 @@ import { upsertUnlockBoundary } from "./unlockWrite";
 import { 
   getAccountByUsername,
   hasUserUnlockedAccount,
-  hasUserUnlockedStage,
   getCreditBalance,
   spendCreditsPg,
   cleanupExpiredHoldsPg,
@@ -14,7 +13,7 @@ import {
   recordApiCall
 } from "./repository";
 import { planInitialUnlock } from "./unlockPlanning";
-import { createAndRunJob, createStageExpansionJob } from "./jobs";
+import { createAndRunJob } from "./jobs";
 import { normalizeUsername } from "./validation";
 
 export interface UnlockResult {
@@ -23,7 +22,6 @@ export interface UnlockResult {
   accountId?: string;
   jobId?: string | null;
   status?: string;
-  stage?: number;
   creditConsumed?: boolean;
   freeReUnlock?: boolean;
 }
@@ -35,10 +33,10 @@ export interface UnlockResult {
 export async function performDirectUnlock(
   userId: string,
   username: string,
-  stage: number = 1
+  _stage: number = 1  // Legacy param, ignored — boundary is source of truth
 ): Promise<UnlockResult> {
   try {
-    console.log(`[unlockDirect] Processing unlock for user ${userId}, @${username}, stage ${stage}`);
+    console.log(`[unlockDirect] Processing unlock for user ${userId}, @${username}`);
 
     // Normalize username
     const normalizedUsername = normalizeUsername(username);
@@ -49,22 +47,18 @@ export async function performDirectUnlock(
       };
     }
 
-    // Validate stage
-    const requestedStage = Math.max(1, Math.min(3, Math.floor(stage)));
-
     // Clean up expired holds and ensure user has starting credits
     await cleanupExpiredHoldsPg();
     const userBalance = await getCreditBalance(userId);
     if (userBalance.total_earned === 0) {
-      // First time user - give starting credits
       await giveCreditsPg(userId, 3, "Initial allocation");
     }
 
-    // Unified decision planning
+    // Unified decision planning (always stage 1 for initial unlock)
     const account = await getAccountByUsername(normalizedUsername);
-    const plan = await planInitialUnlock(userId, account?.account_id || null, requestedStage, account?.created_at || null);
+    const plan = await planInitialUnlock(userId, account?.account_id || null, 1, account?.created_at || null);
     
-    console.log(`[unlockDirect] @${normalizedUsername} Stage ${requestedStage} plan:`, {
+    console.log(`[unlockDirect] @${normalizedUsername} plan:`, {
       targetCount: plan.targetCount,
       currentCachedCount: plan.currentCachedCount,
       strategy: plan.strategy
@@ -82,79 +76,45 @@ export async function performDirectUnlock(
       const alreadyUnlocked = await hasUserUnlockedAccount(userId, account.account_id);
       
       if (alreadyUnlocked) {
-        // Free re-unlock for same user (already unlocked)
         await upsertUnlockBoundary(userId, account.account_id, plan.grantBoundary, "paid-unlock-free");
         await recordApiCall("cache/unlock", true);
-        console.log(`[unlockDirect] Free cache hit for @${normalizedUsername} Stage ${requestedStage}`);
+        console.log(`[unlockDirect] Free cache hit for @${normalizedUsername}`);
         
         return {
           success: true,
           accountId: account.account_id,
           jobId: null,
           status: "cache-hit",
-          stage: requestedStage,
           freeReUnlock: true,
           creditConsumed: false,
         };
       } else {
-        // First time unlock from cache - credit already paid via Stripe
         await upsertUnlockBoundary(userId, account.account_id, plan.grantBoundary, "paid-unlock-cache");
         await recordApiCall("cache/unlock", true);
-
-        console.log(`[unlockDirect] Paid cache hit for @${normalizedUsername} Stage ${requestedStage}`);
+        console.log(`[unlockDirect] Paid cache hit for @${normalizedUsername}`);
         
         return {
           success: true,
           accountId: account.account_id,
           jobId: null,
           status: "cache-hit",
-          stage: requestedStage,
           freeReUnlock: false,
-          creditConsumed: true, // Credit was consumed via Stripe payment
-        };
-      }
-    }
-
-    // Stage-specific prerequisite checking for stage 2+
-    if (requestedStage > 1) {
-      if (await hasUserUnlockedStage(userId, account.account_id, requestedStage)) {
-        return {
-          success: false,
-          error: `You already have Stage ${requestedStage} unlocked for @${normalizedUsername}`,
-          accountId: account.account_id,
-          stage: requestedStage
+          creditConsumed: true,
         };
       }
     }
 
     // Create excavation job - credit already paid via Stripe, no hold needed
-    let jobId: string;
-    
-    if (requestedStage === 1) {
-      // Stage 1: Use normal job creation
-      jobId = await createAndRunJob(normalizedUsername, account?.created_at, undefined, 1, false, userId);
-    } else {
-      // Stage 2+: Use expansion job creation
-      const expansionResult = await createStageExpansionJob(normalizedUsername, requestedStage, undefined, userId);
-      if (expansionResult.error) {
-        return {
-          success: false,
-          error: expansionResult.error,
-          stage: requestedStage
-        };
-      }
-      jobId = expansionResult.jobId!;
-    }
+    const jobId = await createAndRunJob(normalizedUsername, account?.created_at, undefined, 1, false, userId);
 
-    console.log(`[unlockDirect] Created job ${jobId} for @${normalizedUsername} Stage ${requestedStage} (paid unlock)`);
+    console.log(`[unlockDirect] Created job ${jobId} for @${normalizedUsername} (paid unlock)`);
     
     return {
       success: true,
       accountId: account.account_id,
       jobId,
       status: "queued",
-      stage: requestedStage,
-      creditConsumed: true, // Credit was consumed via Stripe payment
+      creditConsumed: true,
     };
     
   } catch (error) {
