@@ -63,17 +63,15 @@ CREATE TABLE IF NOT EXISTS tweets (
 );
 CREATE INDEX IF NOT EXISTS idx_tweets_account ON tweets(account_id, created_at ASC);
 
--- User unlock history (Phase 3: stage-aware unlock tracking)
+-- User unlock entitlement (single row per user+account, boundary-based)
 CREATE TABLE IF NOT EXISTS unlocks (
   id            INTEGER PRIMARY KEY AUTOINCREMENT,
   user_id       TEXT NOT NULL DEFAULT 'anonymous',
   account_id    TEXT NOT NULL,
-  stage         INTEGER NOT NULL DEFAULT 1,  -- Stage unlocked (1, 2, 3, etc.)
-  boundary_end  INTEGER NOT NULL DEFAULT 0,  -- Cumulative visible end boundary for this unlock
-  granted_count INTEGER NOT NULL DEFAULT 0,  -- How many new posts this unlock added
+  boundary_end  INTEGER NOT NULL DEFAULT 0,  -- Current visible boundary for this user+account
   job_id        TEXT,
   unlocked_at   TEXT NOT NULL,
-  UNIQUE(user_id, account_id, stage)  -- One unlock per user per account per stage
+  UNIQUE(user_id, account_id)
 );
 CREATE INDEX IF NOT EXISTS idx_unlocks_user_account ON unlocks(user_id, account_id);
 

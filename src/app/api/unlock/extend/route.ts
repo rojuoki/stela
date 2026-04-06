@@ -177,8 +177,7 @@ export async function POST(req: NextRequest) {
         }, { status: 500 });
       }
 
-      // Phase 8: Update user entitlement to targetCount without excavating
-      // granted_count reflects newly granted amount (targetCount - currentVisibleBoundary)
+      // Update user entitlement to targetCount without excavating
       await upsertUnlockBoundary(
         userId, 
         account.account_id, 

@@ -89,56 +89,32 @@ export async function getNewestCachedTweetTimestamp(accountId: string): Promise<
   return result.rows[0].newest_created_at ?? null;
 }
 
-/** Check if user has unlocked a specific stage for an account */
+/**
+ * Check if user has unlocked up to at least a given boundary for an account.
+ * Replaces hasUserUnlockedStage: stage N ≈ boundary >= N*100.
+ */
 export async function hasUserUnlockedStage(userId: string, accountId: string, stage: number): Promise<boolean> {
-  const result = await pgQuery("SELECT 1 FROM unlocks WHERE user_id = $1 AND account_id = $2 AND stage = $3", [userId, accountId, stage]);
-  return result.rows.length > 0;
+  const boundary = await getUserBoundaryEndPg(userId, accountId);
+  return boundary >= stage * 100;
 }
 
-/** Get the highest stage unlocked by a user for an account (returns 0 if none) */
-export async function getUserHighestUnlockedStage(userId: string, accountId: string): Promise<number> {
-  const result = await pgQuery("SELECT MAX(stage) as max_stage FROM unlocks WHERE user_id = $1 AND account_id = $2", [userId, accountId]);
-  if (result.rows.length === 0) return 0;
-  return result.rows[0].max_stage ?? 0;
-}
-
-/* REMOVED: getUserBoundaryEnd - replaced with getUserBoundaryEndPg */
-
-/** Get user's total unlocked count for an account (sum of all granted_count) */
-export async function getUserTotalUnlockedCount(userId: string, accountId: string): Promise<number> {
-  const result = await pgQuery("SELECT SUM(granted_count) as total_granted FROM unlocks WHERE user_id = $1 AND account_id = $2", [userId, accountId]);
-  if (result.rows.length === 0) return 0;
-  return result.rows[0].total_granted ?? 0;
-}
+/* REMOVED: getUserHighestUnlockedStage — no longer needed (use boundary directly) */
+/* REMOVED: getUserBoundaryEnd — replaced with getUserBoundaryEndPg */
+/* REMOVED: getUserTotalUnlockedCount — granted_count column removed */
 
 /** Check if user already unlocked this account (boundary-based visibility check) */
 export async function hasUserUnlockedAccount(userId: string, accountId: string): Promise<boolean> {
   return (await getUserBoundaryEndPg(userId, accountId)) > 0;
 }
 
-/** Record stage unlock with boundary data (idempotent via UNIQUE constraint) */
-export async function recordStageUnlock(
-  userId: string, 
-  accountId: string, 
-  stage: number, 
-  boundaryEnd: number,
-  grantedCount: number,
-  jobId: string
-): Promise<void> {
-  await pgQuery(`
-    INSERT INTO unlocks (user_id, account_id, stage, boundary_end, granted_count, job_id, unlocked_at)
-    VALUES ($1, $2, $3, $4, $5, $6, $7)
-    ON CONFLICT (user_id, account_id, stage) DO NOTHING
-  `, [userId, accountId, stage, boundaryEnd, grantedCount, jobId, new Date().toISOString()]);
+/** @deprecated Use upsertUnlockBoundary from unlockWrite.ts instead */
+export async function recordStageUnlock(): Promise<void> {
+  throw new Error("recordStageUnlock is removed — use upsertUnlockBoundary");
 }
 
-/** Record unlock (backward compatibility - records Stage 1 unlock) */
-export async function recordUnlock(userId: string, accountId: string, jobId: string): Promise<void> {
-  // For backward compatibility, we need to calculate boundary_end and granted_count
-  // This is a transitional function - new code should use recordStageUnlock directly
-  const tweetCount = await getCachedTweetCount(accountId);
-  const boundaryEnd = Math.min(100, tweetCount); // Stage 1 default boundary
-  await recordStageUnlock(userId, accountId, 1, boundaryEnd, boundaryEnd, jobId);
+/** @deprecated Use upsertUnlockBoundary from unlockWrite.ts instead */
+export async function recordUnlock(): Promise<void> {
+  throw new Error("recordUnlock is removed — use upsertUnlockBoundary");
 }
 
 /**
@@ -516,9 +492,7 @@ export interface UnlockedAccountEntry {
 
 export interface DevUnlockEntry {
   account_id: string;
-  stage: number;
   boundary_end: number;
-  granted_count: number;
   job_id: string;
   unlocked_at: string;
   username: string | null;
@@ -672,10 +646,10 @@ export async function getDatabaseHealthPg(): Promise<{ healthy: boolean; dbValue
 export async function hasUserUnlockedAccountPg(userId: string, accountId: string): Promise<boolean> {
   try {
     const result = await pgQuery(
-      "SELECT MAX(boundary_end) as max_boundary FROM unlocks WHERE user_id = $1 AND account_id = $2",
+      "SELECT boundary_end FROM unlocks WHERE user_id = $1 AND account_id = $2",
       [userId, accountId]
     );
-    return (result.rows[0]?.max_boundary || 0) > 0;
+    return result.rows.length > 0 && (result.rows[0].boundary_end || 0) > 0;
   } catch (error) {
     console.error("[repository] hasUserUnlockedAccountPg error:", error);
     throw error;
@@ -1223,43 +1197,17 @@ export async function getTweetsByAccountRangePg(accountId: string, offset: numbe
 }
 
 /**
- * Check if user has unlocked a specific stage (Postgres version).
+ * Check if user has unlocked up to at least a given boundary (Postgres version).
+ * Replaces stage-based check: stage N ≈ boundary >= N*100.
  */
 export async function hasUserUnlockedStagePg(userId: string, accountId: string, stage: number): Promise<boolean> {
-  try {
-    const result = await pgQuery(
-      "SELECT 1 FROM unlocks WHERE user_id = $1 AND account_id = $2 AND stage = $3",
-      [userId, accountId, stage]
-    );
-    return result.rows.length > 0;
-  } catch (error) {
-    console.error("[repository] hasUserUnlockedStagePg error:", error);
-    throw error;
-  }
+  const boundary = await getUserBoundaryEndPg(userId, accountId);
+  return boundary >= stage * 100;
 }
 
-/**
- * Record stage unlock (Postgres version).
- */
-export async function recordStageUnlockPg(
-  userId: string, 
-  accountId: string, 
-  stage: number, 
-  boundaryEnd: number,
-  grantedCount: number,
-  jobId: string
-): Promise<void> {
-  try {
-    await pgQuery(
-      `INSERT INTO unlocks (user_id, account_id, stage, boundary_end, granted_count, job_id, unlocked_at)
-       VALUES ($1, $2, $3, $4, $5, $6, NOW())
-       ON CONFLICT (user_id, account_id, stage) DO NOTHING`,
-      [userId, accountId, stage, boundaryEnd, grantedCount, jobId]
-    );
-  } catch (error) {
-    console.error("[repository] recordStageUnlockPg error:", error);
-    throw error;
-  }
+/** @deprecated Use upsertUnlockBoundary from unlockWrite.ts instead */
+export async function recordStageUnlockPg(): Promise<void> {
+  throw new Error("recordStageUnlockPg is removed — use upsertUnlockBoundary");
 }
 
 /**
@@ -1273,13 +1221,12 @@ export async function getUserUnlockedAccountsPg(userId: string): Promise<Unlocke
          u.account_id,
          a.username,
          a.created_at               AS account_created_at,
-         MAX(u.boundary_end)        AS boundary_end,
-         MAX(u.unlocked_at)         AS unlocked_at
+         u.boundary_end,
+         u.unlocked_at
        FROM unlocks u
        LEFT JOIN accounts a ON a.account_id = u.account_id
        WHERE u.user_id = $1
-       GROUP BY u.account_id, a.username, a.created_at
-       ORDER BY MAX(u.unlocked_at) DESC`,
+       ORDER BY u.unlocked_at DESC`,
       [userId]
     );
     return result.rows as UnlockedAccountEntry[];
@@ -1289,18 +1236,9 @@ export async function getUserUnlockedAccountsPg(userId: string): Promise<Unlocke
   }
 }
 
-/**
- * Record basic unlock (backward compatibility) (Postgres version).
- */
-export async function recordUnlockPg(userId: string, accountId: string, jobId: string): Promise<void> {
-  try {
-    const tweetCount = await getCachedTweetCountPg(accountId);
-    const boundaryEnd = Math.min(100, tweetCount);
-    await recordStageUnlockPg(userId, accountId, 1, boundaryEnd, boundaryEnd, jobId);
-  } catch (error) {
-    console.error("[repository] recordUnlockPg error:", error);
-    throw error;
-  }
+/** @deprecated Use upsertUnlockBoundary from unlockWrite.ts instead */
+export async function recordUnlockPg(): Promise<void> {
+  throw new Error("recordUnlockPg is removed — use upsertUnlockBoundary");
 }
 
 /**
@@ -1547,9 +1485,7 @@ export async function getDevUnlocksPg(userId: string): Promise<DevUnlockEntry[]>
     const result = await pgQuery(`
       SELECT
          u.account_id,
-         u.stage,
          u.boundary_end,
-         u.granted_count,
          u.job_id,
          u.unlocked_at,
          a.username,
@@ -1560,7 +1496,7 @@ export async function getDevUnlocksPg(userId: string): Promise<DevUnlockEntry[]>
        LEFT JOIN accounts a ON a.account_id = u.account_id
        LEFT JOIN jobs     j ON j.id          = u.job_id
        WHERE u.user_id = $1
-       ORDER BY u.unlocked_at DESC, u.stage ASC
+       ORDER BY u.unlocked_at DESC
     `, [userId]);
     
     return result.rows as DevUnlockEntry[];
@@ -2113,12 +2049,12 @@ export async function getHoldByJobIdPg(jobId: string): Promise<{ id: string; use
 export async function getUserBoundaryEndPg(userId: string, accountId: string): Promise<number> {
   try {
     const result = await pgQuery(
-      "SELECT MAX(boundary_end) as max_boundary FROM unlocks WHERE user_id = $1 AND account_id = $2",
+      "SELECT boundary_end FROM unlocks WHERE user_id = $1 AND account_id = $2",
       [userId, accountId]
     );
     
     if (result.rows.length === 0) return 0;
-    return result.rows[0].max_boundary ?? 0;
+    return result.rows[0].boundary_end ?? 0;
   } catch (error) {
     console.error("[repository] getUserBoundaryEndPg error:", error);
     throw error;

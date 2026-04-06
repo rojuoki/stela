@@ -36,21 +36,16 @@ export async function upsertUnlockBoundary(
     return;
   }
 
-  // Stage is a mechanical derivation for the current schema's UNIQUE constraint.
-  // It will be removed in Phase 2 when the schema moves to UNIQUE(user_id, account_id).
-  const stage = Math.ceil(newBoundary / 100);
-
   try {
     await pgQuery(
-      `INSERT INTO unlocks (user_id, account_id, stage, boundary_end, granted_count, job_id, unlocked_at)
-       VALUES ($1, $2, $3, $4, $5, $6, NOW())
-       ON CONFLICT (user_id, account_id, stage) DO UPDATE SET
+      `INSERT INTO unlocks (user_id, account_id, boundary_end, job_id, unlocked_at)
+       VALUES ($1, $2, $3, $4, NOW())
+       ON CONFLICT (user_id, account_id) DO UPDATE SET
          boundary_end = GREATEST(unlocks.boundary_end, EXCLUDED.boundary_end),
-         granted_count = EXCLUDED.granted_count,
          job_id = EXCLUDED.job_id,
          unlocked_at = EXCLUDED.unlocked_at
        WHERE EXCLUDED.boundary_end > unlocks.boundary_end`,
-      [userId, accountId, stage, newBoundary, newBoundary, jobId],
+      [userId, accountId, newBoundary, jobId],
     );
   } catch (error) {
     console.error("[unlockWrite] upsertUnlockBoundary error:", error);
