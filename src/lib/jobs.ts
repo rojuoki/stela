@@ -506,30 +506,7 @@ export async function createAndRunJob(
   return jobId;
 }
 
-/**
- * Create a stage expansion job (Stage 2, Stage 3) (Postgres version).
- * Uses boundary-based validation instead of stage-based validation.
- */
-export async function createStageExpansionJob(
-  username: string,
-  targetStage: number,
-  holdId?: string,
-  userId: string = "anonymous",
-): Promise<{ jobId: string; error?: never } | { error: string; jobId?: never }> {
-  if (targetStage <= 1) {
-    return { error: "Use createAndRunJob for Stage 1" };
-  }
-
-  try {
-    // Create job using createAndRunJob with the stage parameter
-    const jobId = await createAndRunJob(username, null, holdId, targetStage, false, userId);
-    console.log(`[jobs] Created stage expansion job ${jobId} for @${username} Stage ${targetStage}`);
-    return { jobId };
-  } catch (error) {
-    console.error(`[jobs] Failed to create stage expansion job:`, error);
-    return { error: `Failed to create stage expansion job: ${error instanceof Error ? error.message : 'Unknown error'}` };
-  }
-}
+/* REMOVED: createStageExpansionJob — stage expansion replaced by boundary-based extend */
 
 /**
  * Create additional excavation job for Phase 8.
@@ -801,10 +778,6 @@ async function runJobAsync(jobId: string): Promise<void> {
             initialCheckpoint,
             jobId,
           );
-        } else {
-          // ── Deprecated Stage 2+ Jobs ──
-          console.error(`[jobs] Unexpected Stage ${jobStage} job for @${username} - Phase 8 should use additional excavation instead`);
-          throw new Error(`Stage ${jobStage} jobs are deprecated in favor of boundary-based additional excavation`);
         }
       } catch (e: unknown) {
         // If xfetch threw XApiStop("RATE_LIMIT") and it wasn't caught inside
@@ -927,56 +900,34 @@ async function runJobAsync(jobId: string): Promise<void> {
           `[additional-excavation] Phase 8 unlock: user=${requestingUserId}, account=${result.accountId}, ` +
             `finalBoundary=${finalBoundary}, previousBoundary=${previousBoundary}, granted=${grantedCount}`,
         );
-      } else if (jobStage === 1) {
-        const useCacheForBoundary =
+      } else {
+        // Standard excavation: compute boundary from cache or fetchedCount
+        const timelineExhausted =
           result.timelineExhausted === true &&
           result.stopReason === "ACCOUNT_HAS_LESS_THAN_LIMIT";
 
-        if (useCacheForBoundary) {
+        let boundaryEnd: number;
+        if (timelineExhausted) {
           const newCached = await getCachedTweetCountPg(result.accountId);
-          const boundaryEnd = Math.min(limit, newCached);
-          const grantedCount = Math.max(0, boundaryEnd - previousBoundary);
-
+          boundaryEnd = Math.min(limit, newCached);
           console.log(
-            `[jobs] Stage 1 timeline exhausted — cache-based boundary: cached=${newCached}, limit=${limit}, ` +
-              `boundaryEnd=${boundaryEnd}, previousBoundary=${previousBoundary}`,
+            `[jobs] Timeline exhausted — cache-based boundary: cached=${newCached}, limit=${limit}, boundaryEnd=${boundaryEnd}`,
           );
+        } else {
+          boundaryEnd = result.fetchedCount;
+        }
 
-          if (boundaryEnd > previousBoundary && boundaryEnd > 0) {
-            await upsertUnlockBoundary(
-              requestingUserId,
-              result.accountId,
-              boundaryEnd,
-              jobId,
-            );
-          }
-        } else if (result.fetchedCount > 0) {
-          const boundaryEnd = result.fetchedCount;
-
+        if (boundaryEnd > previousBoundary && boundaryEnd > 0) {
           await upsertUnlockBoundary(
             requestingUserId,
             result.accountId,
             boundaryEnd,
             jobId,
           );
-
           console.log(
             `[jobs] Recorded unlock: user=${requestingUserId}, account=${result.accountId}, boundary=${boundaryEnd}`,
           );
         }
-      } else if (result.fetchedCount > 0) {
-        const boundaryEnd = result.fetchedCount;
-
-        await upsertUnlockBoundary(
-          requestingUserId,
-          result.accountId,
-          boundaryEnd,
-          jobId,
-        );
-
-        console.log(
-          `[jobs] Recorded unlock: user=${requestingUserId}, account=${result.accountId}, boundary=${boundaryEnd}`,
-        );
       }
 
       if (hold) {
