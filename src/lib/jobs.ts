@@ -954,7 +954,7 @@ async function runJobAsync(jobId: string): Promise<void> {
         await upsertDiamondSnapshotPg(
           requestingUserId,
           result.accountId,
-          result.presentHorizonSweepComplete === true,
+          result.timelineExhausted === true,
         );
       } catch (e) {
         console.error(
