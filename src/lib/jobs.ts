@@ -49,7 +49,7 @@ import {
 } from "./repository";
 import { tokenPool } from "./tokenPool";
 import { XApiStop } from "./xclient";
-import { createSyntheticExcavationResult } from "./stageResults";
+// createSyntheticExcavationResult removed with stage reuse logic
 import { computeTargetCount } from "./unlockPlanning";
 
 /** Persisted inside jobs.resume_state next to ExcavationCheckpoint so 429 resume keeps Phase 8 parameters. */
@@ -706,33 +706,7 @@ async function runJobAsync(jobId: string): Promise<void> {
     // Get account info
     const existingAccount = await getAccountByUsernamePg(username);
 
-    // ── Stage Reuse Logic (BYPASS for Additional Excavation) ─────────────────────
-    
-    if (!isAdditionalExcavation && existingAccount && !isForceRerun) {
-      const existingStageResult = await getStageResultPg(existingAccount.account_id, jobStage);
-      if (existingStageResult) {
-        console.log(
-          `[stage] Reusing existing Stage ${jobStage} result for @${username}: ${existingStageResult.collected_count}/${existingStageResult.target_count} tweets (job_id=${existingStageResult.job_id})`
-        );
-        
-        // Create a synthetic excavation result based on the stored stage result
-        result = createSyntheticExcavationResult(
-          existingStageResult, 
-          username, 
-          existingAccount.created_at || new Date().toISOString()
-        );
-        
-        // Skip excavation entirely - we have our result
-      }
-    } else if (isForceRerun) {
-      console.log(
-        `[stage] Force rerun detected for job ${jobId} (@${username} Stage ${jobStage}) - bypassing existing stage result reuse`
-      );
-    } else if (isAdditionalExcavation) {
-      console.log(
-        `[additional-excavation] @${username} BYPASSING stage reuse logic - must excavate missing=${missingCount} posts`
-      );
-    }
+    // Stage reuse removed: each user gets independent excavation for boundary-based unlocks
 
     // Only run excavation if we don't have a cached stage result
     let ranExcavationEngine = false;
