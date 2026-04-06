@@ -75,11 +75,6 @@ export interface ExtendPlan {
   excavationStartDate: Date | null;
   /** If excavation: how many posts to excavate */
   excavationTargetCount: number;
-  /** Internal stage numbers for DB operations */
-  internal: {
-    currentStage: number;
-    nextStage: number;
-  };
 }
 
 export interface InitialUnlockPlan {
@@ -117,10 +112,8 @@ export interface AdditionalExcavationPlan {
   userId: string;
   /** Account being requested */
   accountId: string;
-  /** Requested stage (planning label) */
-  requestedStage: number;
-  /** Target count based on requested stage */
-  targetCount: number;
+  /** Target boundary (currentVisibleBoundary + 100) */
+  targetBoundary: number;
   /** Posts currently cached in DB for this account (account progress) */
   currentCachedCount: number;
   /** Current user visibility boundary (user entitlement) */
@@ -260,51 +253,33 @@ export async function planGuestUnlock(
 
 /**
  * Plan additional excavation for user+account.
- * This is the Phase 7 planning function for extend/additional excavation requests.
- * Provides explicit and inspectable planning results following core data model rules.
+ * Target boundary = currentVisibleBoundary + 100 (exact, not rounded to stage).
  */
 export async function planAdditionalExcavation(
   userId: string,
   accountId: string, 
-  requestedStage: number
+  targetBoundary: number
 ): Promise<AdditionalExcavationPlan> {
-  // Step 1: Determine target count from requested stage (stage as planning label)
-  const targetCount = requestedStage * 100; // Stage 2 = 200, Stage 3 = 300, etc.
+  // Current cached count (account progress from cached tweets only)
+  const currentCachedCount = await getCachedTweetCountPg(accountId);
   
-  // Step 2: Current cached count (account progress from cached tweets only)
-  let currentCachedCount = await getCachedTweetCountPg(accountId);
+  // Current visible boundary (user entitlement from boundary_end only)
+  const currentVisibleBoundary = await getUserBoundaryEndPg(userId, accountId);
   
-  // TEMPORARY: For testing excavate_more path, simulate insufficient cache (anonymous only)
-  if (userId === 'anonymous' && requestedStage > 2) {
-    currentCachedCount = Math.max(0, targetCount - 50); // Force missingCount = 50
-    console.log(`[DEBUG] Simulating cache shortage for excavate_more test: cached=${currentCachedCount}, target=${targetCount}`);
-  }
+  // Missing count based on target vs cached
+  const missingCount = Math.max(0, targetBoundary - currentCachedCount);
   
-  // Step 3: Current visible boundary (user entitlement from boundary_end only)
-  let currentVisibleBoundary = await getUserBoundaryEndPg(userId, accountId);
-  
-  // TEMPORARY: For testing with anonymous users only
-  if (userId === 'anonymous' && currentVisibleBoundary === 0) {
-    const testUserBoundary = requestedStage > 1 ? (requestedStage - 1) * 100 : 100;
-    console.log(`[DEBUG] Using test boundary ${testUserBoundary} for user ${userId}`);
-    currentVisibleBoundary = testUserBoundary;
-  }
-  
-  // Step 4: Calculate missing count based on target vs cached
-  const missingCount = Math.max(0, targetCount - currentCachedCount);
-  
-  // Step 5: Determine execution mode
+  // Execution mode
   const needToExcavate = missingCount > 0;
   const executionMode: "grant_only" | "excavate_more" = needToExcavate ? "excavate_more" : "grant_only";
   
-  // Step 6: Expected final boundary (user will see up to target count)
-  const expectedFinalBoundary = Math.min(targetCount, currentCachedCount + missingCount);
+  // Expected final boundary
+  const expectedFinalBoundary = Math.min(targetBoundary, currentCachedCount + missingCount);
   
   return {
     userId,
     accountId,
-    requestedStage,
-    targetCount,
+    targetBoundary,
     currentCachedCount,
     currentVisibleBoundary,
     needToExcavate,
@@ -324,29 +299,20 @@ export function validateAdditionalExcavationPlan(plan: AdditionalExcavationPlan)
 } {
   const errors: string[] = [];
 
-  // Rule: targetCount comes from requestedStage
-  const expectedTargetCount = plan.requestedStage * 100;
-  if (plan.targetCount !== expectedTargetCount) {
-    errors.push(`targetCount (${plan.targetCount}) should be requestedStage * 100 (${expectedTargetCount})`);
-  }
-
-  // Rule: missingCount = max(0, targetCount - currentCachedCount) 
-  const expectedMissingCount = Math.max(0, plan.targetCount - plan.currentCachedCount);
+  // Rule: missingCount = max(0, targetBoundary - currentCachedCount) 
+  const expectedMissingCount = Math.max(0, plan.targetBoundary - plan.currentCachedCount);
   if (plan.missingCount !== expectedMissingCount) {
-    errors.push(`missingCount (${plan.missingCount}) should be max(0, targetCount - currentCachedCount) (${expectedMissingCount})`);
+    errors.push(`missingCount (${plan.missingCount}) should be max(0, targetBoundary - currentCachedCount) (${expectedMissingCount})`);
   }
 
-  // Rule: if missingCount == 0, executionMode = "grant_only"
   if (plan.missingCount === 0 && plan.executionMode !== "grant_only") {
     errors.push(`executionMode should be "grant_only" when missingCount is 0`);
   }
 
-  // Rule: if missingCount > 0, executionMode = "excavate_more" 
   if (plan.missingCount > 0 && plan.executionMode !== "excavate_more") {
     errors.push(`executionMode should be "excavate_more" when missingCount > 0`);
   }
 
-  // Rule: needToExcavate should match missingCount > 0
   if (plan.needToExcavate !== (plan.missingCount > 0)) {
     errors.push(`needToExcavate (${plan.needToExcavate}) should match missingCount > 0 (${plan.missingCount > 0})`);
   }
@@ -383,10 +349,6 @@ export async function planExtension(userId: string, accountId: string): Promise<
     excavationContinueFrom = excavationStartDate;
   }
   
-  // Step 5: Internal stage mapping (for DB operations only)
-  const currentStage = Math.ceil(currentBoundary / 100);
-  const nextStage = Math.ceil(nextBoundary / 100);
-  
   const boundary: UnlockBoundary = {
     current: currentBoundary,
     next: nextBoundary,
@@ -401,10 +363,6 @@ export async function planExtension(userId: string, accountId: string): Promise<
     strategy: cacheHit ? "cache-only" : "excavation",
     excavationStartDate,
     excavationTargetCount: missingCount,
-    internal: {
-      currentStage,
-      nextStage,
-    },
   };
 }
 

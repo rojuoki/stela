@@ -136,20 +136,13 @@ export async function POST(req: NextRequest) {
     }
 
     // Phase 8: Use additional excavation planning result for execution
-    let currentBoundary = account ? await getUserBoundaryEndPg(userId, account.account_id) : 0;
+    const currentBoundary = account ? await getUserBoundaryEndPg(userId, account.account_id) : 0;
+    const targetBoundary = currentBoundary + 100;
     
-    // TEMPORARY: For testing with anonymous users only
-    if (userId === 'anonymous' && currentBoundary === 0) {
-      currentBoundary = 200; // Simulate Stage 2 completion for testing excavate_more
-      console.log(`[DEBUG] Using test currentBoundary ${currentBoundary} for user ${userId} (testing excavate_more)`);
-    }
-    
-    const nextStage = Math.ceil((currentBoundary + 100) / 100);
-    
-    const plan = await planAdditionalExcavation(userId, account.account_id, nextStage);
+    const plan = await planAdditionalExcavation(userId, account.account_id, targetBoundary);
     console.log(`[extend] @${username} Phase 8 execution plan:`, {
       executionMode: plan.executionMode,
-      targetCount: plan.targetCount,
+      targetCount: plan.targetBoundary,
       currentCachedCount: plan.currentCachedCount,
       currentVisibleBoundary: plan.currentVisibleBoundary,
       missingCount: plan.missingCount,
@@ -169,7 +162,7 @@ export async function POST(req: NextRequest) {
       }
 
       // Spend credit immediately (no excavation needed)
-      const spent = await spendCreditsPg(userId, 1, `Grant access to ${plan.targetCount} posts for @${username} (no excavation)`);
+      const spent = await spendCreditsPg(userId, 1, `Grant access to ${plan.targetBoundary} posts for @${username} (no excavation)`);
       if (!spent) {
         return NextResponse.json({
           error: "Failed to deduct credits",
@@ -181,24 +174,24 @@ export async function POST(req: NextRequest) {
       await upsertUnlockBoundary(
         userId, 
         account.account_id, 
-        plan.targetCount,
+        plan.targetBoundary,
         "additional-grant-only"
       );
       
       // Calculate result range for newly unlocked block
-      const resultRange = calculateResultRange(plan.currentVisibleBoundary, plan.targetCount);
+      const resultRange = calculateResultRange(plan.currentVisibleBoundary, plan.targetBoundary);
       
       // Extract posts from existing cache (no excavation occurred)
       const newlyUnlockedPosts = await extractNewlyUnlockedPostsPgByRange(account.account_id, resultRange);
 
-      console.log(`[extend] Grant-only for @${username}: ${plan.currentVisibleBoundary} → ${plan.targetCount} (no excavation)`);
+      console.log(`[extend] Grant-only for @${username}: ${plan.currentVisibleBoundary} → ${plan.targetBoundary} (no excavation)`);
 
       return NextResponse.json({
         success: true,
         executionMode: "grant_only",
         boundary: {
           previous: plan.currentVisibleBoundary,
-          new: plan.targetCount,
+          new: plan.targetBoundary,
         },
         range: {
           start: resultRange.start,
@@ -228,7 +221,7 @@ export async function POST(req: NextRequest) {
       // Create additional excavation job using existing excavation engine
       const jobId = await createAdditionalExcavationJob(
         username,
-        plan.requestedStage,
+        plan.targetBoundary,
         plan.missingCount, // How many tweets we need to excavate
         userId
       );
@@ -248,7 +241,7 @@ export async function POST(req: NextRequest) {
         }, { status: 500 });
       }
 
-      console.log(`[extend] Created additional excavation job ${jobId} for @${username}: need ${plan.missingCount} more posts to reach ${plan.targetCount}`);
+      console.log(`[extend] Created additional excavation job ${jobId} for @${username}: need ${plan.missingCount} more posts to reach ${plan.targetBoundary}`);
 
       return NextResponse.json({
         success: true,
@@ -258,7 +251,7 @@ export async function POST(req: NextRequest) {
         planning: {
           currentCachedCount: plan.currentCachedCount,
           currentVisibleBoundary: plan.currentVisibleBoundary,
-          targetCount: plan.targetCount,
+          targetCount: plan.targetBoundary,
           missingCount: plan.missingCount,
           expectedFinalBoundary: plan.expectedFinalBoundary,
         },

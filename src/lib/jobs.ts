@@ -57,7 +57,7 @@ const ADDITIONAL_EXCAVATION_TYPE = "additional_excavation" as const;
 
 export interface AdditionalExcavationContext {
   type: typeof ADDITIONAL_EXCAVATION_TYPE;
-  targetStage: number;
+  targetBoundary: number;
   missingCount: number;
   continuationStartTime: string;
   continuationBased?: boolean;
@@ -69,7 +69,7 @@ function isAdditionalExcavationShape(obj: unknown): obj is Record<string, unknow
   const o = obj as Record<string, unknown>;
   return (
     o.type === ADDITIONAL_EXCAVATION_TYPE &&
-    typeof o.targetStage === "number" &&
+    typeof o.targetBoundary === "number" &&
     typeof o.missingCount === "number" &&
     typeof o.continuationStartTime === "string"
   );
@@ -78,7 +78,7 @@ function isAdditionalExcavationShape(obj: unknown): obj is Record<string, unknow
 function normalizeAdditionalExcavationContext(src: Record<string, unknown>): AdditionalExcavationContext {
   const ctx: AdditionalExcavationContext = {
     type: ADDITIONAL_EXCAVATION_TYPE,
-    targetStage: Number(src.targetStage),
+    targetBoundary: Number(src.targetBoundary),
     missingCount: Number(src.missingCount),
     continuationStartTime: String(src.continuationStartTime),
   };
@@ -515,7 +515,7 @@ export async function createAndRunJob(
  */
 export async function createAdditionalExcavationJob(
   username: string,
-  targetStage: number,
+  targetBoundary: number,
   missingCount: number,
   userId: string = "anonymous",
 ): Promise<string | null> {
@@ -542,7 +542,7 @@ export async function createAdditionalExcavationJob(
   // Prepare additional excavation metadata BEFORE job creation
   const additionalExcavationMetadata = {
     type: 'additional_excavation',
-    targetStage,
+    targetBoundary,
     missingCount,
     continuationBased: true,
     continuationStartTime,
@@ -567,7 +567,7 @@ export async function createAdditionalExcavationJob(
   // NOW register with queue to start execution
   globalQueue.register(jobId);
   
-  console.log(`[additional-excavation] Created job ${jobId} for @${username}: targetStage=${targetStage}, missing=${missingCount} (stored as stage=1 with metadata)`);
+  console.log(`[additional-excavation] Created job ${jobId} for @${username}: targetBoundary=${targetBoundary}, missing=${missingCount}`);
   return jobId;
 }
 
@@ -659,12 +659,12 @@ async function runJobAsync(jobId: string): Promise<void> {
 
     if (isAdditionalExcavation && additionalExcavationData) {
       console.log(
-        `[additional-excavation] @${username} IDENTIFIED as Phase 8: missing=${missingCount} targetStage=${additionalExcavationData.targetStage}`,
+        `[additional-excavation] @${username} IDENTIFIED: missing=${missingCount} targetBoundary=${additionalExcavationData.targetBoundary}`,
       );
     }
 
     // Persist checkpoint to DB at every safe boundary inside the excavation.
-    // Phase 8: merge additional_excavation_context so 429 resume keeps targetStage / missingCount / continuation.
+    // Merge additional_excavation_context so 429 resume keeps targetBoundary / missingCount / continuation.
     const saveCheckpoint = (cp: ExcavationCheckpoint): void => {
       const payload: Record<string, unknown> = additionalContextPayload
         ? {
@@ -873,7 +873,7 @@ async function runJobAsync(jobId: string): Promise<void> {
       if (isAdditionalExcavation && additionalExcavationData) {
         // Phase 8: entitlement from cache totals — not gated on fetchedCount (timeline may be exhausted with 0 in-run fetch).
         const newCachedCount = await getCachedTweetCountPg(result.accountId);
-        const targetCount = additionalExcavationData.targetStage * 100;
+        const targetCount = additionalExcavationData.targetBoundary;
         const finalBoundary = Math.min(targetCount, newCachedCount);
         const grantedCount = Math.max(0, finalBoundary - previousBoundary);
 
