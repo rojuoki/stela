@@ -82,6 +82,8 @@ export async function GET(req: NextRequest) {
 
       const isUnlocked = await hasUserUnlockedAccountPg(userId, account.account_id);
       const diamondActive = await getDiamondActivePg(userId, account.account_id);
+      
+      console.log(`[unlock-status] userId=${userId}, accountId=${account.account_id}, isUnlocked=${isUnlocked}, diamondActive=${diamondActive}`);
 
       return NextResponse.json({
         unlocked: isUnlocked,

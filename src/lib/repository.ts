@@ -484,6 +484,8 @@ export interface UnlockedAccountEntry {
   account_created_at: string | null;
   boundary_end: number;
   unlocked_at: string;
+  /** True when last persisted excavation marked timeline exhausted (user_account_excavation_meta). */
+  diamond_active: boolean;
 }
 
 /* REMOVED: getUserUnlockedAccounts - replaced with getUserUnlockedAccountsPg */
@@ -649,7 +651,13 @@ export async function hasUserUnlockedAccountPg(userId: string, accountId: string
       "SELECT boundary_end FROM unlocks WHERE user_id = $1 AND account_id = $2",
       [userId, accountId]
     );
-    return result.rows.length > 0 && (result.rows[0].boundary_end || 0) > 0;
+    const hasRows = result.rows.length > 0;
+    const boundary = hasRows ? result.rows[0].boundary_end : null;
+    const isUnlocked = hasRows && (boundary || 0) > 0;
+    
+    console.log(`[hasUserUnlockedAccountPg] userId=${userId}, accountId=${accountId}, hasRows=${hasRows}, boundary=${boundary}, isUnlocked=${isUnlocked}`);
+    
+    return isUnlocked;
   } catch (error) {
     console.error("[repository] hasUserUnlockedAccountPg error:", error);
     throw error;
@@ -1222,14 +1230,20 @@ export async function getUserUnlockedAccountsPg(userId: string): Promise<Unlocke
          a.username,
          a.created_at               AS account_created_at,
          u.boundary_end,
-         u.unlocked_at
+         u.unlocked_at,
+         COALESCE(m.diamond_active, false) AS diamond_active
        FROM unlocks u
        LEFT JOIN accounts a ON a.account_id = u.account_id
+       LEFT JOIN user_account_excavation_meta m
+         ON m.user_id = u.user_id AND m.account_id = u.account_id
        WHERE u.user_id = $1
        ORDER BY u.unlocked_at DESC`,
       [userId]
     );
-    return result.rows as UnlockedAccountEntry[];
+    return result.rows.map((row: UnlockedAccountEntry) => ({
+      ...row,
+      diamond_active: Boolean(row.diamond_active),
+    }));
   } catch (error) {
     console.error("[repository] getUserUnlockedAccountsPg error:", error);
     throw error;

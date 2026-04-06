@@ -945,9 +945,6 @@ async function runJobAsync(jobId: string): Promise<void> {
     }
 
     // 💎 snapshot (option A): overwrite when this job actually ran excavateEarliest (skip stage-reuse synthetic success).
-    console.log(
-      `[jobs] Diamond conditions: ranExcavationEngine=${ranExcavationEngine}, accountId=${result.accountId}, userId=${requestingUserId}, timelineExhausted=${result.timelineExhausted}`
-    );
     if (
       ranExcavationEngine &&
       result.accountId &&
@@ -959,17 +956,12 @@ async function runJobAsync(jobId: string): Promise<void> {
           result.accountId,
           result.timelineExhausted === true,
         );
-        console.log(
-          `[jobs] Diamond set: user=${requestingUserId}, account=${result.accountId}, value=${result.timelineExhausted}`
-        );
       } catch (e) {
         console.error(
           `[jobs] Job ${jobId}: failed to persist diamond snapshot (non-fatal):`,
           e,
         );
       }
-    } else {
-      console.log(`[jobs] Diamond skipped: conditions not met`);
     }
 
     // Update DB with result (including boundary info for additional excavation)

@@ -11,6 +11,7 @@ interface UnlockedAccount {
   account_created_at: string | null;
   boundary_end: number;
   unlocked_at: string;
+  diamond_active: boolean;
 }
 
 interface UnlocksResponse {
@@ -206,8 +207,13 @@ export default function MyUnlocksPage() {
                   <div className="flex-1">
                     <Link
                       href={`/user/${account.username || account.account_id}`}
-                      className="text-lg font-semibold text-zinc-200 hover:text-white transition-colors"
+                      className="inline-flex items-center gap-1.5 text-lg font-semibold text-zinc-200 hover:text-white transition-colors"
                     >
+                      {account.diamond_active && (
+                        <span className="text-base leading-none select-none" aria-hidden>
+                          💎
+                        </span>
+                      )}
                       @{account.username || "unknown"}
                     </Link>
                     <div className="mt-1">

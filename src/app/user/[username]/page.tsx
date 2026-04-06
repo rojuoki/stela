@@ -635,6 +635,7 @@ export default function UserPage() {
         );
         if (cancelled) return;
         const data = await res.json();
+        console.log('[unlock-status response]', JSON.stringify(data, null, 2));
         if (cancelled) return;
         if (!data.unlocked) return;
 
@@ -1046,13 +1047,7 @@ export default function UserPage() {
                         `Account previously unlocked • ${credits} credits available${subscription.plan === 'basic' ? ' • Basic subscriber' : ''}`
                       }
                     </p>
-                    {diamondActive && (
-                      <p className="text-sm text-center text-amber-600 font-medium mt-3 mb-1">
-                        💎 Congratulations! You've excavated all available posts. 
-                        <br />
-                        Check back in a few hours for any new content.
-                      </p>
-                    )}
+{/* Debug box removed */}
                   </div>
                 ) : (
                   <div className="text-center">
@@ -1238,6 +1233,13 @@ export default function UserPage() {
             cacheHit={false}
             resumeAt={null}
           />
+
+          {diamondActive && (
+            <p className="text-lg font-bold text-amber-600/95 mb-3 -mt-1">
+              <span aria-hidden>💎</span> Congratulations! You&apos;ve excavated all
+              available posts.
+            </p>
+          )}
 
           {error && (
             <div className="mb-4 flex items-center gap-2 text-red-300 text-sm px-4 py-3 bg-red-900/20 border border-red-800/50 rounded-lg">
