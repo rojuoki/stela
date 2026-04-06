@@ -78,6 +78,7 @@ export default function UserPage() {
 
   const [showExtendModal, setShowExtendModal] = useState(false);
   const [currentBoundary, setCurrentBoundary] = useState<number | null>(null);
+  const [diamondActive, setDiamondActive] = useState<boolean>(false);
   const [showBackToTop, setShowBackToTop] = useState(false);
 
   // Excavation state management - replaces /excavating page functionality
@@ -639,6 +640,7 @@ export default function UserPage() {
 
         setIsAlreadyUnlocked(true);
         setCurrentBoundary(data.boundaryEnd || data.count || 100);
+        setDiamondActive(data.diamondActive || false);
 
         const rs = rangeValid ? rangeStart : undefined;
         const re = rangeValid ? rangeEnd : undefined;
@@ -1044,6 +1046,13 @@ export default function UserPage() {
                         `Account previously unlocked • ${credits} credits available${subscription.plan === 'basic' ? ' • Basic subscriber' : ''}`
                       }
                     </p>
+                    {diamondActive && (
+                      <p className="text-sm text-center text-amber-600 font-medium mt-3 mb-1">
+                        💎 Congratulations! You've excavated all available posts. 
+                        <br />
+                        Check back in a few hours for any new content.
+                      </p>
+                    )}
                   </div>
                 ) : (
                   <div className="text-center">
