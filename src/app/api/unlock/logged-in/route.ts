@@ -1,13 +1,15 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getUserFromRequest } from "@/lib/auth";
+import { upsertUnlockBoundary } from "@/lib/unlockWrite";
 import { 
   getAccountByUsernamePg, 
   getTweetsByAccount, 
   createTemporaryUnlockPg,
   cleanupExpiredTemporaryUnlocksPg,
   spendCreditsPg,
-  recordUnlockPg
+  getCachedTweetCountPg,
 } from "@/lib/repository";
+import { computeTargetCount } from "@/lib/unlockPlanning";
 import { normalizeUsername } from "@/lib/validation";
 
 export async function POST(req: NextRequest) {
@@ -58,7 +60,10 @@ export async function POST(req: NextRequest) {
     }
 
     // Record the unlock in the official table
-    await recordUnlockPg(user.id, account.account_id, `logged-in-unlock-${Date.now()}`);
+    const cachedCount = await getCachedTweetCountPg(account.account_id);
+    const targetCount = computeTargetCount(account.created_at);
+    const boundary = Math.min(targetCount, cachedCount);
+    await upsertUnlockBoundary(user.id, account.account_id, boundary, `logged-in-unlock-${Date.now()}`);
 
     // Get cached tweets
     const tweets = await getTweetsByAccount(account.account_id);

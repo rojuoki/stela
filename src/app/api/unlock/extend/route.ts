@@ -21,6 +21,7 @@ import {
   calculateResultRange,
   extractNewlyUnlockedPostsPgByRange
 } from "@/lib/unlockPlanning";
+import { upsertUnlockBoundary } from "@/lib/unlockWrite";
 import { 
   getAccountByUsernamePg, 
   getCreditBalancePg, 
@@ -28,7 +29,6 @@ import {
   captureHeldPg,
   releaseHeldPg,
   spendCreditsPg,
-  recordStageUnlockPg,
   cleanupExpiredHoldsPg,
   getUserBoundaryEndPg,
   getExtendBlockedUntilPg,
@@ -179,13 +179,10 @@ export async function POST(req: NextRequest) {
 
       // Phase 8: Update user entitlement to targetCount without excavating
       // granted_count reflects newly granted amount (targetCount - currentVisibleBoundary)
-      const grantedCount = plan.targetCount - plan.currentVisibleBoundary;
-      await recordStageUnlockPg(
+      await upsertUnlockBoundary(
         userId, 
         account.account_id, 
-        plan.requestedStage, 
-        plan.targetCount,  // boundary_end reaches targetCount
-        grantedCount,      // newly granted amount only
+        plan.targetCount,
         "additional-grant-only"
       );
       
@@ -195,7 +192,7 @@ export async function POST(req: NextRequest) {
       // Extract posts from existing cache (no excavation occurred)
       const newlyUnlockedPosts = await extractNewlyUnlockedPostsPgByRange(account.account_id, resultRange);
 
-      console.log(`[extend] Grant-only for @${username}: ${plan.currentVisibleBoundary} → ${plan.targetCount}, granted=${grantedCount} (no excavation)`);
+      console.log(`[extend] Grant-only for @${username}: ${plan.currentVisibleBoundary} → ${plan.targetCount} (no excavation)`);
 
       return NextResponse.json({
         success: true,

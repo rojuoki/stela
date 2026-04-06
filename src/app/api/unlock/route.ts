@@ -2,14 +2,13 @@ import { NextRequest, NextResponse } from "next/server";
 import { createAndRunJob, createStageExpansionJob } from "@/lib/jobs";
 import { getStageResultPg } from "@/lib/repository";
 import { planInitialUnlockPg } from "@/lib/unlockPlanning";
+import { upsertUnlockBoundary } from "@/lib/unlockWrite";
 import {
   getAccountByUsernamePg,
   getCachedTweetCountPg,
   findActiveJobForUsernamePg,
   hasUserUnlockedAccountPg,
   hasUserUnlockedStagePg,
-  recordUnlockPg,
-  recordStageUnlockPg,
   getCreditBalancePg,
   holdCreditsPg,
   captureHeldPg,
@@ -104,7 +103,7 @@ export async function POST(req: NextRequest) {
       
       if (alreadyUnlocked) {
         // Free re-unlock for same user (already unlocked)
-        await recordStageUnlockPg(userId, account.account_id, requestedStage, plan.grantBoundary, plan.grantBoundary, "cache-hit-free");
+        await upsertUnlockBoundary(userId, account.account_id, plan.grantBoundary, "cache-hit-free");
         await recordApiCallPg("cache/unlock", true); // saved: no excavation needed
         console.log(`[unlock] Free cache hit for @${username} Stage ${requestedStage}: ${plan.currentCachedCount} tweets, user already unlocked`);
         
@@ -137,7 +136,7 @@ export async function POST(req: NextRequest) {
           }, { status: 500 });
         }
         
-        await recordStageUnlockPg(userId, account.account_id, requestedStage, plan.grantBoundary, plan.grantBoundary, "cache-hit-paid");
+        await upsertUnlockBoundary(userId, account.account_id, plan.grantBoundary, "cache-hit-paid");
         await recordApiCallPg("cache/unlock", true); // saved: tweets already in DB
 
         console.log(`[unlock] Paid cache hit for @${username} Stage ${requestedStage}: ${plan.currentCachedCount} tweets, 1 credit consumed`);

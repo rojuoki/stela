@@ -26,10 +26,10 @@
 
 import { randomUUID } from "crypto";
 import { excavateEarliest, type ExcavationCheckpoint, type ExcavationResult } from "./excavate";
+import { upsertUnlockBoundary } from "./unlockWrite";
 import { 
   captureHeldPg, 
   releaseHeldPg, 
-  recordStageUnlockPg,
   getStageResultPg, 
   storeStageResultPg,
   StageResult,
@@ -911,12 +911,10 @@ async function runJobAsync(jobId: string): Promise<void> {
         );
 
         if (finalBoundary > previousBoundary) {
-          await recordStageUnlockPg(
+          await upsertUnlockBoundary(
             requestingUserId,
             result.accountId,
-            additionalExcavationData.targetStage,
             finalBoundary,
-            grantedCount,
             "additional-excavation",
           );
         }
@@ -945,47 +943,39 @@ async function runJobAsync(jobId: string): Promise<void> {
           );
 
           if (boundaryEnd > previousBoundary && boundaryEnd > 0) {
-            await recordStageUnlockPg(
+            await upsertUnlockBoundary(
               requestingUserId,
               result.accountId,
-              jobStage,
               boundaryEnd,
-              grantedCount,
               jobId,
             );
           }
         } else if (result.fetchedCount > 0) {
           const boundaryEnd = result.fetchedCount;
-          const grantedCount = result.fetchedCount;
 
-          await recordStageUnlockPg(
+          await upsertUnlockBoundary(
             requestingUserId,
             result.accountId,
-            jobStage,
             boundaryEnd,
-            grantedCount,
             jobId,
           );
 
           console.log(
-            `[jobs] Recorded unlock: user=${requestingUserId}, account=${result.accountId}, stage=${jobStage}, boundary=${boundaryEnd}, granted=${grantedCount}`,
+            `[jobs] Recorded unlock: user=${requestingUserId}, account=${result.accountId}, boundary=${boundaryEnd}`,
           );
         }
       } else if (result.fetchedCount > 0) {
         const boundaryEnd = result.fetchedCount;
-        const grantedCount = result.fetchedCount;
 
-        await recordStageUnlockPg(
+        await upsertUnlockBoundary(
           requestingUserId,
           result.accountId,
-          jobStage,
           boundaryEnd,
-          grantedCount,
           jobId,
         );
 
         console.log(
-          `[jobs] Recorded unlock: user=${requestingUserId}, account=${result.accountId}, stage=${jobStage}, boundary=${boundaryEnd}, granted=${grantedCount}`,
+          `[jobs] Recorded unlock: user=${requestingUserId}, account=${result.accountId}, boundary=${boundaryEnd}`,
         );
       }
 

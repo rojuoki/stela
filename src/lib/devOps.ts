@@ -71,12 +71,9 @@ export async function devForceUnlock(
     [jobId, normalized, account.account_id, cap, 'succeeded', cap, now, now]
   );
 
-  // Upsert unlock record
-  await pgQuery(
-    `INSERT INTO unlocks (user_id, account_id, job_id, unlocked_at)
-     VALUES ($1, $2, $3, $4) ON CONFLICT (user_id, account_id) DO UPDATE SET job_id = $3, unlocked_at = $4`,
-    [userId, account.account_id, jobId, now]
-  );
+  // Upsert unlock record via unified write path
+  const { upsertUnlockBoundary } = await import("./unlockWrite");
+  await upsertUnlockBoundary(userId, account.account_id, cap, jobId);
 
   // Insert a placeholder tweet so getCachedTweetCount() > 0.
   // This lets /api/unlock return cache-hit (instead of queuing a new job).

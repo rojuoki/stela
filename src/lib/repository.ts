@@ -760,13 +760,12 @@ export async function transferTemporaryUnlockPg(token: string, userId: string): 
       [token]
     );
     
-    // Create official unlock record (using boundary defaults for now)
-    await pgQuery(
-      `INSERT INTO unlocks (user_id, account_id, stage, boundary_end, granted_count, job_id, unlocked_at)
-       VALUES ($1, $2, $3, $4, $5, $6, NOW())
-       ON CONFLICT (user_id, account_id, stage) DO NOTHING`,
-      [userId, tempUnlock.account_id, 1, 100, 100, `temp-transfer-${token}`]
-    );
+    // Create official unlock record using unified write path
+    // Compute boundary from actual cached data instead of hardcoding 100
+    const cachedCount = await getCachedTweetCountPg(tempUnlock.account_id);
+    const boundary = Math.min(100, cachedCount); // Stage 1 default target
+    const { upsertUnlockBoundary } = await import("./unlockWrite");
+    await upsertUnlockBoundary(userId, tempUnlock.account_id, boundary, `temp-transfer-${token}`);
     
     console.log(`[temporary-unlock] Transferred token ${token} to user ${userId} for account ${tempUnlock.account_id}`);
     return true;

@@ -2,13 +2,13 @@
  * Direct unlock operations - extracted from /api/unlock for reuse in webhooks
  */
 
+import { upsertUnlockBoundary } from "./unlockWrite";
 import { 
   getAccountByUsername,
   hasUserUnlockedAccount,
   hasUserUnlockedStage,
   getCreditBalance,
   spendCreditsPg,
-  recordStageUnlock,
   cleanupExpiredHoldsPg,
   giveCreditsPg,
   recordApiCall
@@ -83,7 +83,7 @@ export async function performDirectUnlock(
       
       if (alreadyUnlocked) {
         // Free re-unlock for same user (already unlocked)
-        await recordStageUnlock(userId, account.account_id, requestedStage, plan.grantBoundary, plan.grantBoundary, "paid-unlock-free");
+        await upsertUnlockBoundary(userId, account.account_id, plan.grantBoundary, "paid-unlock-free");
         await recordApiCall("cache/unlock", true);
         console.log(`[unlockDirect] Free cache hit for @${normalizedUsername} Stage ${requestedStage}`);
         
@@ -98,7 +98,7 @@ export async function performDirectUnlock(
         };
       } else {
         // First time unlock from cache - credit already paid via Stripe
-        await recordStageUnlock(userId, account.account_id, requestedStage, plan.grantBoundary, plan.grantBoundary, "paid-unlock-cache");
+        await upsertUnlockBoundary(userId, account.account_id, plan.grantBoundary, "paid-unlock-cache");
         await recordApiCall("cache/unlock", true);
 
         console.log(`[unlockDirect] Paid cache hit for @${normalizedUsername} Stage ${requestedStage}`);
