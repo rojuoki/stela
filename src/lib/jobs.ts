@@ -43,7 +43,9 @@ import {
   getHoldByJobIdPg,
   getNewestCachedTweetTimestampPg,
   getCachedTweetCountPg,
-  getUserBoundaryEndPg
+  getUserBoundaryEndPg,
+  setExtendCooldownAfterTimelineExhaustPg,
+  upsertDiamondSnapshotPg,
 } from "./repository";
 import { tokenPool } from "./tokenPool";
 import { XApiStop } from "./xclient";
@@ -756,7 +758,9 @@ async function runJobAsync(jobId: string): Promise<void> {
     }
 
     // Only run excavation if we don't have a cached stage result
+    let ranExcavationEngine = false;
     if (!result) {
+      ranExcavationEngine = true;
 
       try {
         if (isAdditionalExcavation && additionalExcavationData) {
@@ -1000,6 +1004,48 @@ async function runJobAsync(jobId: string): Promise<void> {
           );
           console.log(`[jobs] Credit ${released ? "released" : "release failed"} for job ${jobId}`);
         }
+      }
+    }
+
+    // Timeline exhausted: 24h extend cooldown for this user+account (logged-in only)
+    if (
+      result.timelineExhausted === true &&
+      result.accountId &&
+      requestingUserId !== "anonymous"
+    ) {
+      try {
+        await setExtendCooldownAfterTimelineExhaustPg(
+          requestingUserId,
+          result.accountId,
+        );
+        console.log(
+          `[jobs] Job ${jobId}: extend cooldown set 24h for user=${requestingUserId} account=${result.accountId} (timeline exhausted)`,
+        );
+      } catch (e) {
+        console.error(
+          `[jobs] Job ${jobId}: failed to set extend cooldown (non-fatal):`,
+          e,
+        );
+      }
+    }
+
+    // 💎 snapshot (option A): overwrite when this job actually ran excavateEarliest (skip stage-reuse synthetic success).
+    if (
+      ranExcavationEngine &&
+      result.accountId &&
+      requestingUserId !== "anonymous"
+    ) {
+      try {
+        await upsertDiamondSnapshotPg(
+          requestingUserId,
+          result.accountId,
+          result.presentHorizonSweepComplete === true,
+        );
+      } catch (e) {
+        console.error(
+          `[jobs] Job ${jobId}: failed to persist diamond snapshot (non-fatal):`,
+          e,
+        );
       }
     }
 

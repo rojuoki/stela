@@ -1,6 +1,12 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getUserId } from "@/lib/getUserId";
-import { hasUserUnlockedAccountPg, getAccountByUsernamePg, getTemporaryUnlockPg, transferTemporaryUnlockPg } from "@/lib/repository";
+import {
+  hasUserUnlockedAccountPg,
+  getAccountByUsernamePg,
+  getTemporaryUnlockPg,
+  transferTemporaryUnlockPg,
+  getDiamondActivePg,
+} from "@/lib/repository";
 import { withDevMeasure } from "@/lib/devMeasure";
 
 export async function GET(req: NextRequest) {
@@ -75,11 +81,13 @@ export async function GET(req: NextRequest) {
       }
 
       const isUnlocked = await hasUserUnlockedAccountPg(userId, account.account_id);
+      const diamondActive = await getDiamondActivePg(userId, account.account_id);
 
       return NextResponse.json({
         unlocked: isUnlocked,
         authenticated: true,
         accountId: account.account_id,
+        diamondActive,
       });
 
     } catch (error) {

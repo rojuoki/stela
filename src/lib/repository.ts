@@ -2125,3 +2125,101 @@ export async function getUserBoundaryEndPg(userId: string, accountId: string): P
     throw error;
   }
 }
+
+/** Error code returned by POST /api/unlock/extend when cooldown is active. */
+export const EXTEND_COOLDOWN_AFTER_EXHAUST_CODE = "EXTEND_COOLDOWN_AFTER_EXHAUST" as const;
+
+const EXTEND_COOLDOWN_HOURS = 24;
+
+/**
+ * When extend is blocked until this instant (user + account), or null if no row / expired.
+ */
+export async function getExtendBlockedUntilPg(
+  userId: string,
+  accountId: string,
+): Promise<Date | null> {
+  try {
+    const result = await pgQuery(
+      `SELECT extend_blocked_until FROM user_account_excavation_meta
+       WHERE user_id = $1 AND account_id = $2`,
+      [userId, accountId],
+    );
+    if (result.rows.length === 0) return null;
+    const raw = result.rows[0].extend_blocked_until;
+    if (raw == null) return null;
+    const d = raw instanceof Date ? raw : new Date(raw);
+    if (Number.isNaN(d.getTime())) return null;
+    return d;
+  } catch (error) {
+    console.error("[repository] getExtendBlockedUntilPg error:", error);
+    throw error;
+  }
+}
+
+/**
+ * After a timeline-exhausted successful job, block additional excavation (extend) for this user+account.
+ */
+export async function setExtendCooldownAfterTimelineExhaustPg(
+  userId: string,
+  accountId: string,
+  hours: number = EXTEND_COOLDOWN_HOURS,
+): Promise<void> {
+  try {
+    await pgQuery(
+      `INSERT INTO user_account_excavation_meta (user_id, account_id, extend_blocked_until, updated_at)
+       VALUES ($1, $2, NOW() + ($3::integer * INTERVAL '1 hour'), NOW())
+       ON CONFLICT (user_id, account_id) DO UPDATE SET
+         extend_blocked_until = NOW() + ($3::integer * INTERVAL '1 hour'),
+         updated_at = NOW()`,
+      [userId, accountId, hours],
+    );
+  } catch (error) {
+    console.error("[repository] setExtendCooldownAfterTimelineExhaustPg error:", error);
+    throw error;
+  }
+}
+
+/** Epoch placeholder for extend_blocked_until when creating a meta row for diamond-only upsert (cooldown inactive). */
+const EXTEND_BLOCKED_PLACEHOLDER = "1970-01-01T00:00:00.000Z";
+
+/**
+ * Option A: overwrite 💎 snapshot on each successful job that ran the excavation engine.
+ * Does not touch extend_blocked_until on conflict (preserves active cooldown).
+ */
+export async function upsertDiamondSnapshotPg(
+  userId: string,
+  accountId: string,
+  diamondActive: boolean,
+): Promise<void> {
+  try {
+    await pgQuery(
+      `INSERT INTO user_account_excavation_meta (user_id, account_id, extend_blocked_until, updated_at, diamond_active)
+       VALUES ($1, $2, $3::timestamptz, NOW(), $4)
+       ON CONFLICT (user_id, account_id) DO UPDATE SET
+         diamond_active = EXCLUDED.diamond_active,
+         updated_at = NOW()`,
+      [userId, accountId, EXTEND_BLOCKED_PLACEHOLDER, diamondActive],
+    );
+  } catch (error) {
+    console.error("[repository] upsertDiamondSnapshotPg error:", error);
+    throw error;
+  }
+}
+
+export async function getDiamondActivePg(
+  userId: string,
+  accountId: string,
+): Promise<boolean> {
+  try {
+    const result = await pgQuery(
+      `SELECT diamond_active FROM user_account_excavation_meta
+       WHERE user_id = $1 AND account_id = $2`,
+      [userId, accountId],
+    );
+    if (result.rows.length === 0) return false;
+    return Boolean(result.rows[0].diamond_active);
+  } catch (error) {
+    console.error("[repository] getDiamondActivePg error:", error);
+    throw error;
+  }
+}

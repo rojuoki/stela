@@ -161,6 +161,17 @@ CREATE TABLE IF NOT EXISTS stage_results (
     UNIQUE(account_id, stage)
 );
 
+-- Per-user extend cooldown after timeline-exhausted excavation (Phase 8 / Stage 1)
+CREATE TABLE IF NOT EXISTS user_account_excavation_meta (
+    user_id VARCHAR(100) NOT NULL,
+    account_id VARCHAR(50) NOT NULL REFERENCES accounts(account_id),
+    extend_blocked_until TIMESTAMP NOT NULL,
+    updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
+    diamond_active BOOLEAN NOT NULL DEFAULT FALSE,
+    PRIMARY KEY (user_id, account_id)
+);
+CREATE INDEX IF NOT EXISTS idx_user_account_excavation_meta_blocked ON user_account_excavation_meta(extend_blocked_until);
+
 -- Create indexes
 CREATE INDEX IF NOT EXISTS idx_api_call_log_ts ON api_call_log(ts DESC);
 CREATE INDEX IF NOT EXISTS idx_unlocks_user_account ON unlocks(user_id, account_id);

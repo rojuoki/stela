@@ -152,6 +152,13 @@ export interface ExcavationResult {
    * signal than OK_LIMIT_REACHED for entitlement: finalize using actual cache totals.
    */
   timelineExhausted?: boolean;
+  /**
+   * True when the **collect** pass advanced the window cursor to the job’s upper bound `end`
+   * (snapshot “now − margin”) with no pending split windows — i.e. the pipeline walked forward
+   * through the clamped present horizon for this run. Use for 💎 / “採掘貫通” UX; distinct from
+   * {@link timelineExhausted} which is also true for explore-only “no region” exits.
+   */
+  presentHorizonSweepComplete?: boolean;
   /** True when deep backfill was triggered (zeroStreak ≥ threshold + later month hit). */
   deepTriggered?: boolean;
   /** Number of additional unique tweets added by the deep backfill pass. */
@@ -880,6 +887,7 @@ async function excavateFullArchive(
       errors: stats.errors,
       acquisitionMode: "full_archive",
       timelineExhausted: true,
+      presentHorizonSweepComplete: false,
       deepTriggered: false,
     };
   }
@@ -918,6 +926,7 @@ async function excavateFullArchive(
       errors: stats.errors,
       acquisitionMode: "full_archive",
       timelineExhausted: false,
+      presentHorizonSweepComplete: false,
       deepTriggered: false,
     };
   }
@@ -1016,6 +1025,7 @@ async function excavateFullArchive(
   totalStoredNew += collectResult.storedNewCount;
   let stopReason: StopReason = collectResult.stopReason;
   let timelineExhausted = collectResult.timelineExhausted;
+  let presentHorizonSweepComplete = collectResult.presentHorizonSweepComplete;
 
   // ── Phase C: Deep backfill (DISABLED) ──
   // Disabled: Main explore→collect pipeline already guarantees earliest region coverage.
@@ -1026,6 +1036,7 @@ async function excavateFullArchive(
   if (stats.totalCalls >= MAX_API_CALLS && stopReason === "ACCOUNT_HAS_LESS_THAN_LIMIT") {
     stopReason = "MAX_API_CALLS_REACHED";
     timelineExhausted = false;
+    presentHorizonSweepComplete = false;
   }
 
   // Merge all phases: sort ascending, take earliest `effectiveTargetCount`.
@@ -1053,6 +1064,7 @@ async function excavateFullArchive(
     deepTriggered: false, // Deep backfill is disabled
     deepAddedCount: undefined, // No deep backfill performed
     timelineExhausted,
+    presentHorizonSweepComplete,
   };
 }
 
@@ -1265,7 +1277,12 @@ async function collectWindowPass(
   username: string,
   onProgress?: (apiCalls: number) => void,
   checkpointOpts?: CollectCheckpointOpts,
-): Promise<{ stopReason: StopReason; storedNewCount: number; timelineExhausted: boolean }> {
+): Promise<{
+  stopReason: StopReason;
+  storedNewCount: number;
+  timelineExhausted: boolean;
+  presentHorizonSweepComplete: boolean;
+}> {
   // ── Separated state management ──────────────────────────────────────────
   
   // Normal window progression (independent of splits)
@@ -1330,6 +1347,7 @@ async function collectWindowPass(
       stopReason: "ACCOUNT_HAS_LESS_THAN_LIMIT",
       storedNewCount: 0,
       timelineExhausted: true,
+      presentHorizonSweepComplete: true,
     };
   }
 
@@ -1839,15 +1857,20 @@ async function collectWindowPass(
     stopReason = "MAX_API_CALLS_REACHED";
   }
 
+  const atHorizon = normalWindowStart >= end && splitQueue.length === 0;
   const timelineExhausted =
-    stopReason === "ACCOUNT_HAS_LESS_THAN_LIMIT" &&
-    normalWindowStart >= end &&
-    splitQueue.length === 0;
+    stopReason === "ACCOUNT_HAS_LESS_THAN_LIMIT" && atHorizon;
+
+  const presentHorizonSweepComplete =
+    atHorizon &&
+    (stopReason === "ACCOUNT_HAS_LESS_THAN_LIMIT" || stopReason === "OK_LIMIT_REACHED");
 
   return {
     stopReason,
     storedNewCount: storedNewAccumulated,
     timelineExhausted: stopReason === "MAX_API_CALLS_REACHED" ? false : timelineExhausted,
+    presentHorizonSweepComplete:
+      stopReason === "MAX_API_CALLS_REACHED" ? false : presentHorizonSweepComplete,
   };
 }
 
@@ -1978,8 +2001,14 @@ async function excavateTimeline(
     stopReason = "MAX_API_CALLS_REACHED";
   }
 
+  const atHorizon = windowStart >= now;
   const timelineExhausted =
-    stopReason === "ACCOUNT_HAS_LESS_THAN_LIMIT" && windowStart >= now;
+    stopReason === "ACCOUNT_HAS_LESS_THAN_LIMIT" && atHorizon;
+
+  const presentHorizonSweepComplete =
+    stopReason !== "MAX_API_CALLS_REACHED" &&
+    atHorizon &&
+    (stopReason === "ACCOUNT_HAS_LESS_THAN_LIMIT" || stopReason === "OK_LIMIT_REACHED");
 
   const sorted = [...collected.values()]
     .sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime())
@@ -2003,6 +2032,7 @@ async function excavateTimeline(
     errors: stats.errors,
     acquisitionMode: "fallback",
     timelineExhausted: stopReason === "MAX_API_CALLS_REACHED" ? false : timelineExhausted,
+    presentHorizonSweepComplete,
   };
 }
 

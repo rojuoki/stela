@@ -30,7 +30,9 @@ import {
   spendCreditsPg,
   recordStageUnlockPg,
   cleanupExpiredHoldsPg,
-  getUserBoundaryEndPg
+  getUserBoundaryEndPg,
+  getExtendBlockedUntilPg,
+  EXTEND_COOLDOWN_AFTER_EXHAUST_CODE,
 } from "@/lib/repository";
 import { normalizeUsername, checkRateLimit } from "@/lib/validation";
 import { createAndRunJob, createStageExpansionJob, createAdditionalExcavationJob } from "@/lib/jobs";
@@ -103,6 +105,34 @@ export async function POST(req: NextRequest) {
     const validationError = await validateExtendRequest(userId, account.account_id);
     if (validationError) {
       return NextResponse.json({ error: validationError }, { status: 400 });
+    }
+
+    // 24h extend cooldown after timeline-exhausted excavation (user × account only)
+    if (userId !== "anonymous") {
+      const blockedUntil = await getExtendBlockedUntilPg(userId, account.account_id);
+      if (blockedUntil && blockedUntil.getTime() > Date.now()) {
+        const retryAfterSec = Math.max(
+          1,
+          Math.ceil((blockedUntil.getTime() - Date.now()) / 1000),
+        );
+        const message =
+          `Additional excavation is on cooldown until ${blockedUntil.toISOString()} after a full timeline scan.`;
+        return NextResponse.json(
+          {
+            error: message,
+            code: EXTEND_COOLDOWN_AFTER_EXHAUST_CODE,
+            blockedUntil: blockedUntil.toISOString(),
+            retryAfter: retryAfterSec,
+            message,
+          },
+          {
+            status: 409,
+            headers: {
+              "Retry-After": String(retryAfterSec),
+            },
+          },
+        );
+      }
     }
 
     // Phase 8: Use additional excavation planning result for execution
