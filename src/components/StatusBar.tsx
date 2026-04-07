@@ -30,8 +30,8 @@ export function StatusBar({
       case "ready":
         return {
           text: "Ready",
-          color: "text-zinc-400",
-          icon: "🔓"
+          color: "text-amber-500",
+          icon: ""
         };
       case "done":
         return {
@@ -87,7 +87,9 @@ export function StatusBar({
         <div className="flex items-center gap-3 text-sm">
           {/* Status */}
           <div className="flex items-center gap-1.5">
-            <span className="text-xs">{statusDisplay.icon}</span>
+            {statusDisplay.icon && (
+              <span className="text-xs">{statusDisplay.icon}</span>
+            )}
             <span className={`font-medium ${statusDisplay.color}`}>
               {statusDisplay.text}
             </span>

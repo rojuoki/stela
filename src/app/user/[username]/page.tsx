@@ -1055,7 +1055,7 @@ export default function UserPage() {
                   actionButton={
                     <button
                       onClick={() => handleExcavate(false)}
-                      className="cursor-pointer bg-white text-black font-medium px-4 py-2 rounded-lg hover:bg-zinc-200 transition-colors"
+                      className="cursor-pointer border-2 border-white text-white font-medium px-6 py-1.5 rounded-lg hover:bg-white hover:text-black transition-all"
                     >
                       Excavate Earliest Posts
                     </button>
@@ -1072,7 +1072,7 @@ export default function UserPage() {
                 <div className="flex items-center gap-3">
                   <button
                     onClick={handleUnlockForPrice}
-                    className="cursor-pointer bg-white text-black font-medium px-4 py-2 rounded-lg hover:bg-zinc-200 transition-colors"
+                    className="cursor-pointer border-2 border-white text-white font-medium px-6 py-1.5 rounded-lg hover:bg-white hover:text-black transition-all"
                   >
                     Unlock for $4
                   </button>
