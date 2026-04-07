@@ -427,6 +427,11 @@ export default function ResultsPage() {
           status={isExcavating ? "excavating" : "done"}
           postCount={isExcavating ? undefined : data.tweets.length}
           creditCount={0} // Guest users don't have credits
+          subMessage={
+            isExcavating 
+              ? "Excavation in progress - results will appear automatically"
+              : "Guest unlock completed - results are available below"
+          }
         />
         
         <p className="text-sm text-zinc-400 mt-2">

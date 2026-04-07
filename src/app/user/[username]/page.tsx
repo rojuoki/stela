@@ -1035,6 +1035,7 @@ export default function UserPage() {
                 <StatusBar
                   status="done"
                   creditCount={credits}
+                  subMessage="Account previously unlocked and ready for viewing"
                   actionButton={
                     DEV_PANEL ? (
                       <button
@@ -1050,6 +1051,7 @@ export default function UserPage() {
                 <StatusBar
                   status="ready"
                   creditCount={credits}
+                  subMessage="Ready to discover the earliest posts from this timeline"
                   actionButton={
                     <button
                       onClick={() => handleExcavate(false)}
@@ -1065,6 +1067,7 @@ export default function UserPage() {
             <StatusBar
               status="ready"
               creditCount={0}
+              subMessage="One-time unlock to access the earliest posts from this account"
               actionButton={
                 <div className="flex items-center gap-3">
                   <button
@@ -1227,14 +1230,20 @@ export default function UserPage() {
             postCount={tweets.length}
             postRange={isRangeMode ? `${parsedRangeStart}-${parsedRangeEnd}` : undefined}
             creditCount={credits}
+            subMessage={
+              diamondActive ? (
+                <>💎 Congratulations! You've excavated all available posts.</>
+              ) : (
+                "Timeline successfully excavated and ready for exploration"
+              )
+            }
+            subMessageStyle={
+              diamondActive ? {
+                color: "text-amber-600/95",
+                weight: "font-bold"
+              } : undefined
+            }
           />
-
-          {diamondActive && (
-            <p className="text-lg font-bold text-amber-600/95 mb-3 -mt-1">
-              <span aria-hidden>💎</span> Congratulations! You&apos;ve excavated all
-              available posts.
-            </p>
-          )}
 
           {error && (
             <div className="mb-4 flex items-center gap-2 text-red-300 text-sm px-4 py-3 bg-red-900/20 border border-red-800/50 rounded-lg">
