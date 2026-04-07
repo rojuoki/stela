@@ -50,17 +50,28 @@ export function StatusBar({
 
   const statusDisplay = getStatusDisplay();
   
-  const getPostCountText = () => {
+  const getPostCountDisplay = () => {
     if (postCount === undefined) return null;
     
     if (postRange) {
-      return `${postCount} posts • showing ${postRange}`;
+      return (
+        <>
+          <span className="text-white">{postCount}</span>
+          <span className="text-zinc-400"> posts • showing </span>
+          <span className="text-white">{postRange}</span>
+        </>
+      );
     }
     
-    return `${postCount} posts`;
+    return (
+      <>
+        <span className="text-white">{postCount}</span>
+        <span className="text-zinc-400"> posts</span>
+      </>
+    );
   };
 
-  const postCountText = getPostCountText();
+  const postCountDisplay = getPostCountDisplay();
 
   const defaultSubMessageStyle = {
     color: subMessageStyle.color || "text-zinc-400",
@@ -83,18 +94,17 @@ export function StatusBar({
           </div>
 
           {/* Post count */}
-          {postCountText && (
+          {postCountDisplay && (
             <>
               <span className="text-zinc-600">•</span>
-              <span className="text-zinc-400">{postCountText}</span>
+              {postCountDisplay}
             </>
           )}
 
           {/* Credit count */}
           <span className="text-zinc-600">•</span>
-          <span className="text-zinc-500">
-            {creditCount} credit{creditCount !== 1 ? "s" : ""}
-          </span>
+          <span className="text-white">{creditCount}</span>
+          <span className="text-zinc-500"> credit{creditCount !== 1 ? "s" : ""}</span>
         </div>
 
         {/* Right side: Action button */}
