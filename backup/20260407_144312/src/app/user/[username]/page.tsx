@@ -15,7 +15,6 @@ import { EngagementChart } from "../../../components/EngagementChart";
 import { TweetCard, tweetElementId } from "../../../components/TweetCard";
 import { AccountHeader } from "../../../components/AccountHeader";
 import { JobStatus } from "../../../components/JobStatus";
-import { StatusBar } from "../../../components/StatusBar";
 import { apiFetch } from "../../../lib/apiFetch";
 import { useUser } from "../../../contexts/UserContext";
 
@@ -654,7 +653,7 @@ export default function UserPage() {
           (n) =>
             rangeValid
               ? `${n} posts · showing ${rangeStart}-${rangeEnd}`
-              : `${n} posts`,
+              : `${n} posts • previously unlocked`,
           rangeValid ? rangeEnd : undefined,
         );
       } catch (error) {
@@ -1021,80 +1020,83 @@ export default function UserPage() {
       {/* Preview Phase */}
       {!hasResults && (
         <>
-          {/* StatusBar for preview state */}
-          {accountData.protected ? (
-            <div className="flex items-center gap-2 text-orange-300 text-sm px-4 py-3 bg-orange-900/20 border border-orange-800/50 rounded-lg mb-6">
-              <svg className="w-4 h-4 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">
-                <path fillRule="evenodd" d="M5 9V7a5 5 0 0110 0v2a2 2 0 012 2v5a2 2 0 01-2 2H5a2 2 0 01-2-2v-5a2 2 0 012-2zm8-2v2H7V7a3 3 0 616 0z" clipRule="evenodd" />
-              </svg>
-              This account is protected and cannot be excavated.
-            </div>
-          ) : canUnlock ? (
-            <>
-              {isAlreadyUnlocked ? (
-                <StatusBar
-                  status="done"
-                  creditCount={credits}
-                  actionButton={
-                    DEV_PANEL ? (
+          {/* Simple CTA buttons directly under account header */}
+          <div className="flex flex-col items-center mb-6">
+            {accountData.protected ? (
+              <div className="flex items-center gap-2 text-orange-300 text-sm px-4 py-3 bg-orange-900/20 border border-orange-800/50 rounded-lg">
+                <svg className="w-4 h-4 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">
+                  <path fillRule="evenodd" d="M5 9V7a5 5 0 0110 0v2a2 2 0 012 2v5a2 2 0 01-2 2H5a2 2 0 01-2-2v-5a2 2 0 012-2zm8-2v2H7V7a3 3 0 016 0z" clipRule="evenodd" />
+                </svg>
+                This account is protected and cannot be excavated.
+              </div>
+            ) : canUnlock ? (
+              <>
+                {isAlreadyUnlocked ? (
+                  <div className="text-center">
+                    {DEV_PANEL && (
                       <button
                         onClick={() => handleExcavate(true)}
-                        className="cursor-pointer bg-zinc-800 text-white font-medium px-4 py-2 rounded-lg hover:bg-zinc-700 transition-colors border border-zinc-600"
+                        className="cursor-pointer bg-zinc-800 text-white font-semibold px-6 py-3 rounded-lg hover:bg-zinc-700 transition-colors border border-zinc-600 mb-2"
                       >
                         Re-run Excavation
                       </button>
-                    ) : undefined
-                  }
-                />
-              ) : (
-                <StatusBar
-                  status="ready"
-                  creditCount={credits}
-                  actionButton={
+                    )}
+                    <p className="text-xs text-zinc-500">
+                      {DEV_PANEL ?
+                        `Re-excavation uses 1 credit • You have ${credits} credits${subscription.plan === 'basic' ? ' • Basic subscriber' : ''}` :
+                        `Account previously unlocked • ${credits} credits available${subscription.plan === 'basic' ? ' • Basic subscriber' : ''}`
+                      }
+                    </p>
+{/* Debug box removed */}
+                  </div>
+                ) : (
+                  <div className="text-center">
                     <button
                       onClick={() => handleExcavate(false)}
-                      className="cursor-pointer bg-white text-black font-medium px-4 py-2 rounded-lg hover:bg-zinc-200 transition-colors"
+                      className="cursor-pointer bg-white text-black font-semibold px-6 py-3 rounded-lg hover:bg-zinc-200 transition-colors mb-2"
                     >
                       Excavate Earliest Posts
                     </button>
-                  }
-                />
-              )}
-            </>
-          ) : (
-            <StatusBar
-              status="ready"
-              creditCount={0}
-              actionButton={
-                <div className="flex items-center gap-3">
+                    <p className="text-xs text-zinc-500">
+                      {subscription.plan === 'basic' ? `Basic subscriber • ${credits} credits available` : `You have ${credits} credits remaining`}
+                    </p>
+                  </div>
+                )}
+              </>
+            ) : (
+              <>
+                <div className="text-center">
                   <button
                     onClick={handleUnlockForPrice}
-                    className="cursor-pointer bg-white text-black font-medium px-4 py-2 rounded-lg hover:bg-zinc-200 transition-colors"
+                    className="cursor-pointer bg-white text-black font-semibold px-6 py-3 rounded-lg hover:bg-zinc-200 transition-colors mb-3"
                   >
                     Unlock for $4
                   </button>
                   {!isLoggedIn && (
-                    <Link
-                      href="/login"
-                      className="cursor-pointer text-zinc-300 hover:text-white text-sm underline"
-                    >
-                      Sign in
-                    </Link>
+                    <div className="text-sm text-zinc-400">
+                      Have an account?{" "}
+                      <Link
+                        href="/login"
+                        className="cursor-pointer text-white hover:text-zinc-300 underline"
+                      >
+                        Sign in
+                      </Link>
+                    </div>
                   )}
                 </div>
-              }
-            />
-          )}
+              </>
+            )}
 
-          {/* Error display */}
-          {error && (
-            <div className="mb-6 flex items-center gap-2 text-red-300 text-sm px-4 py-3 bg-red-900/20 border border-red-800/50 rounded-lg">
-              <svg className="w-4 h-4 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">
-                <path fillRule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7 4a1 1 0 11-2 0 1 1 0 012 0zm-1-9a1 1 0 00-1 1v4a1 1 0 102 0V6a1 1 0 00-1-1z" clipRule="evenodd" />
-              </svg>
-              {error}
-            </div>
-          )}
+            {/* Error display */}
+            {error && (
+              <div className="mt-3 flex items-center gap-2 text-red-300 text-sm px-4 py-3 bg-red-900/20 border border-red-800/50 rounded-lg">
+                <svg className="w-4 h-4 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">
+                  <path fillRule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7 4a1 1 0 11-2 0 1 1 0 012 0zm-1-9a1 1 0 00-1 1v4a1 1 0 102 0V6a1 1 0 00-1-1z" clipRule="evenodd" />
+                </svg>
+                {error}
+              </div>
+            )}
+          </div>
 
           {/* Blurred result zone */}
           <div className="relative mb-8">
@@ -1222,11 +1224,14 @@ export default function UserPage() {
       {/* Results Phase */}
       {hasResults && (
         <>
-          <StatusBar
+          <JobStatus
             status="done"
-            postCount={tweets.length}
-            postRange={isRangeMode ? `${parsedRangeStart}-${parsedRangeEnd}` : undefined}
-            creditCount={credits}
+            jobPhase={null}
+            jobInfo={jobInfo}
+            error={null}
+            credits={credits}
+            cacheHit={false}
+            resumeAt={null}
           />
 
           {diamondActive && (

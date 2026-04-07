@@ -8,7 +8,6 @@ import { EngagementChart } from "../../../components/EngagementChart";
 import { TweetCard, tweetElementId } from "../../../components/TweetCard";
 import { AccountHeader } from "../../../components/AccountHeader";
 import { JobStatus } from "../../../components/JobStatus";
-import { StatusBar } from "../../../components/StatusBar";
 import { useUser } from "../../../contexts/UserContext";
 import type { TweetData, AccountData, Status, JobPhase } from "../../../components/types";
 
@@ -421,19 +420,24 @@ export default function ResultsPage() {
 
       {/* Results Display */}
       <div className="mb-4">
-        <h1 className="text-xl font-bold mb-4">Earliest Posts from {displayName}</h1>
-        
-        <StatusBar
-          status={isExcavating ? "excavating" : "done"}
-          postCount={isExcavating ? undefined : data.tweets.length}
-          creditCount={0} // Guest users don't have credits
-        />
-        
-        <p className="text-sm text-zinc-400 mt-2">
+        <div className="flex items-center gap-3 mb-2">
+          <h1 className="text-xl font-bold">Earliest Posts from {displayName}</h1>
+          {isExcavating ? (
+            <div className="inline-flex items-center px-2 py-1 bg-amber-900/50 text-amber-300 text-xs font-medium rounded-full">
+              <div className="animate-spin rounded-full h-3 w-3 border border-amber-300 border-t-transparent mr-1.5"></div>
+              Excavating
+            </div>
+          ) : (
+            <div className="inline-flex items-center px-2 py-1 bg-emerald-900/50 text-emerald-300 text-xs font-medium rounded-full">
+              Unlocked
+            </div>
+          )}
+        </div>
+        <p className="text-sm text-zinc-400">
           {isExcavating ? (
             <>Excavation started on {formatDate(data.created_at)} • Results will appear shortly</>
           ) : (
-            <>Unlocked on {formatDate(data.created_at)}</>
+            <>Unlocked on {formatDate(data.created_at)} • {data.tweets.length} posts found</>
           )}
         </p>
       </div>

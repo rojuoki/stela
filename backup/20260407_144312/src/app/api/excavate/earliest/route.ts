@@ -1,0 +1,46 @@
+import { NextRequest, NextResponse } from "next/server";
+import { excavateEarliest } from "@/lib/excavate";
+import { getUserId } from "@/lib/getUserId";
+import { maybeInjectDevError } from "@/lib/devError";
+import { withDevMeasure, type MeasureCtx } from "@/lib/devMeasure";
+
+const DEV_PANEL = process.env.NEXT_PUBLIC_DEV_PANEL === "1";
+
+export async function POST(req: NextRequest) {
+  const userId: string = await getUserId(req);
+  return withDevMeasure("excavate", async () => {
+    const injected = await maybeInjectDevError(req);
+    if (injected) return injected;
+
+    let body: { username?: string; limit?: number };
+    try {
+      body = await req.json();
+    } catch {
+      return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
+    }
+
+    const raw = body.username?.trim().replace(/^@/, "");
+    if (!raw || raw.length === 0) {
+      return NextResponse.json({ error: "username is required" }, { status: 400 });
+    }
+
+    if (!/^[A-Za-z0-9_]{1,15}$/.test(raw)) {
+      return NextResponse.json({ error: "Invalid username format" }, { status: 400 });
+    }
+
+    // TODO: propagate username to stats entry in Phase 2
+
+    const limit = Math.min(Math.max(body.limit ?? 100, 1), 100);
+
+    if (DEV_PANEL) console.log(`[dev] user_id=${userId} POST /api/excavate/earliest username=${raw}`);
+
+    try {
+      const result = await excavateEarliest(raw, limit);
+      return NextResponse.json(result);
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : "Unknown error";
+      console.error("[excavate/earliest] Unhandled:", msg);
+      return NextResponse.json({ error: msg }, { status: 500 });
+    }
+  }, { userId, route: "/api/excavate/earliest" });
+}
