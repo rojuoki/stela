@@ -16,6 +16,22 @@ interface StatusBarProps {
   };
 }
 
+// PulsingDot component matching JobStatus
+function PulsingDot({ color }: { color: string }) {
+  return (
+    <span className="relative flex h-2.5 w-2.5">
+      <span
+        className="animate-ping absolute inline-flex h-full w-full rounded-full opacity-75"
+        style={{ backgroundColor: color }}
+      />
+      <span
+        className="relative inline-flex rounded-full h-2.5 w-2.5"
+        style={{ backgroundColor: color }}
+      />
+    </span>
+  );
+}
+
 export function StatusBar({
   status,
   postCount,
@@ -25,88 +41,35 @@ export function StatusBar({
   subMessage,
   subMessageStyle = {}
 }: StatusBarProps) {
-  const getStatusDisplay = () => {
+  
+  // Get status line text matching JobStatus format
+  const getStatusLineText = () => {
     switch (status) {
       case "ready":
-        return {
-          text: "Ready",
-          color: "text-amber-500",
-          icon: ""
-        };
-      case "done":
-        return {
-          text: "Unlocked",
-          color: "text-emerald-400", 
-          icon: "✓"
-        };
+        return `Ready ${creditCount} credit${creditCount !== 1 ? "s" : ""}`;
       case "excavating":
-        return {
-          text: "Excavating",
-          color: "text-amber-400",
-          icon: "⛏️"
-        };
+        return `Excavating ${creditCount} credit${creditCount !== 1 ? "s" : ""}`;
+      case "done":
+        if (postCount !== undefined) {
+          if (postRange) {
+            return `Done ${postCount} posts`;
+          } else {
+            return `Done ${postCount} posts`;
+          }
+        }
+        return `Done ${creditCount} credit${creditCount !== 1 ? "s" : ""}`;
     }
-  };
-
-  const statusDisplay = getStatusDisplay();
-  
-  const getPostCountDisplay = () => {
-    if (postCount === undefined) return null;
-    
-    if (postRange) {
-      return (
-        <>
-          <span className="text-white">{postCount}</span>
-          <span className="text-zinc-400"> posts • showing </span>
-          <span className="text-white">{postRange}</span>
-        </>
-      );
-    }
-    
-    return (
-      <>
-        <span className="text-white">{postCount}</span>
-        <span className="text-zinc-400"> posts</span>
-      </>
-    );
-  };
-
-  const postCountDisplay = getPostCountDisplay();
-
-  const defaultSubMessageStyle = {
-    color: subMessageStyle.color || "text-zinc-400",
-    size: subMessageStyle.size || "text-sm",
-    weight: subMessageStyle.weight || "font-normal"
   };
 
   return (
-    <div className="mb-4 p-3 bg-zinc-900/50 border border-zinc-800 rounded-lg">
-      {/* First row: Status, post count, credit count, action button */}
-      <div className="flex items-center justify-between gap-3">
-        {/* Left side: Status, post count, credit count */}
-        <div className="flex items-center gap-3 text-sm">
-          {/* Status */}
-          <div className="flex items-center gap-1.5">
-            {statusDisplay.icon && (
-              <span className="text-xs">{statusDisplay.icon}</span>
-            )}
-            <span className={`font-medium ${statusDisplay.color}`}>
-              {statusDisplay.text}
-            </span>
-          </div>
-
-          {/* Post count */}
-          {postCountDisplay && (
-            <>
-              <span className="text-zinc-600">•</span>
-              {postCountDisplay}
-            </>
-          )}
-
-          {/* Credit count */}
-          <span className="text-zinc-600">•</span>
-          <span className="text-white">{creditCount}</span>
-          <span className="text-zinc-500"> credit{creditCount !== 1 ? "s" : ""}</span>
+    <div className="mb-4">
+      {/* Line 1: Status with dot and info - matching JobStatus style */}
+      <div className="flex items-center justify-between gap-2 mb-2">
+        <div className="flex items-center gap-2 text-xs">
+          <PulsingDot color="#3b82f6" />
+          <span className="text-blue-400 font-medium">
+            {getStatusLineText()}
+          </span>
         </div>
 
         {/* Right side: Action button */}
@@ -117,12 +80,10 @@ export function StatusBar({
         )}
       </div>
 
-      {/* Second row: Sub message (optional) */}
+      {/* Line 2: Sub message - matching JobStatus layout */}
       {subMessage && (
-        <div className="mt-2 pt-2 border-t border-zinc-800/50">
-          <div className={`${defaultSubMessageStyle.size} ${defaultSubMessageStyle.color} ${defaultSubMessageStyle.weight}`}>
-            {subMessage}
-          </div>
+        <div className="text-blue-300/70 text-xs ml-5">
+          {subMessage}
         </div>
       )}
     </div>

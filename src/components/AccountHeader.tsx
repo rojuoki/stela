@@ -58,13 +58,13 @@ export function AccountHeader({
         })
       : null;
 
-    // Check if description would overflow 2 lines (rough estimation: ~80 chars per line)
-    const isDescriptionLong = data.description && data.description.length > 160;
+    // Check if description would overflow 1 line (roughly 40 chars)
+    const isDescriptionLong = data.description && data.description.length > 40;
     const shouldShowToggle = isDescriptionLong;
 
     return (
       <div
-        className={`relative flex items-start gap-4 p-3.5 border rounded-xl ${
+        className={`flex items-start gap-4 p-3.5 border rounded-xl ${
           data.protected
             ? "bg-orange-950/20 border-orange-900/40"
             : "bg-zinc-900/80 border-zinc-800"
@@ -87,7 +87,7 @@ export function AccountHeader({
           )}
         </div>
 
-        <div className="flex-1 min-w-0 pr-4">
+        <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2 flex-wrap">
             <span className="font-bold text-zinc-100 text-lg truncate">
               {data.display_name || `@${data.username}`}
@@ -115,28 +115,46 @@ export function AccountHeader({
           
           {data.description && (
             <div className="mt-1.5">
-              <p 
-                className={`text-sm text-zinc-300 leading-snug ${
-                  !isDescriptionExpanded && shouldShowToggle 
-                    ? 'line-clamp-2' 
-                    : ''
-                }`}
-                style={{
-                  display: !isDescriptionExpanded && shouldShowToggle ? '-webkit-box' : 'block',
-                  WebkitLineClamp: !isDescriptionExpanded && shouldShowToggle ? 2 : 'none',
-                  WebkitBoxOrient: 'vertical',
-                  overflow: !isDescriptionExpanded && shouldShowToggle ? 'hidden' : 'visible'
-                }}
-              >
-                {data.description}
-              </p>
-              {shouldShowToggle && (
+              <div className="flex items-start gap-1">
+                <p 
+                  className={`text-sm text-zinc-300 leading-snug flex-1 ${
+                    !isDescriptionExpanded && shouldShowToggle 
+                      ? 'line-clamp-1' 
+                      : ''
+                  }`}
+                  style={{
+                    display: !isDescriptionExpanded && shouldShowToggle ? '-webkit-box' : 'block',
+                    WebkitLineClamp: !isDescriptionExpanded && shouldShowToggle ? 1 : 'none',
+                    WebkitBoxOrient: 'vertical',
+                    overflow: !isDescriptionExpanded && shouldShowToggle ? 'hidden' : 'visible'
+                  }}
+                >
+                  {data.description}
+                </p>
+                {shouldShowToggle && !isDescriptionExpanded && (
+                  <button
+                    onClick={() => setIsDescriptionExpanded(true)}
+                    className="cursor-pointer text-xs text-zinc-500 hover:text-zinc-400 transition-colors flex-shrink-0"
+                  >
+                    see more
+                  </button>
+                )}
+              </div>
+              {shouldShowToggle && isDescriptionExpanded && (
                 <button
-                  onClick={() => setIsDescriptionExpanded(!isDescriptionExpanded)}
+                  onClick={() => setIsDescriptionExpanded(false)}
                   className="cursor-pointer text-xs text-zinc-500 hover:text-zinc-400 mt-1 transition-colors"
                 >
-                  {isDescriptionExpanded ? 'Show less' : 'Show more'}
+                  Show less
                 </button>
+              )}
+              {/* Snapshot表記をdescription展開時のみ表示 */}
+              {isDescriptionExpanded && fetchedDate && (
+                <div className="mt-2 text-right">
+                  <span className="text-[10px] text-zinc-600">
+                    Profile snapshot at {fetchedDate}
+                  </span>
+                </div>
               )}
             </div>
           )}
@@ -147,14 +165,6 @@ export function AccountHeader({
             </p>
           )}
         </div>
-
-        {fetchedDate && (
-          <div className="absolute bottom-2 right-2">
-            <span className="text-[10px] text-zinc-600">
-              Profile snapshot at {fetchedDate}
-            </span>
-          </div>
-        )}
       </div>
     );
   }

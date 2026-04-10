@@ -50,7 +50,7 @@ export function EngagementChart({
     sorted
       .map(
         (t, i) =>
-          `${((i + 0.5) / n) * 100},${(1 - t[key] / maxLine) * 100}`,
+          `${((i + 0.5) / n) * 100},${(1 - (t[key] / maxLine) * 0.85) * 100}`,
       )
       .join(" ");
 
@@ -180,7 +180,7 @@ export function EngagementChart({
           onClick={handleClick}
         >
           {sorted.map((t) => {
-            const h = Math.max((t.like_count / maxLikes) * 100, 2);
+            const h = Math.max((t.like_count / maxLikes) * 85, 2);
             return (
               <div
                 key={t.post_id}
