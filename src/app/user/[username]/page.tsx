@@ -16,21 +16,14 @@ import { TweetCard, tweetElementId } from "../../../components/TweetCard";
 import { AccountHeader } from "../../../components/AccountHeader";
 import { JobStatus } from "../../../components/JobStatus";
 import { StatusBar } from "../../../components/StatusBar";
+import { TweetSection } from "../../../components/TweetSection";
 import { apiFetch } from "../../../lib/apiFetch";
 import { useUser } from "../../../contexts/UserContext";
 
 /** True only when the dev panel is enabled at build time. */
 const DEV_PANEL = process.env.NEXT_PUBLIC_DEV_PANEL === "1";
 
-const DUMMY_CHART_HEIGHTS = [35, 62, 48, 75, 30, 88, 55, 42, 70, 25, 60, 45, 82, 38, 67, 52, 90, 33, 58, 44];
-
-const DUMMY_TWEET_STATS = [
-  { likes: 47, retweets: 12, replies: 5 },
-  { likes: 83, retweets: 7, replies: 2 },
-  { likes: 21, retweets: 3, replies: 8 },
-  { likes: 64, retweets: 18, replies: 4 },
-  { likes: 9, retweets: 1, replies: 3 },
-];
+// DUMMY_CHART_HEIGHTS moved to TweetSection.tsx
 
 const POLL_INTERVAL_MS = 2500;
 const MIN_EXCAVATING_MS = 3000;
@@ -81,6 +74,9 @@ export default function UserPage() {
   const [currentBoundary, setCurrentBoundary] = useState<number | null>(null);
   const [diamondActive, setDiamondActive] = useState<boolean>(false);
   const [showBackToTop, setShowBackToTop] = useState(false);
+
+  // Starting state for immediate UI feedback
+  const [isStarting, setIsStarting] = useState(false);
 
   // Excavation state management - replaces /excavating page functionality
   const [excavationState, setExcavationState] = useState<{
@@ -134,6 +130,7 @@ export default function UserPage() {
   };
 
   const exitExcavationMode = useCallback(() => {
+    setIsStarting(false);
     setExcavationState({
       active: false,
       flow: null,
@@ -462,6 +459,9 @@ export default function UserPage() {
     if (!accountData || !user || credits <= 0) return;
 
     setShowExtendModal(false);
+    
+    // 1. Immediate client-side feedback
+    setIsStarting(true);
     setError(null);
 
     try {
@@ -472,12 +472,17 @@ export default function UserPage() {
       });
 
       if (!res.ok) {
+        // API Error: restore state
         const data = await res.json().catch(() => ({}));
+        setIsStarting(false);
         setError(data.error || `HTTP ${res.status}`);
         return;
       }
 
       const extendResponse = await res.json();
+
+      // 2. Success: transition to normal excavating state
+      setIsStarting(false);
 
       // Start in-page excavation instead of redirecting
       if (extendResponse.executionMode === "grant_only") {
@@ -498,6 +503,8 @@ export default function UserPage() {
         });
       }
     } catch {
+      // 3. Network error: restore state
+      setIsStarting(false);
       setError("Network error");
     }
   };
@@ -692,6 +699,8 @@ export default function UserPage() {
     const raw = username.trim().replace(/^@/, "");
     if (!raw) return;
 
+    // 1. Immediate client-side feedback
+    setIsStarting(true);
     setError(null);
 
     try {
@@ -702,12 +711,17 @@ export default function UserPage() {
       });
 
       if (!res.ok) {
+        // API Error: restore button state
         const data = await res.json().catch(() => ({}));
+        setIsStarting(false);
         setError(data.error || `HTTP ${res.status}`);
         return;
       }
 
       const unlock = await res.json();
+
+      // 2. Success: transition to normal excavating state
+      setIsStarting(false);
 
       // Start in-page excavation instead of redirecting
       if (!force && unlock.status === "cache-hit" && unlock.accountId) {
@@ -716,6 +730,8 @@ export default function UserPage() {
         startExcavation('initial', unlock.jobId);
       }
     } catch {
+      // 3. Network error: restore button state
+      setIsStarting(false);
       setError("Network error");
     }
   };
@@ -724,6 +740,8 @@ export default function UserPage() {
   const handleUnlockForPrice = async () => {
     if (!accountData || accountData.protected) return;
 
+    // 1. Immediate client-side feedback
+    setIsStarting(true);
     setError(null);
 
     try {
@@ -743,6 +761,7 @@ export default function UserPage() {
 
         if (!res.ok) {
           const data = await res.json().catch(() => ({}));
+          setIsStarting(false);
           setError(data.error || `Failed to unlock: HTTP ${res.status}`);
           return;
         }
@@ -750,10 +769,13 @@ export default function UserPage() {
         const unlockData = await res.json();
 
         if (unlockData.redirectUrl) {
+          // Note: starting state will be cleared when page redirects
           window.location.href = unlockData.redirectUrl;
         } else if (unlockData.resultToken) {
+          // Note: starting state will be cleared when page navigates
           router.push(`/results/${unlockData.resultToken}`);
         } else {
+          setIsStarting(false);
           setError("Unexpected response from server");
         }
       } else {
@@ -766,13 +788,16 @@ export default function UserPage() {
 
         if (response.ok) {
           const { checkoutUrl } = await response.json();
+          // Note: starting state will be cleared when page redirects
           window.location.href = checkoutUrl;
         } else {
           const data = await response.json();
+          setIsStarting(false);
           setError(data.error || "Checkout failed");
         }
       }
     } catch (err) {
+      setIsStarting(false);
       setError('Network error. Please try again.');
     }
   };
@@ -854,89 +879,15 @@ export default function UserPage() {
 
   const isLoggedIn = !!user; // Check if user is authenticated
 
-  // Excavation UI component - replaces /excavating page
-  const ExcavationUI = () => {
-    if (!excavationState.active) return null;
-
-    const isError = excavationState.status === "failed";
-
-    return (
-      <div className="min-h-screen bg-black">
-        <div className="max-w-2xl mx-auto px-4 py-12">
-          <div className="mb-8">
-            <Link
-              href={username ? `/user/${encodeURIComponent(username)}` : "/"}
-              onClick={(e) => {
-                e.preventDefault();
-                exitExcavationMode();
-              }}
-              className="text-zinc-400 hover:text-white transition-colors text-sm inline-flex items-center gap-2"
-            >
-              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 19l-7-7m0 0l7-7m-7 7h18" />
-              </svg>
-              Back to @{username || "Stela"}
-            </Link>
-          </div>
-
-          {username && (
-            <div className="mb-6 text-center">
-              <h1 className="text-xl font-bold text-white">@{username}</h1>
-              <p className="text-sm text-zinc-500 mt-1">
-                {excavationState.flow?.startsWith("extend") ? "Additional excavation" : "Excavating earliest posts"}
-              </p>
-            </div>
-          )}
-
-          {!isError && (
-            <JobStatus
-              status={excavationState.status}
-              jobPhase={excavationState.resyncPhase ? null : excavationState.jobPhase}
-              jobInfo={excavationState.jobInfo}
-              error={null}
-              credits={credits}
-              cacheHit={false}
-              resumeAt={excavationState.resumeAt}
-            />
-          )}
-
-          <div className="border border-zinc-800 rounded-xl min-h-[200px] flex items-center justify-center">
-            {isError ? (
-              <div className="text-center px-6 max-w-md">
-                <svg
-                  className="w-12 h-12 mx-auto text-red-500 mb-4"
-                  fill="none"
-                  viewBox="0 0 24 24"
-                  stroke="currentColor"
-                >
-                  <path
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    strokeWidth={1.5}
-                    d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L4.082 16.5c-.77.833.192 2.5 1.732 2.5z"
-                  />
-                </svg>
-                <p className="text-red-300 font-medium mb-2">{excavationState.error}</p>
-                <button
-                  onClick={exitExcavationMode}
-                  className="mt-4 bg-zinc-800 text-zinc-300 font-medium px-4 py-2 rounded-lg hover:bg-zinc-700 transition-colors"
-                >
-                  Go back
-                </button>
-              </div>
-            ) : (
-              <div className="text-center">
-                <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-white mx-auto mb-4" />
-                <p className="text-zinc-400 text-sm">
-                  {excavationState.resyncPhase ? "Preparing results..." : (excavationState.jobInfo || "Excavating...")}
-                </p>
-              </div>
-            )}
-          </div>
-        </div>
-      </div>
-    );
+  // Determine tweet section mode
+  const getCurrentTweetMode = (): 'seo' | 'preparing' | 'loading' | 'tweets' => {
+    if (isStarting) return 'preparing';
+    if (excavationState.active) return 'loading';
+    if (hasResults) return 'tweets';
+    return 'seo';
   };
+
+  // ExcavationUI component removed - functionality integrated into TweetSection
 
   // Determine if user can unlock (has credits OR basic subscription)
   const canUnlock = isLoggedIn && (credits > 0 || subscription.plan === 'basic');
@@ -956,10 +907,7 @@ export default function UserPage() {
     }
   };
 
-  // Show excavation UI when in excavation mode
-  if (excavationState.active) {
-    return <ExcavationUI />;
-  }
+  // Excavation state is now handled within component modes
 
   return (
     <main className="max-w-2xl mx-auto px-4 py-12">
@@ -989,14 +937,14 @@ export default function UserPage() {
           <div className="text-center mt-0.5">
             <button
               onClick={() => setShowExtendModal(true)}
-              disabled={credits <= 0}
+              disabled={credits <= 0 || isStarting}
               className={`text-xs underline transition-colors ${
-                credits <= 0
+                credits <= 0 || isStarting
                   ? "text-zinc-500 cursor-not-allowed"
                   : "cursor-pointer text-zinc-400 hover:text-zinc-200"
               }`}
             >
-              ⛏️ Excavate more 🧨   +100 posts for 1 credit
+              {isStarting ? "⏳ Starting..." : "⛏️ Excavate more 🧨   +100 posts for 1 credit"}
             </button>
           </div>
         )}
@@ -1018,8 +966,25 @@ export default function UserPage() {
         )}
       </div>
 
-      {/* Preview Phase */}
-      {!hasResults && (
+      {/* StatusBar - unified for all phases */}
+      {isStarting ? (
+        /* Starting State - immediate feedback */
+        <StatusBar
+          status="starting"
+          creditCount={credits}
+          subMessage="Preparing excavation..."
+        />
+      ) : excavationState.active ? (
+        /* Excavating State */
+        <StatusBar
+          status="excavating"
+          creditCount={credits}
+          subMessage={excavationState.jobInfo || "Excavating earliest posts..."}
+          jobPhase={excavationState.resyncPhase ? null : excavationState.jobPhase}
+          resumeAt={excavationState.resumeAt}
+        />
+      ) : !hasResults ? (
+        /* Preview Phase */
         <>
           {/* StatusBar for preview state */}
           {accountData.protected ? (
@@ -1040,9 +1005,14 @@ export default function UserPage() {
                     DEV_PANEL ? (
                       <button
                         onClick={() => handleExcavate(true)}
-                        className="cursor-pointer bg-zinc-800 text-white font-medium px-4 py-2 rounded-lg hover:bg-zinc-700 transition-colors border border-zinc-600"
+                        disabled={isStarting}
+                        className={`font-medium px-4 py-2 rounded-lg transition-colors border border-zinc-600 ${
+                          isStarting 
+                            ? "bg-gray-700 text-gray-500 cursor-not-allowed"
+                            : "cursor-pointer bg-zinc-800 text-white hover:bg-zinc-700"
+                        }`}
                       >
-                        Re-run Excavation
+                        {isStarting ? "Starting..." : "Re-run Excavation"}
                       </button>
                     ) : undefined
                   }
@@ -1055,9 +1025,14 @@ export default function UserPage() {
                   actionButton={
                     <button
                       onClick={() => handleExcavate(false)}
-                      className="cursor-pointer bg-white text-black font-medium px-6 py-1.5 rounded-full hover:bg-gray-100 transition-all text-sm"
+                      disabled={isStarting}
+                      className={`font-medium px-6 py-1.5 rounded-full transition-all text-sm ${
+                        isStarting 
+                          ? "bg-gray-400 text-gray-600 cursor-not-allowed"
+                          : "cursor-pointer bg-white text-black hover:bg-gray-100"
+                      }`}
                     >
-                      Excavate Earliest Posts
+                      {isStarting ? "Starting..." : "Excavate Earliest Posts"}
                     </button>
                   }
                 />
@@ -1072,9 +1047,14 @@ export default function UserPage() {
                 <div className="flex items-center gap-3">
                   <button
                     onClick={handleUnlockForPrice}
-                    className="cursor-pointer bg-white text-black font-medium px-6 py-1.5 rounded-full hover:bg-gray-100 transition-all text-sm"
+                    disabled={isStarting}
+                    className={`font-medium px-6 py-1.5 rounded-full transition-all text-sm ${
+                      isStarting 
+                        ? "bg-gray-400 text-gray-600 cursor-not-allowed"
+                        : "cursor-pointer bg-white text-black hover:bg-gray-100"
+                    }`}
                   >
-                    Unlock for $4
+                    {isStarting ? "Starting..." : "Unlock for $4"}
                   </button>
                   {!isLoggedIn && (
                     <Link
@@ -1099,128 +1079,9 @@ export default function UserPage() {
             </div>
           )}
 
-          {/* Blurred result zone */}
-          <div className="relative mb-8">
-            {/* Blurred Engagement Chart */}
-            <div className="mb-6">
-              <div className="flex items-center justify-between mb-2">
-                <h2 className="text-xs font-semibold text-zinc-400 uppercase tracking-wide">
-                  Engagement across earliest posts
-                </h2>
-                <div className="flex items-center gap-3">
-                  <div className="flex items-center gap-1.5">
-                    <span className="w-2.5 h-2.5 rounded-sm inline-block bg-blue-500" />
-                    <span className="text-[10px] text-zinc-500">Likes</span>
-                  </div>
-                  <div className="flex items-center gap-1.5">
-                    <span className="w-3 h-0.5 inline-block rounded bg-emerald-500" />
-                    <span className="text-[10px] text-zinc-500">Retweets</span>
-                  </div>
-                  <div className="flex items-center gap-1.5">
-                    <span className="w-3 h-0.5 inline-block rounded bg-amber-500" />
-                    <span className="text-[10px] text-zinc-500">Replies</span>
-                  </div>
-                </div>
-              </div>
-
-              <div className="relative h-24 bg-zinc-900 rounded-lg border border-zinc-800 p-2 blur-sm">
-                <div className="flex items-end gap-px h-full">
-                  {DUMMY_CHART_HEIGHTS.map((h, i) => (
-                    <div
-                      key={i}
-                      className="flex-1 bg-blue-500 rounded-t-sm"
-                      style={{ height: `${h}%` }}
-                    />
-                  ))}
-                </div>
-              </div>
-            </div>
-
-            {/* Blurred Tweet List */}
-            <div className="border border-zinc-800 rounded-xl overflow-hidden blur-sm">
-              {DUMMY_TWEET_STATS.map((stats, i) => (
-                <div key={i} className="px-4 py-3 border-b border-zinc-800 last:border-b-0">
-                  <div className="flex items-center gap-2 mb-1.5">
-                    <span className="text-xs text-zinc-500">Mar {i + 1}, 2009</span>
-                  </div>
-                  <p className="text-sm text-zinc-200 mb-2">
-                    {i === 0 && "This is where you'll see the earliest posts from this account's timeline..."}
-                    {i === 1 && "Discover authentic thoughts and interactions from the very beginning..."}
-                    {i === 2 && "Uncover the origins and evolution of their online presence..."}
-                    {i === 3 && "See how their voice and perspective developed over time..."}
-                    {i === 4 && "Experience the full journey from their first posts to today..."}
-                  </p>
-                  <div className="flex gap-4 text-xs text-zinc-500">
-                    <span className="flex items-center gap-1">
-                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                        <path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z" />
-                      </svg>
-                      {stats.likes}
-                    </span>
-                    <span className="flex items-center gap-1">
-                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                        <polyline points="17 1 21 5 17 9" />
-                        <path d="M3 11V9a4 4 0 0 1 4-4h14" />
-                        <polyline points="7 23 3 19 7 15" />
-                        <path d="M21 13v2a4 4 0 0 1-4 4H3" />
-                      </svg>
-                      {stats.retweets}
-                    </span>
-                    <span className="flex items-center gap-1">
-                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                        <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
-                      </svg>
-                      {stats.replies}
-                    </span>
-                  </div>
-                </div>
-              ))}
-            </div>
-
-            {/* Discover overlay - text only, centered over blurred zone */}
-            <div className="absolute inset-0 flex items-center justify-center z-10 pointer-events-none">
-              <div className="text-center max-w-sm px-6">
-                <p className="text-base font-semibold text-white drop-shadow-lg mb-3">
-                  Discover earliest posts from {displayName}
-                </p>
-                <p className="text-sm text-zinc-300 drop-shadow mb-2 leading-relaxed">
-                  Explore the earliest posts from {displayName}'s timeline.
-                  Uncover their first thoughts, early interactions, and the origins
-                  of their presence on X.
-                </p>
-                <p className="text-sm text-zinc-400 drop-shadow leading-relaxed">
-                  Excavation reveals up to 100 of the earliest posts, providing
-                  unique insights into an account's history and evolution over time.
-                </p>
-              </div>
-            </div>
-          </div>
-
-          {/* SEO Content - About Timeline Excavation */}
-          <div className="pt-8 border-t border-zinc-800">
-            <h3 className="text-lg font-semibold mb-4">About Timeline Excavation</h3>
-            <div className="space-y-4 text-sm text-zinc-400">
-              <p>
-                <strong className="text-zinc-300">What is excavation?</strong><br />
-                Timeline excavation uses advanced techniques to discover and retrieve
-                the earliest posts from an account's history, even when they're buried
-                deep in the timeline.
-              </p>
-              <p>
-                <strong className="text-zinc-300">Why earliest posts?</strong><br />
-                Early posts often reveal authentic thoughts, genuine interactions, and
-                the evolution of ideas before accounts became widely followed.
-              </p>
-              <p>
-                <strong className="text-zinc-300">How it works:</strong><br />
-                Our system searches through years of posts to find and present
-                the chronologically oldest content, providing a unique window into
-                an account's origins.
-              </p>
-            </div>
-          </div>
+          {/* Legacy blurred preview UI removed - now handled by unified TweetSection */}
         </>
-      )}
+      ) : null}
 
       {/* Results Phase */}
       {hasResults && (
@@ -1314,18 +1175,7 @@ export default function UserPage() {
             />
           )}
 
-          {/* Tweet list */}
-          {hasResults ? (
-            <div className="border border-zinc-800 rounded-xl overflow-hidden">
-              {tweets.map((t) => (
-                <TweetCard key={t.post_id} tweet={t} />
-              ))}
-            </div>
-          ) : (
-            <div className="border border-zinc-800 rounded-xl min-h-[200px] flex items-center justify-center">
-              <p className="text-zinc-600 text-sm">No posts found.</p>
-            </div>
-          )}
+          {/* TweetSection moved outside of hasResults condition */}
 
           {/* Dev-only: Re-run excavation */}
           {hasResults && DEV_PANEL && (
@@ -1342,6 +1192,41 @@ export default function UserPage() {
             </div>
           )}
         </>
+      )}
+
+      {/* Tweet Section - unified container for all modes */}
+      <TweetSection 
+        mode={getCurrentTweetMode()} 
+        tweets={tweets}
+        jobInfo={excavationState.jobInfo}
+        error={excavationState.error}
+        displayName={displayName}
+      />
+
+      {/* About Timeline Excavation - Results only */}
+      {hasResults && (
+        <div className="pt-8 border-t border-zinc-800">
+          <h3 className="text-lg font-semibold mb-4">About Timeline Excavation</h3>
+          <div className="space-y-4 text-sm text-zinc-400">
+            <p>
+              <strong className="text-zinc-300">What is excavation?</strong><br />
+              Timeline excavation uses advanced techniques to discover and retrieve
+              the earliest posts from an account's history, even when they're buried
+              deep in the timeline.
+            </p>
+            <p>
+              <strong className="text-zinc-300">Why earliest posts?</strong><br />
+              Early posts often reveal authentic thoughts, genuine interactions, and
+              the evolution of ideas before accounts became widely followed.
+            </p>
+            <p>
+              <strong className="text-zinc-300">How it works:</strong><br />
+              Our system searches through years of posts to find and present
+              the chronologically oldest content, providing a unique window into
+              an account's origins.
+            </p>
+          </div>
+        </div>
       )}
 
       {/* Excavate More Confirmation Modal */}

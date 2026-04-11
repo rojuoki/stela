@@ -1,9 +1,38 @@
 "use client";
 
-import { ReactNode } from "react";
+import { ReactNode, useState, useEffect } from "react";
+
+function useCountdown(targetIso: string | null): string | null {
+  const [text, setText] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!targetIso) {
+      setText(null);
+      return;
+    }
+
+    const update = () => {
+      const diff = new Date(targetIso).getTime() - Date.now();
+      if (diff <= 0) {
+        setText("resuming…");
+        return;
+      }
+      const s = Math.ceil(diff / 1000);
+      const m = Math.floor(s / 60);
+      const sec = s % 60;
+      setText(`${m}:${String(sec).padStart(2, "0")}`);
+    };
+
+    update();
+    const id = setInterval(update, 1000);
+    return () => clearInterval(id);
+  }, [targetIso]);
+
+  return text;
+}
 
 interface StatusBarProps {
-  status: "ready" | "done" | "excavating";
+  status: "ready" | "starting" | "excavating" | "done";
   postCount?: number;
   postRange?: string; // e.g. "1-100" or "101-200" 
   creditCount: number;
@@ -14,6 +43,8 @@ interface StatusBarProps {
     size?: string;
     weight?: string;
   };
+  jobPhase?: "waiting_rate_limit" | "queued" | "running" | null; // For excavating state
+  resumeAt?: string | null; // For rate limit countdown
 }
 
 // PulsingDot component matching JobStatus
@@ -39,37 +70,91 @@ export function StatusBar({
   creditCount,
   actionButton,
   subMessage,
-  subMessageStyle = {}
+  subMessageStyle = {},
+  jobPhase,
+  resumeAt
 }: StatusBarProps) {
   
-  // Get status line text matching JobStatus format
-  const getStatusLineText = () => {
+  const countdown = useCountdown(
+    status === "excavating" && jobPhase === "waiting_rate_limit" ? resumeAt : null
+  );
+
+  // Get status line text and colors
+  const getStatusInfo = () => {
     switch (status) {
       case "ready":
-        return `Ready ${creditCount} credit${creditCount !== 1 ? "s" : ""}`;
+        return {
+          text: `Ready ${creditCount} credit${creditCount !== 1 ? "s" : ""}`,
+          dotColor: "#3b82f6",
+          textColor: "text-blue-400"
+        };
+      case "starting":
+        return {
+          text: `Starting ${creditCount} credit${creditCount !== 1 ? "s" : ""}`,
+          dotColor: "#6b7280",
+          textColor: "text-gray-400"
+        };
       case "excavating":
-        return `Excavating ${creditCount} credit${creditCount !== 1 ? "s" : ""}`;
+        if (jobPhase === "waiting_rate_limit") {
+          return {
+            text: `Rate limited ${creditCount} credit${creditCount !== 1 ? "s" : ""}`,
+            dotColor: "#f59e0b",
+            textColor: "text-amber-400"
+          };
+        }
+        return {
+          text: `Excavating ${creditCount} credit${creditCount !== 1 ? "s" : ""}`,
+          dotColor: "#3b82f6", 
+          textColor: "text-blue-400"
+        };
       case "done":
         if (postCount !== undefined) {
-          if (postRange) {
-            return `Done ${postCount} posts`;
-          } else {
-            return `Done ${postCount} posts`;
-          }
+          return {
+            text: `Done ${postCount} posts`,
+            dotColor: "#3b82f6",
+            textColor: "text-blue-400"
+          };
         }
-        return `Done ${creditCount} credit${creditCount !== 1 ? "s" : ""}`;
+        return {
+          text: `Done ${creditCount} credit${creditCount !== 1 ? "s" : ""}`,
+          dotColor: "#3b82f6",
+          textColor: "text-blue-400"
+        };
     }
   };
 
+  const statusInfo = getStatusInfo();
+
+  // Filter out API calls information from subMessage
+  const getCleanSubMessage = () => {
+    if (!subMessage || typeof subMessage !== 'string') return subMessage;
+    
+    // Remove API calls information
+    const cleanMessage = subMessage
+      .replace(/\s*\(API calls: \d+\)/g, '')
+      .replace(/API calls: \d+/g, '')
+      .trim();
+    
+    return cleanMessage || subMessage;
+  };
+
+  const cleanSubMessage = getCleanSubMessage();
+
   return (
     <div className="mb-4">
-      {/* Line 1: Status with dot and info - matching JobStatus style */}
+      {/* Line 1: Status with dot and info */}
       <div className="flex items-center justify-between gap-2 mb-2">
         <div className="flex items-center gap-2 text-xs">
-          <PulsingDot color="#3b82f6" />
-          <span className="text-blue-400 font-medium">
-            {getStatusLineText()}
+          <PulsingDot color={statusInfo.dotColor} />
+          <span className={`${statusInfo.textColor} font-medium`}>
+            {statusInfo.text}
           </span>
+          {/* Rate limit countdown */}
+          {countdown && jobPhase === "waiting_rate_limit" && (
+            <span className="font-mono text-amber-300 bg-amber-900/30 px-1.5 py-0.5 rounded">
+              {countdown}
+            </span>
+          )}
         </div>
 
         {/* Right side: Action button */}
@@ -80,10 +165,17 @@ export function StatusBar({
         )}
       </div>
 
-      {/* Line 2: Sub message - matching JobStatus layout */}
-      {subMessage && (
-        <div className="text-blue-300/70 text-xs ml-5">
-          {subMessage}
+      {/* Line 2: Sub message */}
+      {cleanSubMessage && (
+        <div className={`text-xs ml-5 ${
+          jobPhase === "waiting_rate_limit" ? "text-amber-300/70" : 
+          status === "starting" ? "text-gray-400/70" :
+          "text-blue-300/70"
+        }`}>
+          {jobPhase === "waiting_rate_limit" 
+            ? "Waiting for API cooldown — resuming automatically"
+            : cleanSubMessage
+          }
         </div>
       )}
     </div>

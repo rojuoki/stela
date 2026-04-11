@@ -99,12 +99,22 @@ export interface GuestUnlockPlan {
   targetCount: number;
   /** Posts currently cached in DB for this account */
   currentCachedCount: number;
+  /** Posts missing from cache to reach target (0 if cache sufficient) */
+  missingCount: number;
   /** Whether excavation is needed */
   excavationNeeded: boolean;
-  /** If cache hit: boundary for guest access */
-  guestBoundary?: number;
+  /** Execution mode based on cache state */
+  executionMode: "cache_only" | "partial_excavation" | "full_excavation";
+  /** Boundary for guest access (reflects actual available tweets) */
+  guestBoundary: number;
   /** Decision strategy */
   strategy: "cache-only" | "excavation";
+  /** If excavation: where to continue from (null for full excavation) */
+  excavationContinueFrom: Date | null;
+  /** If excavation: how many tweets to excavate */
+  excavationTargetCount: number;
+  /** Expected final boundary after execution */
+  expectedFinalBoundary: number;
 }
 
 export interface AdditionalExcavationPlan {
@@ -223,7 +233,8 @@ export async function planInitialUnlock(
 
 /**
  * Plan guest unlock for account.
- * Follows the same core principles as logged-in users but for guest-specific access.
+ * Enhanced to follow the same cache-aware planning principles as logged-in users.
+ * Supports partial cache recognition, missing-count calculation, and continuation logic.
  * Guests always get Stage 1 equivalent access.
  */
 export async function planGuestUnlock(
@@ -236,18 +247,56 @@ export async function planGuestUnlock(
   // Step 2: Current cached count (0 if account doesn't exist yet)
   const currentCachedCount = accountId ? await getCachedTweetCountPg(accountId) : 0;
   
-  // Step 3: Determine if excavation is needed
-  const excavationNeeded = currentCachedCount < targetCount;
+  // Step 3: Calculate missing tweets and determine execution mode
+  const missingCount = Math.max(0, targetCount - currentCachedCount);
+  const excavationNeeded = missingCount > 0;
   
-  // Step 4: For cache hits, determine guest boundary (same as target for guests)
-  const guestBoundary = excavationNeeded ? undefined : Math.min(targetCount, currentCachedCount);
+  let executionMode: "cache_only" | "partial_excavation" | "full_excavation";
+  if (missingCount === 0) {
+    executionMode = "cache_only";
+  } else if (currentCachedCount > 0) {
+    executionMode = "partial_excavation";
+  } else {
+    executionMode = "full_excavation";
+  }
+  
+  // Step 4: Determine guest boundary (what the guest will actually receive)
+  const guestBoundary = Math.min(targetCount, currentCachedCount + missingCount);
+  
+  // Step 5: Excavation planning (if needed)
+  let excavationContinueFrom: Date | null = null;
+  let excavationTargetCount = 0;
+  
+  if (excavationNeeded && accountId) {
+    excavationTargetCount = missingCount;
+    
+    if (executionMode === "partial_excavation") {
+      // For partial cache: determine where to continue excavation from
+      excavationContinueFrom = await getExcavationContinuePointPg(accountId, currentCachedCount);
+    } else {
+      // For full excavation: start from account creation (null = earliest)
+      excavationContinueFrom = null;
+    }
+  }
+  
+  // Step 6: Expected final boundary after execution
+  const expectedFinalBoundary = Math.min(targetCount, currentCachedCount + excavationTargetCount);
+  
+  console.log(
+    `[guest-planning] @${accountId ? 'account_exists' : 'no_account'} target=${targetCount} cached=${currentCachedCount} missing=${missingCount} mode=${executionMode} boundary=${guestBoundary} expected_final=${expectedFinalBoundary} continue_from=${excavationContinueFrom?.toISOString().slice(0, 19) ?? 'earliest'}`
+  );
   
   return {
     targetCount,
     currentCachedCount,
+    missingCount,
     excavationNeeded,
+    executionMode,
     guestBoundary,
     strategy: excavationNeeded ? "excavation" : "cache-only",
+    excavationContinueFrom,
+    excavationTargetCount,
+    expectedFinalBoundary,
   };
 }
 

@@ -38,21 +38,54 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ toke
       tweet.full_text?.includes('🔄 Excavation in progress')
     );
 
-    if (isPlaceholder) {
-      // Try to get actual excavated data with proper boundary logic
-      const { getAccountByUsernamePg, getTweetsByAccountForGuestPg } = await import("@/lib/repository");
-      const { planGuestUnlock } = await import("@/lib/unlockPlanning");
+    if (isPlaceholder && tempUnlock.job_id) {
+      // Check if the excavation job has completed
+      const { getJobPg, getAccountByUsernamePg, getTweetsByAccountUpToBoundaryPg, getCachedTweetCountPg } = await import("@/lib/repository");
+      const { computeTargetCount } = await import("@/lib/unlockPlanning");
       
-      const account = await getAccountByUsernamePg(tempUnlock.username);
-      if (account) {
-        const plan = await planGuestUnlock(account.account_id, account.created_at);
-        if (plan.strategy === "cache-only" && plan.guestBoundary) {
-          // Real data is available - return it with proper boundary
-          const actualTweets = await getTweetsByAccountForGuestPg(account.account_id, plan.guestBoundary);
-          if (actualTweets.length > 0) {
-            console.log(`[results] Found actual excavated data for ${tempUnlock.username}: ${actualTweets.length} tweets (boundary=${plan.guestBoundary})`);
-            tweets = actualTweets;
+      const job = await getJobPg(tempUnlock.job_id);
+      if (job && job.status === 'succeeded' && job.result_json) {
+        try {
+          const excavationResult = JSON.parse(job.result_json);
+          const account = await getAccountByUsernamePg(tempUnlock.username);
+          
+          if (account && excavationResult.accountId) {
+            // Calculate final boundary using same logic as job completion
+            const timelineExhausted = 
+              excavationResult.timelineExhausted === true &&
+              excavationResult.stopReason === "ACCOUNT_HAS_LESS_THAN_LIMIT";
+            
+            let finalBoundary: number;
+            if (timelineExhausted) {
+              // Timeline exhausted: use cache-based boundary
+              const cachedCount = await getCachedTweetCountPg(excavationResult.accountId);
+              const targetCount = computeTargetCount(account.created_at);
+              finalBoundary = Math.min(targetCount, cachedCount);
+              console.log(
+                `[results] Timeline exhausted — cache-based boundary: cached=${cachedCount}, target=${targetCount}, finalBoundary=${finalBoundary}`,
+              );
+            } else {
+              // Normal completion: use fetched count
+              finalBoundary = excavationResult.fetchedCount;
+              console.log(
+                `[results] Normal completion — fetched boundary: fetchedCount=${excavationResult.fetchedCount}, finalBoundary=${finalBoundary}`,
+              );
+            }
+
+            if (finalBoundary > 0) {
+              // Get actual excavated tweets with proper boundary
+              const actualTweets = await getTweetsByAccountUpToBoundaryPg(excavationResult.accountId, finalBoundary);
+              if (actualTweets.length > 0) {
+                console.log(
+                  `[results] ✅ Job completed: ${tempUnlock.username} (job: ${tempUnlock.job_id}), ` +
+                  `boundary=${finalBoundary}, tweets=${actualTweets.length}, timelineExhausted=${timelineExhausted}`
+                );
+                tweets = actualTweets;
+              }
+            }
           }
+        } catch (parseError) {
+          console.error(`[results] Failed to parse job result for ${tempUnlock.job_id}:`, parseError);
         }
       }
     }
