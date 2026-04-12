@@ -46,6 +46,8 @@ import {
   getUserBoundaryEndPg,
   setExtendCooldownAfterTimelineExhaustPg,
   upsertDiamondSnapshotPg,
+  updateTemporaryUnlockPg,
+  getTweetsByAccountUpToBoundaryPg,
 } from "./repository";
 import { tokenPool } from "./tokenPool";
 import { XApiStop } from "./xclient";
@@ -961,6 +963,35 @@ async function runJobAsync(jobId: string): Promise<void> {
           `[jobs] Job ${jobId}: failed to persist diamond snapshot (non-fatal):`,
           e,
         );
+      }
+    }
+
+    // ── Update guest temporary unlocks with actual excavation results ──────────
+    if (requestingUserId === "anonymous" && result.accountId) {
+      try {
+        // Get actual tweets to update temporary unlock
+        const newCachedCount = await getCachedTweetCountPg(result.accountId);
+        let actualTweets: any[] = [];
+        
+        // Determine boundary for guest access (same logic as boundary calculation)
+        let guestBoundary: number;
+        if (isAdditionalExcavation && additionalExcavationData) {
+          guestBoundary = Math.min(additionalExcavationData.targetBoundary, newCachedCount);
+        } else {
+          const timelineExhausted = result.timelineExhausted === true && result.stopReason === "ACCOUNT_HAS_LESS_THAN_LIMIT";
+          guestBoundary = timelineExhausted ? Math.min(limit, newCachedCount) : result.fetchedCount;
+        }
+        
+        if (guestBoundary > 0) {
+          actualTweets = await getTweetsByAccountUpToBoundaryPg(result.accountId, guestBoundary);
+        }
+        
+        const updated = await updateTemporaryUnlockPg(jobId, result.accountId, actualTweets);
+        if (updated) {
+          console.log(`[guest-unlock] Updated temporary unlock for job ${jobId} with ${actualTweets.length} tweets (boundary=${guestBoundary})`);
+        }
+      } catch (e) {
+        console.warn(`[guest-unlock] Failed to update temporary unlock for job ${jobId} (non-fatal):`, e);
       }
     }
 

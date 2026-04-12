@@ -1351,6 +1351,30 @@ export async function getUserPlanPg(userId: string): Promise<'free' | 'basic'> {
 }
 
 /**
+ * Update temporary unlock with actual excavation results (Postgres version).
+ */
+export async function updateTemporaryUnlockPg(jobId: string, accountId: string, tweets: any[]): Promise<boolean> {
+  try {
+    const result = await pgQuery(
+      "UPDATE temporary_unlocks SET tweets_json = $1 WHERE job_id = $2 AND account_id = $3 RETURNING token",
+      [JSON.stringify(tweets), jobId, accountId]
+    );
+    
+    if (result.rowCount && result.rowCount > 0) {
+      const token = result.rows[0].token;
+      console.log(`[temporary-unlock] Updated token ${token} with ${tweets.length} tweets (job: ${jobId})`);
+      return true;
+    } else {
+      console.log(`[temporary-unlock] No temporary unlock found for job ${jobId}, account ${accountId}`);
+      return false;
+    }
+  } catch (error) {
+    console.error("[repository] updateTemporaryUnlockPg error:", error);
+    return false;
+  }
+}
+
+/**
  * Clean up expired temporary unlocks (Postgres version).
  */
 export async function cleanupExpiredTemporaryUnlocksPg(): Promise<number> {

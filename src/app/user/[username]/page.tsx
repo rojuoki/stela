@@ -347,9 +347,19 @@ export default function UserPage() {
     await ensureMinTime(excavationState.startedAt);
     refreshCredits();
     
-    // Start resync phase instead of exiting immediately
-    startResyncPhase();
-  }, [excavationState.startedAt, refreshCredits, startResyncPhase]);
+    // Check if this is a guest unlock
+    const guestResultToken = sessionStorage.getItem("guest-result-token");
+    
+    if (guestResultToken) {
+      // Guest flow: navigate to result page with completed data
+      sessionStorage.removeItem("guest-result-token");
+      router.push(`/results/${guestResultToken}`);
+      exitExcavationMode();
+    } else {
+      // Logged-in flow: start resync phase
+      startResyncPhase();
+    }
+  }, [excavationState.startedAt, refreshCredits, startResyncPhase, router, exitExcavationMode]);
 
   const handleInitialJob = useCallback(async (jobId: string) => {
     setExcavationState(prev => ({
@@ -359,10 +369,20 @@ export default function UserPage() {
     }));
 
     await pollJob(jobId, () => {
-      // Start resync phase instead of exiting immediately
-      startResyncPhase();
+      // Check if this is a guest unlock
+      const guestResultToken = sessionStorage.getItem("guest-result-token");
+      
+      if (guestResultToken) {
+        // Guest flow: navigate to result page with completed data
+        sessionStorage.removeItem("guest-result-token");
+        router.push(`/results/${guestResultToken}`);
+        exitExcavationMode();
+      } else {
+        // Logged-in flow: start resync phase
+        startResyncPhase();
+      }
     });
-  }, [pollJob, startResyncPhase]);
+  }, [pollJob, startResyncPhase, router, exitExcavationMode]);
 
   // Main excavation flow orchestration - migrated from /excavating page useEffect
   useEffect(() => {
@@ -736,7 +756,7 @@ export default function UserPage() {
     }
   };
 
-  // Handle "Unlock for $4" button - guest purchase via Stripe
+  // Handle "Unlock for $4" button - guest purchase via in-page excavation
   const handleUnlockForPrice = async () => {
     if (!accountData || accountData.protected) return;
 
@@ -749,7 +769,7 @@ export default function UserPage() {
       const isDev = process.env.NODE_ENV === 'development';
 
       if (isDev) {
-        // 開発環境: 既存プレースホルダー維持
+        // 開発環境: In-page excavation instead of immediate redirect
         const res = await apiFetch("/api/purchase/guest-unlock", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -769,11 +789,18 @@ export default function UserPage() {
         const unlockData = await res.json();
 
         if (unlockData.redirectUrl) {
-          // Note: starting state will be cleared when page redirects
+          // External redirect (e.g., Stripe) - preserve existing behavior
           window.location.href = unlockData.redirectUrl;
-        } else if (unlockData.resultToken) {
-          // Note: starting state will be cleared when page navigates
-          router.push(`/results/${unlockData.resultToken}`);
+        } else if (unlockData.source === "cached") {
+          // Cache hit - store result token and start resync
+          setIsStarting(false);
+          sessionStorage.setItem("guest-result-token", unlockData.resultToken);
+          startExcavation('initial-cached');
+        } else if (unlockData.jobId) {
+          // Excavation needed - start in-page excavation
+          setIsStarting(false);
+          sessionStorage.setItem("guest-result-token", unlockData.resultToken);
+          startExcavation('initial', unlockData.jobId);
         } else {
           setIsStarting(false);
           setError("Unexpected response from server");

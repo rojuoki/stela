@@ -3,11 +3,17 @@
 import Link from "next/link";
 import { useUser } from "@/contexts/UserContext";
 import { useState, useRef, useEffect } from "react";
+import { usePathname } from "next/navigation";
 
 export function NavBar() {
   const { user, loading, credits, subscription, logout } = useUser();
+  const pathname = usePathname();
   const [userMenuOpen, setUserMenuOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
+
+  // Disable auth links on guest result pages to avoid competing with central CTA
+  const isGuestResultPage = pathname?.startsWith('/results/') && !user;
+  const disableAuthLinks = isGuestResultPage;
 
   // Close menu when clicking outside
   useEffect(() => {
@@ -226,13 +232,21 @@ export function NavBar() {
                 </Link>
                 <Link
                   href="/login"
-                  className="text-sm text-zinc-300 hover:text-white transition-colors"
+                  className={`text-sm transition-colors ${
+                    disableAuthLinks
+                      ? 'text-zinc-500 opacity-50 pointer-events-none cursor-default'
+                      : 'text-zinc-300 hover:text-white'
+                  }`}
                 >
                   Sign In
                 </Link>
                 <Link
                   href="/signup"
-                  className="text-sm bg-white text-black font-semibold px-4 py-2 rounded-lg hover:bg-zinc-200 transition-colors"
+                  className={`text-sm font-semibold px-4 py-2 rounded-lg transition-colors ${
+                    disableAuthLinks
+                      ? 'bg-zinc-600 text-zinc-400 opacity-50 pointer-events-none cursor-default'
+                      : 'bg-white text-black hover:bg-zinc-200'
+                  }`}
                 >
                   Sign Up
                 </Link>

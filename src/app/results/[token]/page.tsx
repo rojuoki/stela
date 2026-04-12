@@ -7,10 +7,9 @@ import { notFound } from "next/navigation";
 import { EngagementChart } from "../../../components/EngagementChart";
 import { TweetCard, tweetElementId } from "../../../components/TweetCard";
 import { AccountHeader } from "../../../components/AccountHeader";
-import { JobStatus } from "../../../components/JobStatus";
 import { StatusBar } from "../../../components/StatusBar";
 import { useUser } from "../../../contexts/UserContext";
-import type { TweetData, AccountData, Status, JobPhase } from "../../../components/types";
+import type { TweetData, AccountData } from "../../../components/types";
 
 interface TemporaryUnlockData {
   token: string;
@@ -35,13 +34,6 @@ export default function ResultsPage() {
   const [error, setError] = useState<string | null>(null);
   const [transferring, setTransferring] = useState(false);
   const [transferred, setTransferred] = useState(false);
-  const [isExcavating, setIsExcavating] = useState(false);
-  
-  // Job status tracking
-  const [jobStatus, setJobStatus] = useState<Status>("idle");
-  const [jobPhase, setJobPhase] = useState<JobPhase>(null);
-  const [jobInfo, setJobInfo] = useState<string>("");
-  const [jobResumeAt, setJobResumeAt] = useState<string | null>(null);
 
   const scrollToTweetByPostId = useCallback((postId: string) => {
     const el = document.getElementById(tweetElementId(postId));
@@ -73,18 +65,16 @@ export default function ResultsPage() {
         const result = await response.json();
         setData(result);
         
-        // Check if this is placeholder/excavating data
+        // Check if this contains placeholder data - if so, redirect to user page
         const isPlaceholder = result.tweets?.some((tweet: TweetData) => 
           tweet.post_id?.startsWith('excavating_') || 
           tweet.full_text?.includes('🔄 Excavation in progress')
         );
-        setIsExcavating(isPlaceholder);
         
-        // Initialize job status if this is a guest result with active excavation
-        if (isPlaceholder && result.job_id) {
-          setJobStatus("running");
-          setJobPhase("running");
-          setJobInfo("Starting excavation...");
+        if (isPlaceholder) {
+          // Redirect to user page where excavation should be handled
+          router.push(`/user/${result.username}`);
+          return;
         }
 
         // Load account data for header
@@ -105,127 +95,8 @@ export default function ResultsPage() {
     loadData();
   }, [token]);
 
-  // Polling for excavation completion
-  useEffect(() => {
-    if (!isExcavating || !token) return;
-
-    const pollInterval = 5000; // Poll every 5 seconds
-    let pollTimer: NodeJS.Timeout;
-
-    const pollForUpdates = async () => {
-      try {
-        const response = await fetch(`/api/results/${token}`);
-        if (response.ok) {
-          const result = await response.json();
-          
-          // Check if excavation is still in progress
-          const stillExcavating = result.tweets?.some((tweet: TweetData) => 
-            tweet.post_id?.startsWith('excavating_') || 
-            tweet.full_text?.includes('🔄 Excavation in progress')
-          );
-
-          if (!stillExcavating) {
-            // Excavation completed - update data and stop polling
-            setData(result);
-            setIsExcavating(false);
-            console.log(`[results] Excavation completed for token ${token}`);
-          } else {
-            // Still excavating - schedule next poll
-            pollTimer = setTimeout(pollForUpdates, pollInterval);
-          }
-        } else {
-          // Error occurred - stop polling and let user refresh manually
-          console.warn(`[results] Polling error for token ${token}:`, response.status);
-          setIsExcavating(false);
-        }
-      } catch (err) {
-        // Network error - stop polling
-        console.warn(`[results] Polling network error for token ${token}:`, err);
-        setIsExcavating(false);
-      }
-    };
-
-    // Start polling after initial load
-    pollTimer = setTimeout(pollForUpdates, pollInterval);
-    console.log(`[results] Started polling for excavation completion: ${token}`);
-
-    return () => {
-      if (pollTimer) {
-        clearTimeout(pollTimer);
-        console.log(`[results] Stopped polling for token ${token}`);
-      }
-    };
-  }, [isExcavating, token]);
-
-  // Job status polling for guest results with active excavation
-  useEffect(() => {
-    if (!data?.job_id || !isExcavating) return;
-
-    const pollInterval = 3000; // Poll every 3 seconds for job status
-    let pollTimer: NodeJS.Timeout;
-
-    const pollJobStatus = async () => {
-      try {
-        const response = await fetch(`/api/jobs/${data.job_id}`);
-        if (response.ok) {
-          const jobData = await response.json();
-          
-          // Update job status for UI display
-          const status = jobData.status;
-          setJobResumeAt(jobData.resumeAt);
-          
-          if (status === 'waiting_rate_limit') {
-            setJobStatus("running");
-            setJobPhase("waiting_rate_limit");
-            setJobInfo("API rate limit - will resume automatically");
-          } else if (status === 'queued') {
-            setJobStatus("running");
-            setJobPhase("queued");
-            const position = jobData.queuePosition;
-            setJobInfo(position ? `Position ${position} in queue` : "Queued for excavation");
-          } else if (status === 'running') {
-            setJobStatus("running");
-            setJobPhase("running");
-            setJobInfo(`Excavating earliest posts (${jobData.apiCalls || 0} API calls)`);
-          } else if (status === 'succeeded') {
-            // Job completed - the main result polling will pick up the new data
-            setJobStatus("done");
-            setJobPhase(null);
-            setJobInfo("Excavation completed");
-          } else if (status === 'failed') {
-            setJobStatus("failed");
-            setJobPhase(null);
-            setJobInfo("Excavation failed");
-            setIsExcavating(false); // Stop polling for results
-          }
-          
-          // Continue polling if job is still active
-          if (['queued', 'running', 'waiting_rate_limit'].includes(status)) {
-            pollTimer = setTimeout(pollJobStatus, pollInterval);
-          }
-        } else {
-          console.warn(`[results] Job status polling error for ${data.job_id}:`, response.status);
-          // Continue polling on HTTP errors
-          pollTimer = setTimeout(pollJobStatus, pollInterval);
-        }
-      } catch (err) {
-        console.warn(`[results] Job status polling network error for ${data.job_id}:`, err);
-        // Continue polling on network errors
-        pollTimer = setTimeout(pollJobStatus, pollInterval);
-      }
-    };
-
-    // Start job status polling
-    pollTimer = setTimeout(pollJobStatus, pollInterval);
-    console.log(`[results] Started job status polling for ${data.job_id}`);
-
-    return () => {
-      if (pollTimer) {
-        clearTimeout(pollTimer);
-        console.log(`[results] Stopped job status polling for ${data.job_id}`);
-      }
-    };
-  }, [data?.job_id, isExcavating]);
+  // Removed: All excavation polling logic
+  // Result page now only handles completed results
 
   // Transfer to account when user signs up/logs in
   const handleTransferToAccount = async () => {
@@ -358,18 +229,7 @@ export default function ResultsPage() {
         </Link>
       </div>
 
-      {/* Account Header */}
-      {accountData && (
-        <div className="mb-6">
-          <AccountHeader
-            status="found"
-            data={accountData}
-            error={null}
-          />
-        </div>
-      )}
-
-      {/* Account Creation Prompt - only for guest users */}
+      {/* Guest Account Creation Prompt - restored large card design */}
       {!user && !transferred && (
         <div className="mb-6 bg-gradient-to-r from-blue-900/20 to-purple-900/20 border border-blue-800/50 rounded-xl p-6">
           <div className="text-center">
@@ -378,10 +238,12 @@ export default function ResultsPage() {
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 3v4M3 5h4M6 17v4m-2-2h4m5-16l2.286 6.857L21 12l-5.714 2.143L13 21l-2.286-6.857L5 12l5.714-2.143L13 3z" />
               </svg>
             </div>
-            <h3 className="text-lg font-semibold mb-2 text-white">Create a free account to save your unlock</h3>
-            <p className="text-sm text-zinc-400 mb-4 max-w-md mx-auto">
-              This unlock will be saved to your account so you can access it anytime. 
-              Plus you'll get 4 free credits to unlock more accounts.
+            <h3 className="text-lg font-semibold mb-2 text-white">Create a free account to save your excavation</h3>
+            <p className="text-sm text-zinc-400 mb-2 max-w-md mx-auto">
+              This excavation will be saved to your account so you can access it anytime.
+            </p>
+            <p className="text-xs text-amber-400 mb-4">
+              This link expires on {formatDate(data.expires_at)}
             </p>
             <div className="flex items-center justify-center gap-3">
               <Link
@@ -397,50 +259,38 @@ export default function ResultsPage() {
                 Sign In
               </Link>
             </div>
-            <p className="text-xs text-zinc-500 mt-3">
-              This unlock expires on {formatDate(data.expires_at)}
-            </p>
           </div>
+        </div>
+      )}
+
+      {/* Account Header */}
+      {accountData && (
+        <div className="mb-6">
+          <AccountHeader
+            status="found"
+            data={accountData}
+            error={null}
+          />
         </div>
       )}
 
       {/* Silently handle auto-transfer for logged-in users - no UI needed */}
 
-      {/* Job Status - show for guest results with active excavation */}
-      {data?.job_id && isExcavating && (
-        <JobStatus
-          status={jobStatus}
-          jobPhase={jobPhase}
-          jobInfo={jobInfo}
-          error={null}
-          credits={0} // Guest users don't have credits
-          cacheHit={false}
-          resumeAt={jobResumeAt}
-        />
-      )}
-
       {/* Results Display */}
       <div className="mb-4">
-        <h1 className="text-xl font-bold mb-4">Earliest Posts from {displayName}</h1>
-        
         <StatusBar
-          status={isExcavating ? "excavating" : "done"}
-          postCount={isExcavating ? undefined : data.tweets.length}
+          status="done"
+          postCount={data.tweets.length}
           creditCount={0} // Guest users don't have credits
-          subMessage={
-            isExcavating 
-              ? "Excavation in progress - results will appear automatically"
-              : "Guest unlock completed - results are available below"
-          }
+          subMessage="Guest unlock completed - results are available below"
         />
         
-        <p className="text-sm text-zinc-400 mt-2">
-          {isExcavating ? (
-            <>Excavation started on {formatDate(data.created_at)} • Results will appear shortly</>
-          ) : (
-            <>Unlocked on {formatDate(data.created_at)}</>
-          )}
-        </p>
+        {/* Logged-in users: show unlocked date */}
+        {user && (
+          <p className="text-sm text-zinc-400 mt-2">
+            Unlocked on {formatDate(data.created_at)}
+          </p>
+        )}
       </div>
 
       {/* Engagement Chart */}
@@ -449,21 +299,7 @@ export default function ResultsPage() {
       )}
 
       {/* Tweet list */}
-      {isExcavating ? (
-        <div className="border border-zinc-800 rounded-xl min-h-[200px] flex items-center justify-center">
-          <div className="text-center max-w-md px-6">
-            <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-white mx-auto mb-4"></div>
-            <h3 className="text-lg font-semibold text-white mb-2">Excavating Earliest Posts</h3>
-            <p className="text-sm text-zinc-400 mb-2">
-              Our system is working to discover the earliest posts from {displayName}'s timeline. 
-              This process can take a few minutes depending on the account's history.
-            </p>
-            <p className="text-xs text-zinc-500">
-              Results will automatically appear when excavation is complete. No need to refresh the page.
-            </p>
-          </div>
-        </div>
-      ) : hasResults ? (
+      {hasResults ? (
         <div className="border border-zinc-800 rounded-xl overflow-hidden">
           {data.tweets.map((tweet) => (
             <TweetCard key={tweet.post_id} tweet={tweet} />
