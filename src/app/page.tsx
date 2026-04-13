@@ -147,12 +147,12 @@ export default function Home() {
             STELA
           </h1>
           <p className="text-zinc-400 text-lg">
-            Unlock the earliest posts of any public X account.
+            Discover the earliest posts of any public X account
           </p>
         </div>
 
         {/* Search Input */}
-        <div className="flex gap-2 mb-6">
+        <div className="flex gap-2 mb-10 max-w-lg mx-auto px-2">
           <div className="relative flex-1">
             <span className="absolute left-3 top-1/2 -translate-y-1/2 text-zinc-500">
               @
@@ -166,51 +166,136 @@ export default function Home() {
               }}
               onKeyDown={handleKeyDown}
               placeholder="username (min 3 chars)"
-              className="w-full bg-zinc-900 border border-zinc-700 rounded-lg pl-8 pr-3 py-3 text-sm focus:outline-none focus:border-zinc-500 focus:ring-1 focus:ring-zinc-500"
+              className="w-full bg-zinc-900 border border-zinc-700 rounded-lg pl-8 pr-3 py-2 text-sm focus:outline-none focus:border-zinc-500 focus:ring-1 focus:ring-zinc-500"
             />
           </div>
           <button
             onClick={handleLookupClick}
             disabled={!username.trim() || username.length < 3}
-            className="bg-white text-black font-semibold text-sm px-6 py-3 rounded-lg hover:bg-zinc-200 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+            className="bg-white text-black font-semibold text-sm px-5 py-2 rounded-lg hover:bg-zinc-200 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
           >
             Search
           </button>
         </div>
 
-        {/* Info Section */}
-        <div className="border border-zinc-800 rounded-xl p-8 text-center">
+        {/* Mock Status Bar (visual only) */}
+        <div className="mb-8 px-8">
           <div className="mb-4">
-            <svg className="w-12 h-12 mx-auto text-zinc-600 mb-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
-            </svg>
+            <div className="flex items-center justify-between gap-2 mb-2">
+              <div className="flex items-center gap-2 text-xs">
+                <span className="relative flex h-2.5 w-2.5">
+                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full opacity-75 bg-amber-400" />
+                  <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-amber-400" />
+                </span>
+                <span className="text-amber-400 font-medium">Standby</span>
+              </div>
+            </div>
+            <div className="text-xs text-amber-300/70">
+              Awaiting excavation input
+            </div>
           </div>
-          <h3 className="text-lg font-semibold mb-2">Ready to Explore</h3>
-          <p className="text-zinc-400 mb-4">
-            Enter any public X username above to discover their earliest posts and see how their voice evolved over time.
-          </p>
-          
+        </div>
+
+        {/* Info Section */}
+        <div className="border border-zinc-800 rounded-xl p-8 bg-blue-950/30">
           {!user && (
-            <div className="border-t border-zinc-800 pt-4 mt-4">
-              <p className="text-sm text-zinc-500 mb-3">
-                Sign up for an account to unlock more features and get credits
+            <div className="mb-8 rounded-xl p-6 text-center">
+              <div className="text-zinc-500 mb-3">
+                <svg
+                  className="w-10 h-10 mx-auto"
+                  fill="none"
+                  viewBox="0 0 24 24"
+                  stroke="currentColor"
+                >
+                  <path
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    strokeWidth={1.5}
+                    d="M21 21l-4.35-4.35m1.85-5.15a7 7 0 11-14 0 7 7 0 0114 0z"
+                  />
+                </svg>
+              </div>
+              <h3 className="text-white text-2xl font-semibold mb-3">Ready to Explore</h3>
+              <p className="text-zinc-400 text-base leading-relaxed mb-5 max-w-md mx-auto">
+                Enter any public X username above to discover their earliest posts and see how
+                their voice evolved over time.
               </p>
-              <div className="flex justify-center gap-3">
-                <a 
-                  href="/signup" 
-                  className="bg-white text-black font-semibold px-4 py-2 rounded-lg hover:bg-zinc-200 transition-colors text-sm"
-                >
-                  Create Account
-                </a>
-                <a 
-                  href="/login" 
-                  className="border border-zinc-700 text-zinc-300 font-semibold px-4 py-2 rounded-lg hover:bg-zinc-900 transition-colors text-sm"
-                >
-                  Sign In
-                </a>
+              <div className="border-t border-zinc-800 pt-4">
+                <p className="text-sm text-zinc-500 mb-3">
+                  Sign up for an account to unlock more features and get credits
+                </p>
+                <div className="flex justify-center gap-3">
+                  <a
+                    href="/signup"
+                    className="bg-white text-black font-semibold px-4 py-2 rounded-lg hover:bg-zinc-200 transition-colors text-sm"
+                  >
+                    Create Account
+                  </a>
+                  <a
+                    href="/login"
+                    className="border border-zinc-700 text-zinc-300 font-semibold px-4 py-2 rounded-lg hover:bg-zinc-900 transition-colors text-sm"
+                  >
+                    Sign In
+                  </a>
+                </div>
               </div>
             </div>
           )}
+
+          <div className="max-w-xl text-left">
+            <p className="mb-8 text-zinc-400 text-sm leading-relaxed">
+              <span className="text-white font-semibold">
+                🪦 See How They Started{" "}
+              </span>
+              — what they were, before they had followers, before the image they have today,
+              and trace how that early voice took shape over time, post by post. Uncover what&apos;s been buried,
+              keep excavating deeper into their past, and collect what you find along the way, building your own
+              archive you can revisit, compare, and use as your understanding grows.
+            </p>
+
+            <div className="space-y-6">
+            <div className="flex items-start gap-4">
+              <div className="flex-shrink-0 w-8 h-8 bg-zinc-700 rounded-full flex items-center justify-center text-sm font-semibold">
+                1
+              </div>
+              <div>
+                <h4 className="font-semibold text-zinc-200 mb-1">Set up your account 📝</h4>
+                <p className="text-zinc-400 text-sm">Create an account to start excavating and get credits. Credits are required for excavation.</p>
+              </div>
+            </div>
+
+            <div className="flex items-start gap-4">
+              <div className="flex-shrink-0 w-8 h-8 bg-zinc-700 rounded-full flex items-center justify-center text-sm font-semibold">
+                2
+              </div>
+              <div>
+                <h4 className="font-semibold text-zinc-200 mb-1">Enter a username 🔍</h4>
+                <p className="text-zinc-400 text-sm">Load any X account.</p>
+              </div>
+            </div>
+
+            <div className="flex items-start gap-4">
+              <div className="flex-shrink-0 w-8 h-8 bg-zinc-700 rounded-full flex items-center justify-center text-sm font-semibold">
+                3
+              </div>
+              <div>
+                <h4 className="font-semibold text-zinc-200 mb-1">Start excavation ⛏️</h4>
+                <p className="text-zinc-400 text-sm">Stela digs into the account and shows you the earliest posts, along with engagement data and context from when they were originally posted.</p>
+              </div>
+            </div>
+
+            <div className="flex items-start gap-4">
+              <div className="flex-shrink-0 w-8 h-8 bg-zinc-700 rounded-full flex items-center justify-center text-sm font-semibold">
+                4
+              </div>
+              <div>
+                <h4 className="font-semibold text-zinc-200 mb-1">Keep excavating 🐪</h4>
+                <p className="text-zinc-400 text-sm">Continue in +100 post blocks whenever you want to go deeper.</p>
+              </div>
+            </div>
+            </div>
+          </div>
+
         </div>
       </main>
 
