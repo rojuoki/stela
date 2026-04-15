@@ -4,6 +4,7 @@ import { useEffect } from "react";
 import Link from "next/link";
 import { useUser } from "@/contexts/UserContext";
 import { useRouter } from "next/navigation";
+import { SUBSCRIPTION_ENABLED } from "@/lib/featureFlags";
 
 export default function AccountDashboard() {
   const { user, loading, credits, subscription } = useUser();
@@ -43,21 +44,23 @@ export default function AccountDashboard() {
           <div className="flex-1">
             <div className="flex items-center gap-3 mb-2">
               <h2 className="text-xl font-semibold">{user.name}</h2>
-              {subscription.plan === 'basic' ? (
-                <div className="flex items-center gap-1.5 bg-gradient-to-r from-blue-600/20 to-purple-600/20 border border-blue-500/30 px-2.5 py-1 rounded-full text-xs">
-                  <svg className="w-3.5 h-3.5 text-blue-400" fill="currentColor" viewBox="0 0 20 20">
-                    <path d="M9.049 2.927c.3-.921 1.603-.921 1.902 0l1.519 4.674a1 1 0 00.95.69h4.915c.969 0 1.371 1.24.588 1.81l-3.976 2.888a1 1 0 00-.363 1.118l1.518 4.674c.3.922-.755 1.688-1.538 1.118l-3.976-2.888a1 1 0 00-1.176 0l-3.976 2.888c-.783.57-1.838-.197-1.538-1.118l1.518-4.674a1 1 0 00-.363-1.118l-3.976-2.888c-.784-.57-.38-1.81.588-1.81h4.914a1 1 0 00.951-.69l1.519-4.674z" />
-                  </svg>
-                  <span className="font-medium text-blue-300">Basic Subscriber</span>
-                </div>
-              ) : (
-                <div className="flex items-center gap-1.5 bg-zinc-800 border border-zinc-700 px-2.5 py-1 rounded-full text-xs">
-                  <span className="text-zinc-400">Free Plan</span>
-                </div>
+              {SUBSCRIPTION_ENABLED && (
+                subscription.plan === 'basic' ? (
+                  <div className="flex items-center gap-1.5 bg-gradient-to-r from-blue-600/20 to-purple-600/20 border border-blue-500/30 px-2.5 py-1 rounded-full text-xs">
+                    <svg className="w-3.5 h-3.5 text-blue-400" fill="currentColor" viewBox="0 0 20 20">
+                      <path d="M9.049 2.927c.3-.921 1.603-.921 1.902 0l1.519 4.674a1 1 0 00.95.69h4.915c.969 0 1.371 1.24.588 1.81l-3.976 2.888a1 1 0 00-.363 1.118l1.518 4.674c.3.922-.755 1.688-1.538 1.118l-3.976-2.888a1 1 0 00-1.176 0l-3.976 2.888c-.783.57-1.838-.197-1.538-1.118l1.518-4.674a1 1 0 00-.363-1.118l-3.976-2.888c-.784-.57-.38-1.81.588-1.81h4.914a1 1 0 00.951-.69l1.519-4.674z" />
+                    </svg>
+                    <span className="font-medium text-blue-300">Basic Subscriber</span>
+                  </div>
+                ) : (
+                  <div className="flex items-center gap-1.5 bg-zinc-800 border border-zinc-700 px-2.5 py-1 rounded-full text-xs">
+                    <span className="text-zinc-400">Free Plan</span>
+                  </div>
+                )
               )}
             </div>
             <p className="text-zinc-400 mb-2">{user.email}</p>
-            {subscription.plan === 'basic' && subscription.cycleEnd && (
+            {SUBSCRIPTION_ENABLED && subscription.plan === 'basic' && subscription.cycleEnd && (
               <p className="text-xs text-zinc-500">
                 Next billing: {new Date(subscription.cycleEnd).toLocaleDateString()} • {subscription.creditsPerCycle || 4} credits/month
               </p>
@@ -103,56 +106,58 @@ export default function AccountDashboard() {
         </Link>
 
         {/* Subscription/Credits */}
-        {subscription.plan === 'basic' ? (
-          <Link
-            href="/account/subscription"
-            className="bg-zinc-900 border border-zinc-800 rounded-xl p-6 hover:border-zinc-700 transition-colors group"
-          >
-            <div className="flex items-start justify-between mb-4">
-              <div className="w-12 h-12 bg-gradient-to-br from-blue-900/50 to-purple-900/50 rounded-lg flex items-center justify-center group-hover:bg-gradient-to-br group-hover:from-blue-900/70 group-hover:to-purple-900/70 transition-all">
-                <svg className="w-6 h-6 text-blue-400" fill="currentColor" viewBox="0 0 20 20">
-                  <path d="M9.049 2.927c.3-.921 1.603-.921 1.902 0l1.519 4.674a1 1 0 00.95.69h4.915c.969 0 1.371 1.24.588 1.81l-3.976 2.888a1 1 0 00-.363 1.118l1.518 4.674c.3.922-.755 1.688-1.538 1.118l-3.976-2.888a1 1 0 00-1.176 0l-3.976 2.888c-.783.57-1.838-.197-1.538-1.118l1.518-4.674a1 1 0 00-.363-1.118l-3.976-2.888c-.784-.57-.38-1.81.588-1.81h4.914a1 1 0 00.951-.69l1.519-4.674z" />
+        {SUBSCRIPTION_ENABLED && (
+          subscription.plan === 'basic' ? (
+            <Link
+              href="/account/subscription"
+              className="bg-zinc-900 border border-zinc-800 rounded-xl p-6 hover:border-zinc-700 transition-colors group"
+            >
+              <div className="flex items-start justify-between mb-4">
+                <div className="w-12 h-12 bg-gradient-to-br from-blue-900/50 to-purple-900/50 rounded-lg flex items-center justify-center group-hover:bg-gradient-to-br group-hover:from-blue-900/70 group-hover:to-purple-900/70 transition-all">
+                  <svg className="w-6 h-6 text-blue-400" fill="currentColor" viewBox="0 0 20 20">
+                    <path d="M9.049 2.927c.3-.921 1.603-.921 1.902 0l1.519 4.674a1 1 0 00.95.69h4.915c.969 0 1.371 1.24.588 1.81l-3.976 2.888a1 1 0 00-.363 1.118l1.518 4.674c.3.922-.755 1.688-1.538 1.118l-3.976-2.888a1 1 0 00-1.176 0l-3.976 2.888c-.783.57-1.838-.197-1.538-1.118l1.518-4.674a1 1 0 00-.363-1.118l-3.976-2.888c-.784-.57-.38-1.81.588-1.81h4.914a1 1 0 00.951-.69l1.519-4.674z" />
+                  </svg>
+                </div>
+                <svg className="w-5 h-5 text-zinc-500 group-hover:text-zinc-400 transition-colors" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
                 </svg>
               </div>
-              <svg className="w-5 h-5 text-zinc-500 group-hover:text-zinc-400 transition-colors" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
-              </svg>
-            </div>
-            <h3 className="text-lg font-semibold mb-2">Manage Subscription</h3>
-            <p className="text-zinc-400 text-sm">
-              View billing, update payment method, cancel subscription
-            </p>
-            <div className="mt-3">
-              <span className="inline-flex items-center px-2 py-1 bg-gradient-to-r from-blue-900/50 to-purple-900/50 text-blue-300 text-xs font-medium rounded-full">
-                Basic • Active
-              </span>
-            </div>
-          </Link>
-        ) : (
-          <Link
-            href="/subscribe"
-            className="bg-zinc-900 border border-zinc-800 rounded-xl p-6 hover:border-zinc-700 transition-colors group"
-          >
-            <div className="flex items-start justify-between mb-4">
-              <div className="w-12 h-12 bg-gradient-to-br from-blue-900/50 to-purple-900/50 rounded-lg flex items-center justify-center group-hover:bg-gradient-to-br group-hover:from-blue-900/70 group-hover:to-purple-900/70 transition-all">
-                <svg className="w-6 h-6 text-blue-400" fill="currentColor" viewBox="0 0 20 20">
-                  <path d="M9.049 2.927c.3-.921 1.603-.921 1.902 0l1.519 4.674a1 1 0 00.95.69h4.915c.969 0 1.371 1.24.588 1.81l-3.976 2.888a1 1 0 00-.363 1.118l1.518 4.674c.3.922-.755 1.688-1.538 1.118l-3.976-2.888a1 1 0 00-1.176 0l-3.976 2.888c-.783.57-1.838-.197-1.538-1.118l1.518-4.674a1 1 0 00-.363-1.118l-3.976-2.888c-.784-.57-.38-1.81.588-1.81h4.914a1 1 0 00.951-.69l1.519-4.674z" />
+              <h3 className="text-lg font-semibold mb-2">Manage Subscription</h3>
+              <p className="text-zinc-400 text-sm">
+                View billing, update payment method, cancel subscription
+              </p>
+              <div className="mt-3">
+                <span className="inline-flex items-center px-2 py-1 bg-gradient-to-r from-blue-900/50 to-purple-900/50 text-blue-300 text-xs font-medium rounded-full">
+                  Basic • Active
+                </span>
+              </div>
+            </Link>
+          ) : (
+            <Link
+              href="/subscribe"
+              className="bg-zinc-900 border border-zinc-800 rounded-xl p-6 hover:border-zinc-700 transition-colors group"
+            >
+              <div className="flex items-start justify-between mb-4">
+                <div className="w-12 h-12 bg-gradient-to-br from-blue-900/50 to-purple-900/50 rounded-lg flex items-center justify-center group-hover:bg-gradient-to-br group-hover:from-blue-900/70 group-hover:to-purple-900/70 transition-all">
+                  <svg className="w-6 h-6 text-blue-400" fill="currentColor" viewBox="0 0 20 20">
+                    <path d="M9.049 2.927c.3-.921 1.603-.921 1.902 0l1.519 4.674a1 1 0 00.95.69h4.915c.969 0 1.371 1.24.588 1.81l-3.976 2.888a1 1 0 00-.363 1.118l1.518 4.674c.3.922-.755 1.688-1.538 1.118l-3.976-2.888a1 1 0 00-1.176 0l-3.976 2.888c-.783.57-1.838-.197-1.538-1.118l1.518-4.674a1 1 0 00-.363-1.118l-3.976-2.888c-.784-.57-.38-1.81.588-1.81h4.914a1 1 0 00.951-.69l1.519-4.674z" />
+                  </svg>
+                </div>
+                <svg className="w-5 h-5 text-zinc-500 group-hover:text-zinc-400 transition-colors" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
                 </svg>
               </div>
-              <svg className="w-5 h-5 text-zinc-500 group-hover:text-zinc-400 transition-colors" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
-              </svg>
-            </div>
-            <h3 className="text-lg font-semibold mb-2">Subscribe to Basic</h3>
-            <p className="text-zinc-400 text-sm">
-              Get 4 unlock credits per month • Better value than buying individual unlocks
-            </p>
-            <div className="mt-3">
-              <span className="inline-flex items-center px-2 py-1 bg-blue-900/50 text-blue-300 text-xs font-medium rounded-full">
-                $12/month
-              </span>
-            </div>
-          </Link>
+              <h3 className="text-lg font-semibold mb-2">Subscribe to Basic</h3>
+              <p className="text-zinc-400 text-sm">
+                Get 4 unlock credits per month • Better value than buying individual unlocks
+              </p>
+              <div className="mt-3">
+                <span className="inline-flex items-center px-2 py-1 bg-blue-900/50 text-blue-300 text-xs font-medium rounded-full">
+                  $12/month
+                </span>
+              </div>
+            </Link>
+          )
         )}
 
         {/* Buy Credits */}
@@ -176,7 +181,7 @@ export default function AccountDashboard() {
           </p>
           <div className="mt-3">
             <span className="inline-flex items-center px-2 py-1 bg-emerald-900/50 text-emerald-300 text-xs font-medium rounded-full">
-              $4 • No subscription
+              {SUBSCRIPTION_ENABLED ? "$1 • No subscription" : "$1"}
             </span>
           </div>
           {credits === 0 && (

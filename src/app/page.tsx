@@ -3,7 +3,6 @@
 import { useState, useEffect } from "react";
 import { DevPanel } from "../components/DevPanel";
 import { useUser } from "@/contexts/UserContext";
-
 /** True only when the dev panel is enabled at build time. */
 const DEV_PANEL = process.env.NEXT_PUBLIC_DEV_PANEL === "1";
 
@@ -146,8 +145,11 @@ export default function Home() {
           <h1 className="text-4xl font-bold mb-2 tracking-tight">
             STELA
           </h1>
-          <p className="text-zinc-400 text-lg">
-            Discover the earliest posts of any public X account
+          <p className="text-zinc-400 text-lg font-medium">
+            Deep historical insights for X accounts
+          </p>
+          <p className="text-zinc-500 text-sm mt-2">
+            Professional research and analysis beyond standard search limits
           </p>
         </div>
 
@@ -159,6 +161,10 @@ export default function Home() {
             </span>
             <input
               type="text"
+              name="stela-username-search"
+              autoComplete="off"
+              autoCorrect="off"
+              spellCheck={false}
               value={username}
               onChange={(e) => {
                 const cleanValue = e.target.value.replace(/^@/, "");
@@ -196,106 +202,11 @@ export default function Home() {
           </div>
         </div>
 
-        {/* Info Section */}
-        <div className="border border-zinc-800 rounded-xl p-8 bg-blue-950/30">
-          {!user && (
-            <div className="mb-8 rounded-xl p-6 text-center">
-              <div className="text-zinc-500 mb-3">
-                <svg
-                  className="w-10 h-10 mx-auto"
-                  fill="none"
-                  viewBox="0 0 24 24"
-                  stroke="currentColor"
-                >
-                  <path
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    strokeWidth={1.5}
-                    d="M21 21l-4.35-4.35m1.85-5.15a7 7 0 11-14 0 7 7 0 0114 0z"
-                  />
-                </svg>
-              </div>
-              <h3 className="text-white text-2xl font-semibold mb-3">Ready to Explore</h3>
-              <p className="text-zinc-400 text-base leading-relaxed mb-5 max-w-md mx-auto">
-                Enter any public X username above to discover their earliest posts and see how
-                their voice evolved over time.
-              </p>
-              <div className="border-t border-zinc-800 pt-4">
-                <p className="text-sm text-zinc-500 mb-3">
-                  Sign up for an account to unlock more features and get credits
-                </p>
-                <div className="flex justify-center gap-3">
-                  <a
-                    href="/signup"
-                    className="bg-white text-black font-semibold px-4 py-2 rounded-lg hover:bg-zinc-200 transition-colors text-sm"
-                  >
-                    Create Account
-                  </a>
-                  <a
-                    href="/login"
-                    className="border border-zinc-700 text-zinc-300 font-semibold px-4 py-2 rounded-lg hover:bg-zinc-900 transition-colors text-sm"
-                  >
-                    Sign In
-                  </a>
-                </div>
-              </div>
-            </div>
-          )}
-
-          <div className="max-w-xl text-left">
-            <p className="mb-8 text-zinc-400 text-sm leading-relaxed">
-              <span className="text-white font-semibold">
-                🪦 See How They Started{" "}
-              </span>
-              — what they were, before they had followers, before the image they have today,
-              and trace how that early voice took shape over time, post by post. Uncover what&apos;s been buried,
-              keep excavating deeper into their past, and collect what you find along the way, building your own
-              archive you can revisit, compare, and use as your understanding grows.
-            </p>
-
-            <div className="space-y-6">
-            <div className="flex items-start gap-4">
-              <div className="flex-shrink-0 w-8 h-8 bg-zinc-700 rounded-full flex items-center justify-center text-sm font-semibold">
-                1
-              </div>
-              <div>
-                <h4 className="font-semibold text-zinc-200 mb-1">Set up your account 📝</h4>
-                <p className="text-zinc-400 text-sm">Create an account to start excavating and get credits. Credits are required for excavation.</p>
-              </div>
-            </div>
-
-            <div className="flex items-start gap-4">
-              <div className="flex-shrink-0 w-8 h-8 bg-zinc-700 rounded-full flex items-center justify-center text-sm font-semibold">
-                2
-              </div>
-              <div>
-                <h4 className="font-semibold text-zinc-200 mb-1">Enter a username 🔍</h4>
-                <p className="text-zinc-400 text-sm">Load any X account.</p>
-              </div>
-            </div>
-
-            <div className="flex items-start gap-4">
-              <div className="flex-shrink-0 w-8 h-8 bg-zinc-700 rounded-full flex items-center justify-center text-sm font-semibold">
-                3
-              </div>
-              <div>
-                <h4 className="font-semibold text-zinc-200 mb-1">Start excavation ⛏️</h4>
-                <p className="text-zinc-400 text-sm">Stela digs into the account and shows you the earliest posts, along with engagement data and context from when they were originally posted.</p>
-              </div>
-            </div>
-
-            <div className="flex items-start gap-4">
-              <div className="flex-shrink-0 w-8 h-8 bg-zinc-700 rounded-full flex items-center justify-center text-sm font-semibold">
-                4
-              </div>
-              <div>
-                <h4 className="font-semibold text-zinc-200 mb-1">Keep excavating 🐪</h4>
-                <p className="text-zinc-400 text-sm">Continue in +100 post blocks whenever you want to go deeper.</p>
-              </div>
-            </div>
-            </div>
-          </div>
-
+        {/* Timeline placeholder (same card shell as before) */}
+        <div className="flex min-h-[22rem] items-center justify-center rounded-xl border border-zinc-800 bg-blue-950/30 p-8">
+          <p className="max-w-md text-center text-sm leading-relaxed text-zinc-600">
+            Timeline will appear here, starting from the earliest post.
+          </p>
         </div>
       </main>
 

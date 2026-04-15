@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useUser } from "@/contexts/UserContext";
 import { useState, useRef, useEffect } from "react";
 import { usePathname } from "next/navigation";
+import { SUBSCRIPTION_ENABLED } from "@/lib/featureFlags";
 
 export function NavBar() {
   const { user, loading, credits, subscription, logout } = useUser();
@@ -54,7 +55,7 @@ export function NavBar() {
                 {/* Subscription/Credits Display */}
                 <div className="hidden sm:flex items-center gap-4">
                   {/* Plan Badge */}
-                  {subscription.plan === 'basic' ? (
+                  {SUBSCRIPTION_ENABLED && subscription.plan === 'basic' ? (
                     <div className="flex items-center gap-1.5 bg-gradient-to-r from-blue-600/20 to-purple-600/20 border border-blue-500/30 px-2.5 py-1 rounded-full text-xs">
                       <svg className="w-3.5 h-3.5 text-blue-400" fill="currentColor" viewBox="0 0 20 20">
                         <path d="M9.049 2.927c.3-.921 1.603-.921 1.902 0l1.519 4.674a1 1 0 00.95.69h4.915c.969 0 1.371 1.24.588 1.81l-3.976 2.888a1 1 0 00-.363 1.118l1.518 4.674c.3.922-.755 1.688-1.538 1.118l-3.976-2.888a1 1 0 00-1.176 0l-3.976 2.888c-.783.57-1.838-.197-1.538-1.118l1.518-4.674a1 1 0 00-.363-1.118l-3.976-2.888c-.784-.57-.38-1.81.588-1.81h4.914a1 1 0 00.951-.69l1.519-4.674z" />
@@ -121,7 +122,7 @@ export function NavBar() {
                             </svg>
                             <span className="font-medium">{credits} credits</span>
                           </div>
-                          {subscription.plan === 'basic' ? (
+                          {SUBSCRIPTION_ENABLED && subscription.plan === 'basic' ? (
                             <div className="flex items-center gap-1 bg-gradient-to-r from-blue-600/20 to-purple-600/20 border border-blue-500/30 px-2 py-0.5 rounded-full text-xs">
                               <svg className="w-3 h-3 text-blue-400" fill="currentColor" viewBox="0 0 20 20">
                                 <path d="M9.049 2.927c.3-.921 1.603-.921 1.902 0l1.519 4.674a1 1 0 00.95.69h4.915c.969 0 1.371 1.24.588 1.81l-3.976 2.888a1 1 0 00-.363 1.118l1.518 4.674c.3.922-.755 1.688-1.538 1.118l-3.976-2.888a1 1 0 00-1.176 0l-3.976 2.888c-.783.57-1.838-.197-1.538-1.118l1.518-4.674a1 1 0 00-.363-1.118l-3.976-2.888c-.784-.57-.38-1.81.588-1.81h4.914a1 1 0 00.951-.69l1.519-4.674z" />
@@ -163,18 +164,20 @@ export function NavBar() {
                       <div className="border-t border-zinc-800 my-1"></div>
 
                       {subscription.plan === 'basic' ? (
-                        <Link
-                          href="/account/subscription"
-                          className="block w-full text-left px-4 py-2 text-sm text-zinc-300 hover:bg-zinc-800 transition-colors"
-                          onClick={() => setUserMenuOpen(false)}
-                        >
-                          <div className="flex items-center gap-2">
-                            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11.049 2.927c.3-.921 1.603-.921 1.902 0l1.519 4.674a1 1 0 00.95.69h4.915c.969 0 1.371 1.24.588 1.81l-3.976 2.888a1 1 0 00-.363 1.118l1.518 4.674c.3.922-.755 1.688-1.538 1.118l-3.976-2.888a1 1 0 00-1.176 0l-3.976 2.888c-.783.57-1.838-.197-1.538-1.118l1.518-4.674a1 1 0 00-.363-1.118l-3.976-2.888c-.784-.57-.38-1.81.588-1.81h4.914a1 1 0 00.951-.69l1.519-4.674z" />
-                            </svg>
-                            Manage Subscription
-                          </div>
-                        </Link>
+                        SUBSCRIPTION_ENABLED && (
+                          <Link
+                            href="/account/subscription"
+                            className="block w-full text-left px-4 py-2 text-sm text-zinc-300 hover:bg-zinc-800 transition-colors"
+                            onClick={() => setUserMenuOpen(false)}
+                          >
+                            <div className="flex items-center gap-2">
+                              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11.049 2.927c.3-.921 1.603-.921 1.902 0l1.519 4.674a1 1 0 00.95.69h4.915c.969 0 1.371 1.24.588 1.81l-3.976 2.888a1 1 0 00-.363 1.118l1.518 4.674c.3.922-.755 1.688-1.538 1.118l-3.976-2.888a1 1 0 00-1.176 0l-3.976 2.888c-.783.57-1.838-.197-1.538-1.118l1.518-4.674a1 1 0 00-.363-1.118l-3.976-2.888c-.784-.57-.38-1.81.588-1.81h4.914a1 1 0 00.951-.69l1.519-4.674z" />
+                              </svg>
+                              Manage Subscription
+                            </div>
+                          </Link>
+                        )
                       ) : (
                         <Link
                           href="/subscribe"
@@ -221,15 +224,17 @@ export function NavBar() {
             ) : (
               // Guest user
               <div className="flex items-center gap-3">
-                <Link
-                  href="/subscribe"
-                  className="hidden sm:flex items-center gap-1.5 text-xs text-blue-300 hover:text-blue-200 transition-colors font-medium"
-                >
-                  <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 20 20">
-                    <path d="M9.049 2.927c.3-.921 1.603-.921 1.902 0l1.519 4.674a1 1 0 00.95.69h4.915c.969 0 1.371 1.24.588 1.81l-3.976 2.888a1 1 0 00-.363 1.118l1.518 4.674c.3.922-.755 1.688-1.538 1.118l-3.976-2.888a1 1 0 00-1.176 0l-3.976 2.888c-.783.57-1.838-.197-1.538-1.118l1.518-4.674a1 1 0 00-.363-1.118l-3.976-2.888c-.784-.57-.38-1.81.588-1.81h4.914a1 1 0 00.951-.69l1.519-4.674z" />
-                  </svg>
-                  Subscribe
-                </Link>
+                {SUBSCRIPTION_ENABLED && (
+                  <Link
+                    href="/subscribe"
+                    className="hidden sm:flex items-center gap-1.5 text-xs text-blue-300 hover:text-blue-200 transition-colors font-medium"
+                  >
+                    <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 20 20">
+                      <path d="M9.049 2.927c.3-.921 1.603-.921 1.902 0l1.519 4.674a1 1 0 00.95.69h4.915c.969 0 1.371 1.24.588 1.81l-3.976 2.888a1 1 0 00-.363 1.118l1.518 4.674c.3.922-.755 1.688-1.538 1.118l-3.976-2.888a1 1 0 00-1.176 0l-3.976 2.888c-.783.57-1.838-.197-1.538-1.118l1.518-4.674a1 1 0 00-.363-1.118l-3.976-2.888c-.784-.57-.38-1.81.588-1.81h4.914a1 1 0 00.951-.69l1.519-4.674z" />
+                    </svg>
+                    Subscribe
+                  </Link>
+                )}
                 <Link
                   href="/login"
                   className={`text-sm transition-colors ${

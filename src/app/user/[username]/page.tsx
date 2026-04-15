@@ -1110,28 +1110,30 @@ export default function UserPage() {
         </>
       ) : null}
 
-      {/* Results Phase */}
+      {/* Results Phase — done StatusBar only when not superseded by starting/excavating (unified priority) */}
       {hasResults && (
         <>
-          <StatusBar
-            status="done"
-            postCount={tweets.length}
-            postRange={isRangeMode ? `${parsedRangeStart}-${parsedRangeEnd}` : undefined}
-            creditCount={credits}
-            subMessage={
-              diamondActive ? (
-                <>💎 Congratulations! You've excavated all available posts.</>
-              ) : (
-                "Timeline successfully excavated and ready for exploration"
-              )
-            }
-            subMessageStyle={
-              diamondActive ? {
-                color: "text-amber-600/95",
-                weight: "font-bold"
-              } : undefined
-            }
-          />
+          {!isStarting && !excavationState.active && (
+            <StatusBar
+              status="done"
+              postCount={tweets.length}
+              postRange={isRangeMode ? `${parsedRangeStart}-${parsedRangeEnd}` : undefined}
+              creditCount={credits}
+              subMessage={
+                diamondActive ? (
+                  <>💎 Congratulations! You've excavated all available posts.</>
+                ) : (
+                  "Timeline successfully excavated and ready for exploration"
+                )
+              }
+              subMessageStyle={
+                diamondActive ? {
+                  color: "text-amber-600/95",
+                  weight: "font-bold"
+                } : undefined
+              }
+            />
+          )}
 
           {error && (
             <div className="mb-4 flex items-center gap-2 text-red-300 text-sm px-4 py-3 bg-red-900/20 border border-red-800/50 rounded-lg">
@@ -1194,11 +1196,6 @@ export default function UserPage() {
             <EngagementChart
               tweets={tweets}
               onBarSelect={scrollToTweetByPostId}
-              heading={
-                isRangeMode
-                  ? `Engagement for posts ${parsedRangeStart}–${parsedRangeEnd}`
-                  : undefined
-              }
             />
           )}
 

@@ -3,6 +3,7 @@
 import { useState, useRef, useMemo } from "react";
 import { createPortal } from "react-dom";
 import type { TweetData } from "./types";
+import { formatTweetDateRangeHeading } from "../lib/formatTweetDateRange";
 
 const LINES = [
   { key: "retweet_count" as const, color: "#10b981", label: "Retweets" },
@@ -17,7 +18,7 @@ export function EngagementChart({
   tweets: TweetData[];
   /** Called with `post_id` when the user clicks a bar (same mapping as hover). */
   onBarSelect?: (postId: string) => void;
-  /** When set (e.g. URL range slice), replaces the default “earliest N posts” title. */
+  /** When set, replaces the default date-range title derived from `tweets`. */
   heading?: string;
 }) {
   const [hoverIdx, setHoverIdx] = useState<number | null>(null);
@@ -145,7 +146,7 @@ export function EngagementChart({
     <div className="mb-4">
       <div className="flex items-center justify-between mb-1.5">
         <h2 className="text-xs text-zinc-500">
-          {heading ?? `Engagement across earliest ${n} posts`}
+          {heading ?? formatTweetDateRangeHeading(tweets)}
         </h2>
         <div className="flex items-center gap-3">
           <div className="flex items-center gap-1.5">
