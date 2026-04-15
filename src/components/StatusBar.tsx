@@ -76,7 +76,7 @@ export function StatusBar({
 }: StatusBarProps) {
   
   const countdown = useCountdown(
-    status === "excavating" && jobPhase === "waiting_rate_limit" ? resumeAt : null
+    status === "excavating" && jobPhase === "waiting_rate_limit" ? resumeAt ?? null : null
   );
 
   // Get status line text and colors

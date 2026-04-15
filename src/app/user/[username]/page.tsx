@@ -1223,7 +1223,7 @@ export default function UserPage() {
         mode={getCurrentTweetMode()} 
         tweets={tweets}
         jobInfo={excavationState.jobInfo}
-        error={excavationState.error}
+        error={excavationState.error ?? undefined}
         displayName={displayName}
       />
 
