@@ -1,0 +1,16 @@
+**
+!package.json
+!package-lock.json
+!tsconfig.json
+!src/
+!src/lib/
+!src/lib/**
+!scripts/
+!scripts/*.ts
+!scripts/*.py
+!migrations/
+!migrations/io/
+!migrations/io/**
+!deploy/
+!deploy/io-worker.Dockerfile
+!deploy/io-worker.Dockerfile.dockerignore

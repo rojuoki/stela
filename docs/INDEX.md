@@ -3,6 +3,8 @@
 **Read this first.** Then open only the doc/sections you need. Do not read everything "just in case."
 
 - **What to do now:** [CURRENT_TASK.md](CURRENT_TASK.md)  
+- **IO product architecture plan:** [IO_PRODUCT_IMPLEMENTATION_PLAN.md](IO_PRODUCT_IMPLEMENTATION_PLAN.md)
+- **IO Railway worker setup:** [IO_RAILWAY_WORKER.md](IO_RAILWAY_WORKER.md)
 - **Rules & constraints:** [RULES.md](RULES.md)  
 - **Product, UI, data, DB:** [ARCH.md](ARCH.md)  
 - **Phases & execution:** [PHASES.md](PHASES.md)  
@@ -14,6 +16,7 @@
 | Need | Doc | Section (anchor) |
 |------|-----|------------------|
 | Current work, next actions | [CURRENT_TASK.md](CURRENT_TASK.md) | — |
+| IO product evolution, users, DB, +1000, date-range rollout | [IO_PRODUCT_IMPLEMENTATION_PLAN.md](IO_PRODUCT_IMPLEMENTATION_PLAN.md) | — |
 | Non-negotiable rules, UX, failure, cost | [RULES.md](RULES.md) | [#1-non-negotiable-rules](RULES.md#1-non-negotiable-rules), [#2-business-model](RULES.md#2-business-model-do-not-implement-yet), [#3-core-ux-rules](RULES.md#3-core-ux-rules), [#4-rate--cost-control](RULES.md#4-rate--cost-control), [#5-failure-handling](RULES.md#5-failure-handling) |
 | Product scope, what STELA is/is not | [ARCH.md](ARCH.md) | [#1-product-core](ARCH.md#1-product-core) |
 | UI rule (STELA-native, no X embeds) | [ARCH.md](ARCH.md) | [#2-ui-architecture-rule-important](ARCH.md#2-ui-architecture-rule-important) |

@@ -2,6 +2,106 @@
 
 Unlock the earliest 100 posts of any public X account.
 
+## Independent TwitterAPI.io prototype
+
+The current experiment lives alongside the legacy STELA paths. It uses a
+separate local SQLite database and does not write to the existing Postgres/Neon
+tables.
+
+```bash
+npm run io:db:init
+npm run io:import -- results/twitterapi-io-1000/jack-oldest1000-cursor-v2.json
+npm run dev
+```
+
+Open `http://localhost:3000/io`. The saved `jack` measurement can be viewed at
+`/io/jack`. A missing account page offers a **最古1000件を取得** button; it asks
+for confirmation before starting a paid TwitterAPI.io run.
+
+Relevant environment values:
+
+```dotenv
+TWITTERAPI_IO_API_KEY=replace_me
+STELA_IO_DATABASE_PATH=./data/stela-io.sqlite
+# Optional prototype tuning. Normal jobs do not impose implicit request or cost stops.
+STELA_IO_REQUEST_INTERVAL=0.7
+# Set either only for an explicit operator emergency guardrail.
+# STELA_IO_MAX_REQUESTS=500
+# STELA_IO_MAX_ESTIMATED_COST_USD=2.00
+STELA_IO_PYTHON=python3
+```
+
+The prototype UI reads `accounts` and `posts`, while execution state and
+operational coverage observations are kept in `acquisition_runs` and
+`coverage_windows`. The real API job is deliberately local/in-process for now:
+one job at a time, and restarting the dev server interrupts it.
+
+### Resume a saved TwitterAPI.io checkpoint
+
+The measurement runner automatically restores an existing checkpoint passed to
+`--checkpoint`, skips completed windows, and continues from the saved
+oldest-side coverage frontier. The saved nasa checkpoint can be resumed with:
+
+```bash
+python3 scripts/measure_twitterapi_io_1000.py nasa \
+  --checkpoint results/twitterapi-io-1000/benchmark-nasa.json.checkpoint.json \
+  --output results/twitterapi-io-1000/nasa-resumed.json
+```
+
+At the next safe window boundary it writes checkpoint schema v3, including the
+next resume position. The spend estimate uses TwitterAPI.io's published tweet
+and profile rates; an explicit budget may be passed when an operator needs an
+emergency stop, but it is not a normal collection limit or billing receipt.
+
+Offline fixture validation:
+
+```bash
+npm run io:test:resume
+```
+
+### Broad account survey
+
+To sample many accounts without allowing one slow or problematic account to
+block the survey:
+
+```bash
+npm run io:batch
+```
+
+The batch samples 50 oldest-side posts per account, gives each account a
+separate checkpoint and `$0.04` estimated-cost limit, retries once, then moves
+on. Results, checkpoints, and per-attempt logs are written under
+`results/twitterapi-io-batch/`.
+
+For a slower 1000-post efficiency survey, pass an explicit account list and a
+batch reservation limit:
+
+```bash
+python3 scripts/run-twitterapi-io-batch.py \
+  --accounts BarackObama elonmusk sama BillGates SpaceX OpenAI Google Microsoft \
+    YouTube Netflix nytimes CNN BBCWorld Reuters AP WIRED \
+  --target-count 1000 \
+  --account-cost-limit 0.18 \
+  --total-cost-limit 1.28 \
+  --max-requests 500 \
+  --concurrency 4 \
+  --provider-request-rate 6 \
+  --output-directory results/twitterapi-io-1000-survey
+```
+
+Each result includes per-window termination reasons, cursor pages, raw and
+unique counts, duplicates, splits, elapsed time, and estimated cost.
+The batch runner keeps cursor pagination serial within each account, but can
+run accounts concurrently. A provider-wide file-backed limiter and cost
+reservations coordinate the workers; use `--concurrency 1` for the legacy
+serial behavior.
+
+The collector uses the bulk adaptive span policy: start at seven days, expand
+to 30 days and then 120 days when a resolved normal window yields fewer than
+100 posts, then use the remaining span to the next calendar year. A dense
+normal window keeps its width. A 20-page-capped parent is discarded and split;
+only resolved child windows contribute posts or coverage.
+
 ## Setup
 
 ```bash
