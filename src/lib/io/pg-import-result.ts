@@ -19,8 +19,9 @@ function number(value: unknown): number {
   const parsed = Number(value ?? 0);
   return Number.isFinite(parsed) ? parsed : 0;
 }
-function jsonArray(value: unknown): unknown[] | null {
-  return Array.isArray(value) && value.length ? value : null;
+function jsonArray(value: unknown): string | null {
+  // node-postgres encodes JS arrays as PostgreSQL arrays, not JSON.
+  return Array.isArray(value) && value.length ? JSON.stringify(value) : null;
 }
 
 interface CompleteWindow extends IoCoverageInterval {

@@ -10,8 +10,12 @@ domain, or persistent volume is required. Local SQLite development is unchanged.
 
 1. Add an `io-worker` service from this repository, in the existing project.
    Select the release branch and leave the root directory at the repository root.
-2. Set its custom Railway config file path to `/deploy/railway.io-worker.json`.
-   This is a worker-only config; do not apply it to the Web service.
+2. Configure Settings manually. The Railway console now marks Config as Code
+   deprecated and blocks new services from opting in; do not select the old
+   `/deploy/railway.io-worker.json` path for a new service.
+   Set Builder to Dockerfile and Dockerfile Path to `deploy/io-worker.Dockerfile`.
+   Set Start Command to `node --import tsx scripts/io-pg-worker.ts` and Pre-deploy
+   Command to `npm run io:pg:migrate && npm run io:pg:verify`.
 3. Set `STELA_IO_DATABASE_URL` to the IO database's **direct** Neon connection
    URL (not the hostname containing `-pooler`). Web may continue using the pooled
    URL for the same database. If sharing variables with Web, set
@@ -19,8 +23,8 @@ domain, or persistent volume is required. Local SQLite development is unchanged.
 4. Set `TWITTERAPI_IO_API_KEY` directly in Railway Variables.
 5. Set `STELA_IO_CONCURRENCY=8` and
    `STELA_IO_PROVIDER_REQUESTS_PER_SECOND=6` (also the code defaults).
-6. Use one region, preferably close to Neon. The config sets one replica,
-   disables sleeping, selects Always restart, and allows 45 seconds to stop.
+6. Use one region, preferably close to Neon. Set one replica, Serverless off,
+   Always restart, and Teardown with overlap 0 and draining 45 seconds.
    Always restart requires a paid Railway plan. Do not add a public domain or
    copy a Web HTTP healthcheck path to the worker.
 7. Deploy. The pre-deploy command applies and verifies the existing IO migrations.
@@ -31,6 +35,19 @@ domain, or persistent volume is required. Local SQLite development is unchanged.
 For the Web service, IO Postgres selection and authentication still require its
 existing `STELA_IO_USE_POSTGRES=1` and `STELA_IO_AUTH_SECRET` configuration.
 The worker itself does not need an authentication secret or Stripe credentials.
+
+### Web service checklist (separate from worker)
+
+Worker variables are not automatically available to Web. In the `stela` service,
+set all three before testing product authentication and acquisition:
+
+- `STELA_IO_DATABASE_URL=${{io-worker.STELA_IO_DATABASE_URL}}` (or the IO DB URL).
+- `STELA_IO_USE_POSTGRES=1`.
+- `STELA_IO_AUTH_SECRET`: a separate, securely generated secret entered by the operator.
+
+Leave legacy `DATABASE_URL` and `AUTH_SECRET` unchanged. Deploy the Web changes.
+A missing IO URL produces HTTP 500 at `/api/io/auth/login`; absence of the
+Postgres flag leaves post/run reads on the SQLite prototype path.
 
 ## Stop and restart behavior
 
