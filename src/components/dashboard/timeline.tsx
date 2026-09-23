@@ -19,6 +19,7 @@ interface TimelineProps {
   posts: Post[]
   highlightedDate?: string | null
   highlightedPostId?: string | null
+  onVisiblePostChange?: (postId: string) => void
 }
 
 export interface TimelineHandle {
@@ -74,7 +75,7 @@ function linkedText(text: string) {
 }
 
 export const Timeline = forwardRef<TimelineHandle, TimelineProps>(function Timeline(
-  { posts, highlightedDate, highlightedPostId },
+  { posts, highlightedDate, highlightedPostId, onVisiblePostChange },
   ref
 ) {
   const containerRef = useRef<HTMLDivElement>(null)
@@ -116,6 +117,23 @@ export const Timeline = forwardRef<TimelineHandle, TimelineProps>(function Timel
     element?.scrollIntoView({ behavior: "smooth", block: "center" })
   }, [highlightedPostId])
 
+  useEffect(() => {
+    if (!onVisiblePostChange) return
+    const elements = [...postRefs.current.values()]
+    if (!elements.length) return
+
+    const observer = new IntersectionObserver((entries) => {
+      const visible = entries
+        .filter((entry) => entry.isIntersecting)
+        .sort((a, b) => Math.abs(a.boundingClientRect.top - window.innerHeight * 0.28) - Math.abs(b.boundingClientRect.top - window.innerHeight * 0.28))[0]
+      const postId = visible?.target.getAttribute("data-post-id")
+      if (postId) onVisiblePostChange(postId)
+    }, { rootMargin: "-18% 0px -62% 0px", threshold: [0, 0.25, 0.5, 0.75, 1] })
+
+    elements.forEach((element) => observer.observe(element))
+    return () => observer.disconnect()
+  }, [posts, onVisiblePostChange])
+
   return (
     <div ref={containerRef} className="flex-1 overflow-y-auto">
       <div className="px-4 py-3 border-b border-border sticky top-0 bg-card/80 backdrop-blur-sm z-10">
@@ -130,6 +148,7 @@ export const Timeline = forwardRef<TimelineHandle, TimelineProps>(function Timel
           return (
             <div
               key={post.id}
+              data-post-id={post.id}
               ref={(el) => {
                 if (el) postRefs.current.set(post.id, el)
               }}

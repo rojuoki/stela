@@ -1,7 +1,7 @@
 "use client"
 
-import { useMemo, useRef, useState } from "react"
-import { ChevronDown, ChevronUp, Maximize2, Search, SlidersHorizontal } from "lucide-react"
+import { useCallback, useEffect, useMemo, useRef, useState } from "react"
+import { ChevronDown, ChevronUp, Maximize2, Minimize2, Search, SlidersHorizontal } from "lucide-react"
 import type { TweetData } from "@/components/types"
 import { EngagementChart as LegacyEngagementChart } from "./engagement-chart"
 import { EngagementChartV2 } from "./engagement-chart-v2"
@@ -53,10 +53,23 @@ export function SavedTimeline({ tweets, username }: { tweets: TweetData[]; usern
     if (!target) return
     setKeyword("")
     setSelected(null)
+    setDisplayCount("all")
     setHighlight(null)
     setHighlightedPost(target.id)
     requestAnimationFrame(() => timeline.current?.scrollToPost(target.id))
   }
+  const trackVisiblePost = useCallback((postId: string) => {
+    const index = posts.findIndex(post => post.id === postId)
+    if (index >= 0) setPosition(index)
+  }, [posts])
+  useEffect(() => {
+    if (!chartExpanded) return
+    const close = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setChartExpanded(false)
+    }
+    document.addEventListener("keydown", close)
+    return () => document.removeEventListener("keydown", close)
+  }, [chartExpanded])
   const legacyChart = useMemo(() => {
     const groups = new Map<string, { date: string; posts: number; likes: number; retweets: number; replies: number; engagement: number }>()
     for (const post of tweets) {
@@ -78,8 +91,8 @@ export function SavedTimeline({ tweets, username }: { tweets: TweetData[]; usern
   const days = posts.length > 1 ? Math.max(1, (Date.parse(posts[posts.length - 1].date) - Date.parse(posts[0].date)) / 86400000) : 1
   const hours = Array<number>(24).fill(0)
   posts.forEach(p => { hours[new Date(p.date).getUTCHours()]++ })
-  const jump = (id: string) => { setKeyword(""); setSelected(null); setHighlight(null); setHighlightedPost(id); requestAnimationFrame(() => timeline.current?.scrollToPost(id)) }
-  const jumpWithinSelection = (id: string) => { setKeyword(""); setHighlight(null); setHighlightedPost(id); requestAnimationFrame(() => timeline.current?.scrollToPost(id)) }
+  const jump = (id: string) => { setKeyword(""); setSelected(null); setDisplayCount("all"); setHighlight(null); setHighlightedPost(id); requestAnimationFrame(() => timeline.current?.scrollToPost(id)) }
+  const jumpWithinSelection = (id: string) => { setKeyword(""); setDisplayCount("all"); setHighlight(null); setHighlightedPost(id); requestAnimationFrame(() => timeline.current?.scrollToPost(id)) }
   const chart = useNewChart
     ? <EngagementChartV2 posts={engagementPosts} selectedRange={selected} onDateClick={date => { setSelected(null); setHighlightedPost(null); setHighlight(date); requestAnimationFrame(() => timeline.current?.scrollToDate(date)) }} onRangeSelect={(a, b) => { setSelected({ start: a < b ? a : b, end: a < b ? b : a }); setHighlight(null); setHighlightedPost(null) }} onPostClick={jump} />
     : <LegacyEngagementChart data={legacyChart} perPostData={engagementPosts} selectedRange={selected} onDateClick={date => { setSelected(null); setHighlightedPost(null); setHighlight(date); requestAnimationFrame(() => timeline.current?.scrollToDate(date)) }} onPostClick={jumpWithinSelection} onRangeSelect={(a, b) => { setSelected({ start: a < b ? a : b, end: a < b ? b : a }); setHighlight(null); setHighlightedPost(null) }} onRangeClear={() => { setSelected(null); setHighlight(null); setHighlightedPost(null) }} />
@@ -98,13 +111,14 @@ export function SavedTimeline({ tweets, username }: { tweets: TweetData[]; usern
     <div className="grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_300px]">
       <div className="min-w-0 border-r border-border">
         <div className="flex items-center justify-between border-b border-border px-5 py-3 md:px-8"><p className="text-xs text-muted-foreground">{visiblePosts.length} / {posts.length} posts · 古い順</p><span className="text-[11px] text-muted-foreground">{selected ? "期間を表示中" : "全期間を表示中"}</span></div>
-        <div className="min-h-[650px]">{visiblePosts.length ? <Timeline ref={timeline} posts={visiblePosts} highlightedDate={highlight} highlightedPostId={highlightedPost} /> : <p className="p-8 text-sm text-muted-foreground">条件に一致する投稿がありません。</p>}</div>
+        <div className="min-h-[650px]">{visiblePosts.length ? <Timeline ref={timeline} posts={visiblePosts} highlightedDate={highlight} highlightedPostId={highlightedPost} onVisiblePostChange={trackVisiblePost} /> : <p className="p-8 text-sm text-muted-foreground">条件に一致する投稿がありません。</p>}</div>
       </div>
       <aside className="max-h-[720px]" aria-label="補助情報"><Sidebar hideAccount account={{ username, displayName: username, avatar: "", bio: "", followers: 0, following: 0, posts: posts.length, joinedDate: "" }} media={media} topPosts={[...posts].sort((a, b) => b.likes + b.retweets + b.replies - a.likes - a.retweets - a.replies).slice(0, 5)} stats={{ totalPosts: posts.length, totalLikes, totalRetweets, avgEngagement: posts.length ? (totalLikes + totalRetweets + totalReplies) / posts.length : 0, postsPerDay: posts.length / days, peakHour: `${hours.indexOf(Math.max(...hours))}:00 UTC` }} onJumpToPost={jump} /></aside>
     </div>
+    {chartExpanded && <button aria-label="分析パネルを閉じる" className="fixed inset-0 z-40 cursor-default bg-black/80 backdrop-blur-sm" onClick={() => setChartExpanded(false)} />}
     <div className={`border-t border-border ${chartExpanded ? "fixed inset-4 z-50 overflow-auto rounded-xl border bg-background shadow-2xl" : ""}`}>
       <button onClick={() => setChartOpen(!chartOpen)} aria-expanded={chartOpen} className="flex w-full items-center justify-between px-5 py-4 text-left hover:bg-secondary/20 md:px-8"><span className="flex items-center gap-2 text-sm"><SlidersHorizontal className="h-4 w-4 text-chart-1" />分析パネル <span className="text-xs text-muted-foreground">Overview / Per Post</span></span>{chartOpen ? <ChevronUp className="h-4 w-4 text-muted-foreground" /> : <ChevronDown className="h-4 w-4 text-muted-foreground" />}</button>
-      {chartOpen && <div className="relative border-t border-border p-3 md:p-6"><button onClick={() => setChartExpanded(!chartExpanded)} className="absolute right-5 top-4 z-10 rounded-md border border-border bg-secondary/80 p-2 text-muted-foreground hover:text-foreground" aria-label="分析パネルを拡大"><Maximize2 className="h-4 w-4" /></button>{chart}</div>}
+      {chartOpen && <div className="relative border-t border-border p-3 md:p-6"><button onClick={() => setChartExpanded(!chartExpanded)} className="absolute right-5 top-4 z-10 rounded-md border border-border bg-secondary/80 p-2 text-muted-foreground hover:text-foreground" aria-label={chartExpanded ? "分析パネルを縮小" : "分析パネルを拡大"}>{chartExpanded ? <Minimize2 className="h-4 w-4" /> : <Maximize2 className="h-4 w-4" />}</button>{chart}</div>}
     </div>
   </section>
 }
