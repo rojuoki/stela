@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { useParams, useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { notFound } from "next/navigation";
@@ -17,6 +17,7 @@ import { AccountHeader } from "../../../components/AccountHeader";
 import { JobStatus } from "../../../components/JobStatus";
 import { StatusBar } from "../../../components/StatusBar";
 import { TweetSection } from "../../../components/TweetSection";
+import { HistoryNavigator } from "../../../components/HistoryNavigator";
 import { apiFetch } from "../../../lib/apiFetch";
 import { useUser } from "../../../contexts/UserContext";
 
@@ -74,6 +75,13 @@ export default function UserPage() {
   const [currentBoundary, setCurrentBoundary] = useState<number | null>(null);
   const [diamondActive, setDiamondActive] = useState<boolean>(false);
   const [showBackToTop, setShowBackToTop] = useState(false);
+  const [postSearch, setPostSearch] = useState("");
+
+  const visibleTweets = useMemo(() => {
+    const normalizedSearch = postSearch.trim().toLowerCase();
+    if (!normalizedSearch) return tweets;
+    return tweets.filter((tweet) => tweet.full_text.toLowerCase().includes(normalizedSearch));
+  }, [postSearch, tweets]);
 
   // Starting state for immediate UI feedback
   const [isStarting, setIsStarting] = useState(false);
@@ -1191,11 +1199,13 @@ export default function UserPage() {
             </div>
           )}
 
-          {/* Engagement Chart */}
+          {/* The history navigator is intentionally the primary wayfinding surface. */}
           {hasResults && (
-            <EngagementChart
+            <HistoryNavigator
               tweets={tweets}
-              onBarSelect={scrollToTweetByPostId}
+              totalUnlocked={currentBoundary || undefined}
+              onSearch={setPostSearch}
+              onStep={(direction) => window.scrollBy({ top: direction === "next" ? 520 : -520, behavior: "smooth" })}
             />
           )}
 
@@ -1221,11 +1231,25 @@ export default function UserPage() {
       {/* Tweet Section - unified container for all modes */}
       <TweetSection 
         mode={getCurrentTweetMode()} 
-        tweets={tweets}
+        tweets={visibleTweets}
         jobInfo={excavationState.jobInfo}
         error={excavationState.error ?? undefined}
         displayName={displayName}
       />
+
+      {/* Analytics remains available, but follows the readable post stream. */}
+      {hasResults && (
+        <section className="mt-10 border-t border-zinc-800 pt-6" aria-labelledby="analytics-title">
+          <div className="mb-3 flex items-center justify-between">
+            <div>
+              <p className="text-[10px] font-medium uppercase tracking-[0.2em] text-zinc-500">Secondary analysis</p>
+              <h2 id="analytics-title" className="mt-1 text-lg font-medium text-zinc-200">Activity overview</h2>
+            </div>
+            <span className="text-xs text-zinc-600">Select a date to jump to a post</span>
+          </div>
+          <EngagementChart tweets={tweets} onBarSelect={scrollToTweetByPostId} />
+        </section>
+      )}
 
       {/* About Timeline Excavation - Results only */}
       {hasResults && (
