@@ -1,6 +1,6 @@
 "use client"
 
-import { useMemo, useState, useCallback } from "react"
+import { useMemo, useState, useCallback, useEffect, useRef } from "react"
 import {
   ComposedChart,
   Area,
@@ -17,6 +17,8 @@ import {
 
 interface DataPoint {
   date: string
+  rangeStart?: string
+  rangeEnd?: string
   posts: number
   engagement: number
   likes: number
@@ -24,22 +26,48 @@ interface DataPoint {
   replies?: number
 }
 
+interface PerPostPoint {
+  id: string
+  date: string
+  likes: number
+  retweets: number
+  replies?: number
+}
+
 interface EngagementChartProps {
   data: DataPoint[]
+  perPostData?: PerPostPoint[]
+  selectedRange?: { start: string; end: string } | null
   onDateClick?: (date: string) => void
+  onPostClick?: (postId: string) => void
   onRangeSelect?: (startDate: string, endDate: string) => void
+  onRangeClear?: () => void
 }
 
 type ViewMode = "overview" | "perPost"
 
-export function EngagementChart({ data, onDateClick, onRangeSelect }: EngagementChartProps) {
+export function EngagementChart({ data, perPostData, selectedRange, onDateClick, onPostClick, onRangeSelect, onRangeClear }: EngagementChartProps) {
   const [viewMode, setViewMode] = useState<ViewMode>("overview")
   const [refAreaLeft, setRefAreaLeft] = useState<string | null>(null)
   const [refAreaRight, setRefAreaRight] = useState<string | null>(null)
   const [isSelecting, setIsSelecting] = useState(false)
+  const selectionStartRef = useRef<string | null>(null)
+  const selectionEndRef = useRef<string | null>(null)
+  const perPostScrollRef = useRef<HTMLDivElement>(null)
+  const [perPostScroll, setPerPostScroll] = useState({ left: 0, max: 0, viewport: 0 })
+
+  const visibleData = useMemo(() => {
+    if (!selectedRange) return data
+    const start = selectedRange.start.slice(0, 10)
+    const end = selectedRange.end.slice(0, 10)
+    return data.filter((point) => {
+      const date = point.date.slice(0, 10)
+      return date >= start && date <= end
+    })
+  }, [data, selectedRange])
 
   const chartData = useMemo(() => {
-    if (data.length === 0) return []
+    if (visibleData.length === 0) return []
 
     // データポイント数に応じた最適なビニング戦略を決定
     const getOptimalBinning = (dataPoints: number): 'raw' | 'day' | 'week' | 'month' => {
@@ -49,13 +77,15 @@ export function EngagementChart({ data, onDateClick, onRangeSelect }: Engagement
       return 'month'                           // 月単位
     }
 
-    const binType = getOptimalBinning(data.length)
+    const binType = getOptimalBinning(visibleData.length)
 
     // ビニング関数
     const aggregateData = (rawData: DataPoint[], binning: typeof binType) => {
       if (binning === 'raw') {
         return rawData.map((d) => ({
           ...d,
+          rangeStart: d.rangeStart || d.date,
+          rangeEnd: d.rangeEnd || d.date,
           dateLabel: new Date(d.date).toLocaleDateString("en-US", { month: "short", day: "numeric" }),
           fullDate: new Date(d.date).toLocaleDateString("en-US", { 
             weekday: "short",
@@ -91,6 +121,8 @@ export function EngagementChart({ data, onDateClick, onRangeSelect }: Engagement
         if (!grouped.has(key)) {
           grouped.set(key, {
             date: key,
+            rangeStart: d.rangeStart || d.date,
+            rangeEnd: d.rangeEnd || d.date,
             posts: 0,
             engagement: 0,
             likes: 0,
@@ -100,6 +132,10 @@ export function EngagementChart({ data, onDateClick, onRangeSelect }: Engagement
         }
         
         const group = grouped.get(key)!
+        const pointStart = d.rangeStart || d.date
+        const pointEnd = d.rangeEnd || d.date
+        if (!group.rangeStart || pointStart < group.rangeStart) group.rangeStart = pointStart
+        if (!group.rangeEnd || pointEnd > group.rangeEnd) group.rangeEnd = pointEnd
         group.posts += d.posts
         group.engagement += d.engagement
         group.likes += d.likes
@@ -148,8 +184,82 @@ export function EngagementChart({ data, onDateClick, onRangeSelect }: Engagement
         })
     }
 
-    return aggregateData(data, binType)
-  }, [data])
+    return aggregateData(visibleData, binType)
+  }, [visibleData])
+
+  const perPostChartData = useMemo(() => {
+    const start = selectedRange?.start.slice(0, 10)
+    const end = selectedRange?.end.slice(0, 10)
+    return [...(perPostData || [])]
+      .filter((post) => {
+        const date = post.date.slice(0, 10)
+        return (!start || date >= start) && (!end || date <= end)
+      })
+      .sort((a, b) => Date.parse(a.date) - Date.parse(b.date))
+      .map((post) => ({
+        ...post,
+        dateLabel: new Date(post.date).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "2-digit" }),
+        fullDate: new Date(post.date).toLocaleDateString("en-US", {
+          weekday: "short",
+          month: "short",
+          day: "numeric",
+          year: "numeric",
+        }),
+      }))
+  }, [perPostData, selectedRange])
+
+  const perPostChartWidth = Math.max(760, perPostChartData.length * 14)
+  const perPostTickInterval = Math.max(0, Math.ceil(perPostChartData.length / Math.max(2, Math.floor(perPostChartWidth / 100))) - 1)
+
+  const syncPerPostScroll = useCallback(() => {
+    const element = perPostScrollRef.current
+    if (!element) return
+    setPerPostScroll({ left: element.scrollLeft, max: Math.max(0, element.scrollWidth - element.clientWidth), viewport: element.clientWidth })
+  }, [])
+
+  useEffect(() => {
+    if (viewMode !== "perPost") return
+    const frame = requestAnimationFrame(syncPerPostScroll)
+    window.addEventListener("resize", syncPerPostScroll)
+    return () => {
+      cancelAnimationFrame(frame)
+      window.removeEventListener("resize", syncPerPostScroll)
+    }
+  }, [viewMode, perPostChartWidth, syncPerPostScroll])
+
+  const movePerPost = useCallback((direction: -1 | 1) => {
+    const element = perPostScrollRef.current
+    if (!element) return
+    element.scrollBy({ left: direction * element.clientWidth * 0.8, behavior: "smooth" })
+  }, [])
+
+  const visiblePerPostData = useMemo(() => {
+    if (!perPostChartData.length) return []
+    const contentWidth = Math.max(1, perPostScroll.max + perPostScroll.viewport)
+    const start = Math.max(0, Math.floor((perPostScroll.left / contentWidth) * perPostChartData.length) - 2)
+    const end = Math.min(perPostChartData.length, Math.ceil(((perPostScroll.left + perPostScroll.viewport) / contentWidth) * perPostChartData.length) + 2)
+    return perPostChartData.slice(start, Math.max(start + 1, end))
+  }, [perPostChartData, perPostScroll])
+
+  const perPostYAxisMax = useMemo(() => {
+    const values = visiblePerPostData.flatMap((post) => [post.likes, post.retweets, post.replies || 0]).sort((a, b) => a - b)
+    if (!values.length) return 1
+    const percentileIndex = Math.min(values.length - 1, Math.floor((values.length - 1) * 0.95))
+    return Math.max(1, Math.ceil(values[percentileIndex] * 1.15))
+  }, [visiblePerPostData])
+
+  const handlePerPostAreaClick = useCallback((clientX: number, clientY: number) => {
+    const element = perPostScrollRef.current
+    if (!element || !perPostChartData.length) return
+    const rect = element.getBoundingClientRect()
+    if (clientY - rect.top > 176) return
+    const chartLeft = 40
+    const contentX = clientX - rect.left + element.scrollLeft
+    const plotWidth = Math.max(1, perPostChartWidth - chartLeft)
+    const index = Math.floor(((contentX - chartLeft) / plotWidth) * perPostChartData.length)
+    const post = perPostChartData[Math.max(0, Math.min(perPostChartData.length - 1, index))]
+    if (post) onPostClick?.(post.id)
+  }, [onPostClick, perPostChartData, perPostChartWidth])
 
   // 動的なY軸のドメインを計算
   const getYAxisDomain = useCallback((dataKey: 'posts' | 'engagement'): [number, number | string] => {
@@ -171,32 +281,48 @@ export function EngagementChart({ data, onDateClick, onRangeSelect }: Engagement
 
   const handleMouseDown = useCallback((e: MouseHandlerDataParam) => {
     if (e.activeLabel !== undefined) {
-      setRefAreaLeft(String(e.activeLabel))
+      const label = String(e.activeLabel)
+      selectionStartRef.current = label
+      selectionEndRef.current = null
+      setRefAreaLeft(label)
+      setRefAreaRight(null)
       setIsSelecting(true)
     }
   }, [])
 
   const handleMouseMove = useCallback((e: MouseHandlerDataParam) => {
-    if (isSelecting && e.activeLabel !== undefined) {
-      setRefAreaRight(String(e.activeLabel))
+    if (selectionStartRef.current && e.activeLabel !== undefined) {
+      const label = String(e.activeLabel)
+      selectionEndRef.current = label
+      setRefAreaRight(label)
     }
-  }, [isSelecting])
+  }, [])
 
-  const handleMouseUp = useCallback(() => {
-    if (refAreaLeft && refAreaRight && onRangeSelect) {
-      const leftIndex = chartData.findIndex(d => d.dateLabel === refAreaLeft)
-      const rightIndex = chartData.findIndex(d => d.dateLabel === refAreaRight)
+  const handleMouseUp = useCallback((e: MouseHandlerDataParam) => {
+    const startLabel = selectionStartRef.current
+    const endLabel = selectionEndRef.current || (e.activeLabel !== undefined ? String(e.activeLabel) : null)
+    if (startLabel && endLabel && startLabel !== endLabel && onRangeSelect) {
+      const leftIndex = chartData.findIndex(d => d.date === startLabel)
+      const rightIndex = chartData.findIndex(d => d.date === endLabel)
       
       if (leftIndex !== -1 && rightIndex !== -1) {
         const startIdx = Math.min(leftIndex, rightIndex)
         const endIdx = Math.max(leftIndex, rightIndex)
-        onRangeSelect(chartData[startIdx].date, chartData[endIdx].date)
+        onRangeSelect(
+          chartData[startIdx].rangeStart || chartData[startIdx].date,
+          chartData[endIdx].rangeEnd || chartData[endIdx].date
+        )
       }
+    } else if (startLabel && onDateClick) {
+      const index = chartData.findIndex(d => d.date === startLabel)
+      if (index !== -1) onDateClick(chartData[index].rangeStart || chartData[index].date)
     }
+    selectionStartRef.current = null
+    selectionEndRef.current = null
     setRefAreaLeft(null)
     setRefAreaRight(null)
     setIsSelecting(false)
-  }, [refAreaLeft, refAreaRight, chartData, onRangeSelect])
+  }, [chartData, onRangeSelect, onDateClick])
 
   const handleChartClick = useCallback((e: MouseHandlerDataParam) => {
     const index = Number(e.activeTooltipIndex)
@@ -206,7 +332,7 @@ export function EngagementChart({ data, onDateClick, onRangeSelect }: Engagement
   }, [isSelecting, onDateClick, chartData])
 
   return (
-    <div className="h-[260px] border-b border-border p-4">
+    <div className={`${viewMode === "perPost" ? "h-[290px]" : "h-[260px]"} border-b border-border p-4`}>
       <div className="flex items-center justify-between mb-4">
         <div className="flex items-center gap-4">
           {/* Tabs */}
@@ -248,7 +374,7 @@ export function EngagementChart({ data, onDateClick, onRangeSelect }: Engagement
                   className="w-2 h-2 rounded-full" 
                   style={{ backgroundColor: "oklch(0.65 0.12 160)" }} 
                 />
-                <span className="text-muted-foreground">Engagement</span>
+                <span className="text-muted-foreground">Total reactions</span>
               </div>
             </div>
           ) : (
@@ -277,15 +403,29 @@ export function EngagementChart({ data, onDateClick, onRangeSelect }: Engagement
             </div>
           )}
         </div>
-        <div className="text-xs text-muted-foreground">
-          Click to jump · Drag to select range
-        </div>
+        {selectedRange ? (
+          <div className="flex items-center gap-3 text-xs text-muted-foreground">
+            <span>{new Date(selectedRange.start).toLocaleDateString("ja-JP")} — {new Date(selectedRange.end).toLocaleDateString("ja-JP")}</span>
+            <button type="button" onClick={onRangeClear} className="text-foreground hover:underline">全期間に戻す</button>
+          </div>
+        ) : (
+          <div className="text-xs text-muted-foreground">
+            {viewMode === "overview" ? "Click to jump · Drag to zoom" : "Scroll horizontally · Click to jump"}
+          </div>
+        )}
       </div>
 
-      <ResponsiveContainer width="100%" height={190}>
+      <div
+        ref={viewMode === "perPost" ? perPostScrollRef : undefined}
+        onScroll={viewMode === "perPost" ? syncPerPostScroll : undefined}
+        onClick={viewMode === "perPost" ? (event) => handlePerPostAreaClick(event.clientX, event.clientY) : undefined}
+        className={viewMode === "perPost" ? "overflow-x-scroll overflow-y-hidden" : "overflow-hidden"}
+        style={viewMode === "perPost" ? { scrollbarGutter: "stable" } : undefined}
+      >
+      <ResponsiveContainer width={viewMode === "perPost" ? perPostChartWidth : "100%"} height={190}>
         {viewMode === "overview" ? (
           <ComposedChart 
-            data={chartData} 
+            data={chartData}
             margin={{ top: 0, right: 0, left: -20, bottom: 0 }}
             onMouseDown={handleMouseDown}
             onMouseMove={handleMouseMove}
@@ -294,11 +434,12 @@ export function EngagementChart({ data, onDateClick, onRangeSelect }: Engagement
           >
             <CartesianGrid strokeDasharray="3 3" stroke="oklch(0.25 0 0)" vertical={false} />
             <XAxis
-              dataKey="dateLabel"
+              dataKey="date"
               axisLine={false}
               tickLine={false}
               tick={{ fontSize: 10, fill: "oklch(0.6 0 0)" }}
               interval="preserveStartEnd"
+              tickFormatter={(date) => chartData.find((point) => point.date === String(date))?.dateLabel || ""}
             />
             {/* Left Y-axis for Posts */}
             <YAxis
@@ -326,7 +467,7 @@ export function EngagementChart({ data, onDateClick, onRangeSelect }: Engagement
               tickFormatter={(value) => (value >= 1000 ? `${(value / 1000).toFixed(0)}K` : value)}
               domain={getYAxisDomain('engagement')}
               label={{ 
-                value: 'Engagement', 
+                value: 'Reactions',
                 angle: 90, 
                 position: 'insideRight',
                 style: { fontSize: 10, fill: "oklch(0.65 0.12 160)" },
@@ -340,11 +481,15 @@ export function EngagementChart({ data, onDateClick, onRangeSelect }: Engagement
                 borderRadius: "6px",
                 fontSize: "12px",
               }}
+              labelFormatter={(label) => chartData.find((point) => point.date === String(label))?.fullDate || label}
               labelStyle={{ color: "oklch(0.95 0 0)", marginBottom: "4px" }}
               itemStyle={{ color: "oklch(0.6 0 0)" }}
-              formatter={(value, name) => {
-                const label = String(name) === "posts" ? "Posts" : "Engagement"
-                return [Number(value ?? 0).toLocaleString(), label]
+              formatter={(value, name, item) => {
+                if (String(name) === "posts") return [Number(value ?? 0).toLocaleString(), "Posts"]
+                const total = Number(value ?? 0)
+                const count = Number((item.payload as { posts?: number } | undefined)?.posts || 0)
+                const average = count > 0 ? total / count : 0
+                return [`${total.toLocaleString()} total · ${average.toFixed(1)}/post`, "Reactions"]
               }}
             />
             {/* Posts as area on left axis */}
@@ -380,38 +525,25 @@ export function EngagementChart({ data, onDateClick, onRangeSelect }: Engagement
           </ComposedChart>
         ) : (
           <ComposedChart 
-            data={chartData} 
+            data={perPostChartData}
             margin={{ top: 0, right: 0, left: -20, bottom: 0 }}
-            onMouseDown={handleMouseDown}
-            onMouseMove={handleMouseMove}
-            onMouseUp={handleMouseUp}
-            onClick={handleChartClick}
           >
             <CartesianGrid strokeDasharray="3 3" stroke="oklch(0.25 0 0)" vertical={false} />
             <XAxis
-              dataKey="dateLabel"
+              dataKey="id"
               axisLine={false}
               tickLine={false}
               tick={{ fontSize: 10, fill: "oklch(0.6 0 0)" }}
-              interval="preserveStartEnd"
+              interval={perPostTickInterval}
+              tickFormatter={(id) => perPostChartData.find((post) => post.id === String(id))?.dateLabel || ""}
             />
             <YAxis
               axisLine={false}
               tickLine={false}
               tick={{ fontSize: 10, fill: "oklch(0.6 0 0)" }}
               tickFormatter={(value) => (value >= 1000 ? `${(value / 1000).toFixed(0)}K` : value)}
-              domain={(() => {
-                if (chartData.length === 0) return [0, 'auto']
-                const allValues = chartData.flatMap(d => [d.likes, d.retweets, d.replies || 0])
-                const min = Math.min(...allValues)
-                const max = Math.max(...allValues)
-                const range = max - min
-                if (range < max * 0.3) {
-                  const padding = Math.max(range * 0.2, max * 0.1)
-                  return [Math.max(0, min - padding), max + padding]
-                }
-                return [0, 'auto']
-              })()}
+              domain={[0, perPostYAxisMax]}
+              allowDataOverflow
             />
             <Tooltip
               contentStyle={{
@@ -421,7 +553,7 @@ export function EngagementChart({ data, onDateClick, onRangeSelect }: Engagement
                 fontSize: "12px",
               }}
               labelFormatter={(label) => {
-                const point = chartData.find(d => d.dateLabel === label)
+                const point = perPostChartData.find(d => d.id === String(label))
                 return point?.fullDate || label
               }}
               labelStyle={{ color: "oklch(0.95 0 0)", marginBottom: "4px" }}
@@ -473,6 +605,25 @@ export function EngagementChart({ data, onDateClick, onRangeSelect }: Engagement
           </ComposedChart>
         )}
       </ResponsiveContainer>
+      </div>
+      {viewMode === "perPost" && perPostScroll.max > 0 && (
+        <div className="mt-1 flex items-center gap-2 text-[11px] text-muted-foreground">
+          <button type="button" onClick={() => movePerPost(-1)} disabled={perPostScroll.left <= 1} className="rounded px-1.5 py-0.5 hover:bg-secondary hover:text-foreground disabled:opacity-30">← 前へ</button>
+          <input
+            aria-label="投稿グラフの表示位置"
+            type="range"
+            min={0}
+            max={Math.max(1, Math.round(perPostScroll.max))}
+            value={Math.min(Math.round(perPostScroll.left), Math.round(perPostScroll.max))}
+            onChange={(event) => {
+              const element = perPostScrollRef.current
+              if (element) element.scrollLeft = Number(event.target.value)
+            }}
+            className="h-4 min-w-0 flex-1 cursor-ew-resize accent-[oklch(0.7_0.15_220)]"
+          />
+          <button type="button" onClick={() => movePerPost(1)} disabled={perPostScroll.left >= perPostScroll.max - 1} className="rounded px-1.5 py-0.5 hover:bg-secondary hover:text-foreground disabled:opacity-30">次へ →</button>
+        </div>
+      )}
     </div>
   )
 }

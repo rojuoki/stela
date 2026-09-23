@@ -26,6 +26,7 @@
 
 import { randomUUID } from "crypto";
 import { excavateEarliest, type ExcavationCheckpoint, type ExcavationResult } from "./excavate";
+import { excavateBulk } from "./excavateBulk";
 import { upsertUnlockBoundary } from "./unlockWrite";
 import { 
   captureHeldPg, 
@@ -56,9 +57,10 @@ import { computeTargetCount } from "./unlockPlanning";
 
 /** Persisted inside jobs.resume_state next to ExcavationCheckpoint so 429 resume keeps Phase 8 parameters. */
 const ADDITIONAL_EXCAVATION_TYPE = "additional_excavation" as const;
+const BULK_EXCAVATION_TYPE = "bulk_excavation" as const;
 
 export interface AdditionalExcavationContext {
-  type: typeof ADDITIONAL_EXCAVATION_TYPE;
+  type: typeof ADDITIONAL_EXCAVATION_TYPE | typeof BULK_EXCAVATION_TYPE;
   targetBoundary: number;
   missingCount: number;
   continuationStartTime: string;
@@ -70,7 +72,7 @@ function isAdditionalExcavationShape(obj: unknown): obj is Record<string, unknow
   if (!obj || typeof obj !== "object") return false;
   const o = obj as Record<string, unknown>;
   return (
-    o.type === ADDITIONAL_EXCAVATION_TYPE &&
+    (o.type === ADDITIONAL_EXCAVATION_TYPE || o.type === BULK_EXCAVATION_TYPE) &&
     typeof o.targetBoundary === "number" &&
     typeof o.missingCount === "number" &&
     typeof o.continuationStartTime === "string"
@@ -79,7 +81,7 @@ function isAdditionalExcavationShape(obj: unknown): obj is Record<string, unknow
 
 function normalizeAdditionalExcavationContext(src: Record<string, unknown>): AdditionalExcavationContext {
   const ctx: AdditionalExcavationContext = {
-    type: ADDITIONAL_EXCAVATION_TYPE,
+    type: src.type === BULK_EXCAVATION_TYPE ? BULK_EXCAVATION_TYPE : ADDITIONAL_EXCAVATION_TYPE,
     targetBoundary: Number(src.targetBoundary),
     missingCount: Number(src.missingCount),
     continuationStartTime: String(src.continuationStartTime),
@@ -573,6 +575,66 @@ export async function createAdditionalExcavationJob(
   return jobId;
 }
 
+/**
+ * Create bulk excavation job for dev extend1000.
+ * Uses blast-mode excavation engine (wide windows, deep pagination, and
+ * density-guided splitting only when the 20-page cursor cap is reached).
+ * hold_id is always null — no credit capture/release.
+ *
+ * NEVER call from production code. Guard with NEXT_PUBLIC_DEV_PANEL === "1".
+ */
+export async function createBulkExcavationJob(
+  username: string,
+  targetBoundary: number,
+  missingCount: number,
+  userId: string = "anonymous",
+): Promise<string | null> {
+  const account = await getAccountByUsernamePg(username);
+  if (!account) {
+    console.error(`[bulk-excavation] Account not found for @${username}`);
+    return null;
+  }
+
+  const jobId = randomUUID();
+  const now = new Date().toISOString();
+
+  const newestTweetTimestamp = await getNewestCachedTweetTimestampPg(account.account_id);
+  const continuationStartTime = newestTweetTimestamp || account.created_at;
+
+  console.log(
+    `[bulk-excavation] Continuation point: ${continuationStartTime} (${newestTweetTimestamp ? "from newest tweet" : "from account creation"})`,
+  );
+
+  const bulkExcavationMetadata = {
+    type: "bulk_excavation",
+    targetBoundary,
+    missingCount,
+    continuationBased: true,
+    continuationStartTime,
+    created_at: now,
+  };
+
+  await createJobPg({
+    id: jobId,
+    account_username: username.toLowerCase(),
+    user_id: userId,
+    requested_limit: missingCount,
+    stage: 1,
+    hold_id: null,
+  });
+
+  await updateJobStatusPg(jobId, "queued", {
+    resume_state: JSON.stringify(bulkExcavationMetadata),
+  });
+
+  globalQueue.register(jobId);
+
+  console.log(
+    `[bulk-excavation] Created job ${jobId} for @${username}: targetBoundary=${targetBoundary}, missing=${missingCount}`,
+  );
+  return jobId;
+}
+
 /** Read-only job lookup. Never triggers X API calls. */
 export async function getJob(jobId: string): Promise<JobRecord | undefined> {
   const job = await getJobPg(jobId);
@@ -717,28 +779,47 @@ async function runJobAsync(jobId: string): Promise<void> {
 
       try {
         if (isAdditionalExcavation && additionalExcavationData) {
-          // ── Additional Excavation: Normal engine with continuation ──
           if (!existingAccount) {
-            throw new Error(`Account not found for additional excavation`);
+            throw new Error(`Account not found for additional/bulk excavation`);
           }
 
-          console.log(
-            `[additional-excavation] @${username} Using NORMAL excavation engine: missingCount=${missingCount}, continuationPoint=${additionalExcavationData.continuationStartTime}`
-          );
-          
-          // Use normal excavation with continuation point and dynamic stop
-          result = await excavateEarliest(
-            username,
-            limit, // Keep original limit for compatibility
-            writeProgress,
-            token,
-            onRateLimit,
-            saveCheckpoint,
-            initialCheckpoint,
-            jobId,
-            additionalExcavationData.continuationStartTime, // Start from continuation point
-            missingCount, // Pass missingCount as the actual stop target
-          );
+          if (additionalExcavationData.type === BULK_EXCAVATION_TYPE) {
+            // ── Bulk Excavation: blast-mode engine (dev-only) ──
+            console.log(
+              `[bulk-excavation] @${username} Using BULK excavation engine: missingCount=${missingCount}, continuationPoint=${additionalExcavationData.continuationStartTime}`
+            );
+
+            result = await excavateBulk(
+              username,
+              limit,
+              writeProgress,
+              token,
+              onRateLimit,
+              saveCheckpoint,
+              initialCheckpoint,
+              jobId,
+              additionalExcavationData.continuationStartTime,
+              missingCount,
+            );
+          } else {
+            // ── Additional Excavation: Normal engine with continuation ──
+            console.log(
+              `[additional-excavation] @${username} Using NORMAL excavation engine: missingCount=${missingCount}, continuationPoint=${additionalExcavationData.continuationStartTime}`
+            );
+
+            result = await excavateEarliest(
+              username,
+              limit,
+              writeProgress,
+              token,
+              onRateLimit,
+              saveCheckpoint,
+              initialCheckpoint,
+              jobId,
+              additionalExcavationData.continuationStartTime,
+              missingCount,
+            );
+          }
           
         } else if (jobStage === 1) {
           // ── Normal Stage 1 Excavation ──

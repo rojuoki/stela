@@ -94,3 +94,12 @@ References:
 - https://railway.com/railway.schema.json
 - https://docs.railway.com/deployments/deployment-teardown
 - https://docs.railway.com/deployments/restart-policy
+
+## Local product UI after the 2026-09-20 cutover
+
+The Web UI now always uses IO PostgreSQL; the old SQLite UI path has been retired.
+`STELA_IO_USE_POSTGRES` no longer selects a fallback for public IO routes.
+Run `npm run dev` for Web and `npm run io:worker:local` in a second terminal for
+acquisition. The local worker loads Next-style environment files; existing
+process environment still wins. It requires the direct IO database URL and
+provider credentials. Starting it processes pending jobs on that database.

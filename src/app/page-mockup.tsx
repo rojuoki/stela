@@ -1,11 +1,8 @@
 "use client";
 
 import { useState } from "react";
-import { DevPanel } from "../components/DevPanel";
 import { useUser } from "@/contexts/UserContext";
 
-/** True only when the dev panel is enabled at build time. */
-const DEV_PANEL = process.env.NEXT_PUBLIC_DEV_PANEL === "1";
 
 export default function Home() {
   const [username, setUsername] = useState("");
@@ -28,12 +25,6 @@ export default function Home() {
     }
   };
 
-  // DevPanel helper - redirect to preview page
-  const handleViewUsername = (usernameToView: string) => {
-    const clean = usernameToView.replace(/^@/, "").trim().toLowerCase();
-    setUsername(clean);
-    window.location.href = `/user/${encodeURIComponent(clean)}`;
-  };
 
   return (
     <div className="max-w-2xl mx-auto px-4 py-12">
@@ -234,8 +225,6 @@ export default function Home() {
         </div>
       </main>
 
-      {/* Dev Panel — only when NEXT_PUBLIC_DEV_PANEL=1 */}
-      {DEV_PANEL && <DevPanel onView={handleViewUsername} />}
     </div>
   );
 }

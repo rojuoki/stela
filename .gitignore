@@ -40,3 +40,9 @@ next-env.d.ts
 *.sqlite-shm
 *.db
 .claude/
+
+# local experiments and generated acquisition output
+/prototype/
+/results/
+**/__pycache__/
+/スクリーンショット*.png

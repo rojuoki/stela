@@ -1,17 +1,16 @@
 import type { Metadata } from "next";
+import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
-import { UserProvider } from "@/contexts/UserContext";
-import { NavBar } from "@/components/NavBar";
+import { IoSessionProvider } from "@/components/io/session";
+import { IoNavigation } from "@/components/io/navigation";
+
+const geist = Geist({ subsets: ["latin"], variable: "--font-geist" });
+const geistMono = Geist_Mono({ subsets: ["latin"], variable: "--font-geist-mono" });
 
 export const metadata: Metadata = {
   title: "STELA — Unlock the earliest posts",
-  description: "Instantly view the earliest 100 posts of any public X account.",
+  description: "Unlock and explore the earliest posts of public X accounts.",
 };
-
-const DevPanel =
-  process.env.NEXT_PUBLIC_DEV_PANEL === "1"
-    ? (await import("@/dev/DevPanel")).default
-    : null;
 
 export default function RootLayout({
   children,
@@ -20,12 +19,11 @@ export default function RootLayout({
 }) {
   return (
     <html lang="en">
-      <body className="bg-black text-white min-h-screen antialiased">
-        <UserProvider>
-          <NavBar />
+      <body className={`bg-black text-white min-h-screen antialiased ${geist.variable} ${geistMono.variable} font-sans`}>
+        <IoSessionProvider>
+          <IoNavigation />
           {children}
-        </UserProvider>
-        {DevPanel && <DevPanel />}
+        </IoSessionProvider>
       </body>
     </html>
   );

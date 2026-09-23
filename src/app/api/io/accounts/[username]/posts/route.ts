@@ -2,10 +2,8 @@ import { NextRequest, NextResponse } from "next/server";
 import { getIoUserFromRequest } from "@/lib/io/auth";
 import { getIoPgAccountByUsername, getIoCoveredPostsForRange, getIoCoveredPrefixPostsByRank } from "@/lib/io/pg-cache";
 import { ioPgQuery } from "@/lib/io/pg-db";
-import { ioProductModeEnabled } from "@/lib/io/product-mode";
 import { getIoPgRunForUser } from "@/lib/io/pg-runs";
 import { getIoUnlockBoundary } from "@/lib/io/pg-users";
-import { getIoAccountByUsername, getIoPostsForAccount } from "@/lib/io/repository";
 import { normalizeIoUsername } from "@/lib/io/validation";
 
 export const runtime = "nodejs";
@@ -19,7 +17,7 @@ export async function GET(
   if (!username) {
     return NextResponse.json({ error: "Invalid username" }, { status: 400 });
   }
-  if (ioProductModeEnabled()) {
+  {
     const user = await getIoUserFromRequest(request);
     if (!user) return NextResponse.json({ error: "Not authenticated" }, { status: 401 });
     const account = await getIoPgAccountByUsername(username);
@@ -70,18 +68,4 @@ export async function GET(
       availableBoundary: result?.summary.coveredPostCount ?? 0,
     });
   }
-  const account = getIoAccountByUsername(username);
-  if (!account) {
-    return NextResponse.json({ error: "Account not found" }, { status: 404 });
-  }
-  const url = new URL(request.url);
-  const query = url.searchParams.get("q") || undefined;
-  const requestedLimit = Number(url.searchParams.get("limit") || 10_000);
-  const coveredOnly = url.searchParams.get("coveredOnly") === "1";
-  const posts = getIoPostsForAccount(account.account_id, {
-    query,
-    limit: Number.isFinite(requestedLimit) ? requestedLimit : 10_000,
-    coveredOnly,
-  });
-  return NextResponse.json({ posts, count: posts.length });
 }

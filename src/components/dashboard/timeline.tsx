@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, forwardRef, useImperativeHandle } from "react"
 import { Heart, Repeat2 } from "lucide-react"
+import type { MediaAttachment } from "./media-types"
 
 interface Post {
   id: string
@@ -10,12 +11,14 @@ interface Post {
   likes: number
   retweets: number
   hasMedia?: boolean
+  media?: MediaAttachment[]
   url?: string | null
 }
 
 interface TimelineProps {
   posts: Post[]
   highlightedDate?: string | null
+  highlightedPostId?: string | null
 }
 
 export interface TimelineHandle {
@@ -71,7 +74,7 @@ function linkedText(text: string) {
 }
 
 export const Timeline = forwardRef<TimelineHandle, TimelineProps>(function Timeline(
-  { posts, highlightedDate },
+  { posts, highlightedDate, highlightedPostId },
   ref
 ) {
   const containerRef = useRef<HTMLDivElement>(null)
@@ -107,6 +110,12 @@ export const Timeline = forwardRef<TimelineHandle, TimelineProps>(function Timel
     }
   }, [highlightedDate, posts])
 
+  useEffect(() => {
+    if (!highlightedPostId) return
+    const element = postRefs.current.get(highlightedPostId)
+    element?.scrollIntoView({ behavior: "smooth", block: "center" })
+  }, [highlightedPostId])
+
   return (
     <div ref={containerRef} className="flex-1 overflow-y-auto">
       <div className="px-4 py-3 border-b border-border sticky top-0 bg-card/80 backdrop-blur-sm z-10">
@@ -116,7 +125,7 @@ export const Timeline = forwardRef<TimelineHandle, TimelineProps>(function Timel
 
       <div className="divide-y divide-border">
         {posts.map((post) => {
-          const isHighlighted = highlightedDate && isSameDay(post.date, highlightedDate)
+          const isHighlighted = post.id === highlightedPostId || Boolean(highlightedDate && isSameDay(post.date, highlightedDate))
           
           return (
             <div
@@ -150,6 +159,18 @@ export const Timeline = forwardRef<TimelineHandle, TimelineProps>(function Timel
                   <p className="text-sm text-foreground leading-relaxed line-clamp-3">
                     {linkedText(post.text)}
                   </p>
+                  {post.media && post.media.length > 0 && (
+                    <div className={`mt-3 grid gap-1.5 overflow-hidden rounded-xl ${post.media.length === 1 ? "max-w-xl grid-cols-1" : "grid-cols-2"}`}>
+                      {post.media.map((media) => {
+                        const videoUrl = media.type === "image" ? null : media.url || media.variants?.[0]?.url
+                        return videoUrl ? (
+                          <video key={media.id} controls preload="metadata" poster={media.thumbnail} className="max-h-80 w-full rounded-lg bg-black object-contain" src={videoUrl} />
+                        ) : (
+                          <img key={media.id} src={media.thumbnail} alt="投稿のメディア" loading="lazy" className="max-h-80 w-full rounded-lg bg-secondary object-cover" />
+                        )
+                      })}
+                    </div>
+                  )}
                   {post.url && (
                     <a
                       href={post.url}

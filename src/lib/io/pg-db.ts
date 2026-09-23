@@ -1,11 +1,12 @@
 import { Pool, type PoolClient, type QueryResult, type QueryResultRow } from "pg";
+import { IoConfigurationError } from "./configuration-error";
 
 let pool: Pool | null = null;
 
 function connectionString(): string {
   const value = process.env.STELA_IO_DATABASE_URL;
   if (!value) {
-    throw new Error(
+    throw new IoConfigurationError(
       "STELA_IO_DATABASE_URL is not set. The IO database must not use DATABASE_URL.",
     );
   }

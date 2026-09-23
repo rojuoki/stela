@@ -65,9 +65,9 @@ export function StatsSummary({ stats }: StatsSummaryProps) {
             </div>
             <div className="h-px bg-border my-2" />
             <div className="flex items-center justify-between py-1.5">
-              <span className="text-xs text-muted-foreground">Avg. Engagement</span>
+              <span className="text-xs text-muted-foreground">Avg. reactions/post</span>
               <span className="text-sm font-medium text-chart-2">
-                {stats.avgEngagement.toFixed(1)}%
+                {stats.avgEngagement.toFixed(1)}
               </span>
             </div>
             <div className="flex items-center justify-between py-1.5">

@@ -2,24 +2,21 @@
 
 import { useState, useEffect, useCallback } from "react"
 import { ChevronDown, ChevronUp, Play, X, ChevronLeft, ChevronRight, ExternalLink } from "lucide-react"
-
-interface MediaItem {
-  id: string
-  type: "image" | "video"
-  thumbnail: string
-  postDate: string
-  postId?: string
-}
+import type { MediaAttachment } from "./media-types"
+import { bestVideoUrl } from "./media-types"
 
 interface MediaGridProps {
-  media: MediaItem[]
+  media: MediaAttachment[]
   onJumpToPost?: (postId: string) => void
 }
 
 export function MediaGrid({ media, onJumpToPost }: MediaGridProps) {
   const [isCollapsed, setIsCollapsed] = useState(false)
   const [lightboxIndex, setLightboxIndex] = useState<number | null>(null)
-  const displayMedia = media.slice(0, 9)
+  const [showAll, setShowAll] = useState(false)
+  const [query, setQuery] = useState("")
+  const visibleMedia = media.filter((item) => !query.trim() || `${item.postDate} ${item.type}`.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase()))
+  const displayMedia = (showAll || query.trim() ? visibleMedia : visibleMedia.slice(0, 9))
 
   const openLightbox = (index: number) => {
     setLightboxIndex(index)
@@ -31,15 +28,15 @@ export function MediaGrid({ media, onJumpToPost }: MediaGridProps) {
 
   const goToPrevious = useCallback(() => {
     if (lightboxIndex !== null) {
-      setLightboxIndex(lightboxIndex === 0 ? media.length - 1 : lightboxIndex - 1)
+      setLightboxIndex(lightboxIndex === 0 ? visibleMedia.length - 1 : lightboxIndex - 1)
     }
-  }, [lightboxIndex, media.length])
+  }, [lightboxIndex, visibleMedia.length])
 
   const goToNext = useCallback(() => {
     if (lightboxIndex !== null) {
-      setLightboxIndex(lightboxIndex === media.length - 1 ? 0 : lightboxIndex + 1)
+      setLightboxIndex(lightboxIndex === visibleMedia.length - 1 ? 0 : lightboxIndex + 1)
     }
-  }, [lightboxIndex, media.length])
+  }, [lightboxIndex, visibleMedia.length])
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -58,7 +55,7 @@ export function MediaGrid({ media, onJumpToPost }: MediaGridProps) {
     return () => window.removeEventListener("keydown", handleKeyDown)
   }, [lightboxIndex, closeLightbox, goToPrevious, goToNext])
 
-  const currentMedia = lightboxIndex !== null ? media[lightboxIndex] : null
+  const currentMedia = lightboxIndex !== null ? visibleMedia[lightboxIndex] : null
 
   return (
     <>
@@ -80,6 +77,7 @@ export function MediaGrid({ media, onJumpToPost }: MediaGridProps) {
 
         {!isCollapsed && (
           <div className="px-4 pb-4">
+            {media.length > 6 && <input aria-label="メディアを検索" value={query} onChange={(event) => { setQuery(event.target.value); setLightboxIndex(null) }} placeholder="日付・種類で絞り込み" className="mb-3 w-full rounded-md border border-border bg-secondary px-2.5 py-1.5 text-xs" />}
             <div className="grid grid-cols-3 gap-1.5">
               {displayMedia.map((item, index) => (
                 <div
@@ -87,11 +85,7 @@ export function MediaGrid({ media, onJumpToPost }: MediaGridProps) {
                   onClick={() => openLightbox(index)}
                   className="aspect-square rounded-md overflow-hidden bg-secondary relative group cursor-pointer"
                 >
-                  <img
-                    src={item.thumbnail}
-                    alt=""
-                    className="w-full h-full object-cover transition-transform group-hover:scale-105"
-                  />
+                  <img src={item.thumbnail} alt="" className="h-full w-full object-cover transition-transform group-hover:scale-105" loading="lazy" />
                   {item.type === "video" && (
                     <div className="absolute inset-0 flex items-center justify-center bg-background/30">
                       <div className="w-8 h-8 rounded-full bg-background/80 flex items-center justify-center">
@@ -103,9 +97,9 @@ export function MediaGrid({ media, onJumpToPost }: MediaGridProps) {
                 </div>
               ))}
             </div>
-            {media.length > 9 && (
-              <button className="w-full mt-2 py-1.5 text-xs text-muted-foreground hover:text-foreground transition-colors">
-                View all {media.length} media
+            {visibleMedia.length > 9 && !query.trim() && (
+              <button onClick={() => setShowAll(!showAll)} className="mt-2 w-full py-1.5 text-xs text-muted-foreground hover:text-foreground transition-colors">
+                {showAll ? "Show fewer media" : `View all ${visibleMedia.length} media`}
               </button>
             )}
           </div>
@@ -142,12 +136,9 @@ export function MediaGrid({ media, onJumpToPost }: MediaGridProps) {
               <ChevronLeft className="h-6 w-6" />
             </button>
 
-            {/* Image */}
-            <img
-              src={currentMedia.thumbnail.replace("w=200&h=200", "w=800&h=800")}
-              alt=""
-              className="max-w-full max-h-[80vh] rounded-lg object-contain"
-            />
+            {currentMedia.type === "image" ? <img src={currentMedia.thumbnail} alt="" className="max-h-[80vh] max-w-full rounded-lg object-contain" /> : (
+              <video controls autoPlay preload="metadata" poster={currentMedia.thumbnail} src={bestVideoUrl(currentMedia) || undefined} className="max-h-[80vh] max-w-full rounded-lg bg-black" />
+            )}
 
             {/* Navigation - Next */}
             <button

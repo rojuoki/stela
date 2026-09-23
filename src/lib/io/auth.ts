@@ -6,13 +6,14 @@ import {
   getIoUserByEmail,
   type IoUser,
 } from "./pg-users";
+import { IoConfigurationError } from "./configuration-error";
 
 const COOKIE_NAME = "stela-io-auth-token";
 
 function secret(): Uint8Array {
   const value = process.env.STELA_IO_AUTH_SECRET;
   if (!value) {
-    throw new Error("STELA_IO_AUTH_SECRET is not set");
+    throw new IoConfigurationError("STELA_IO_AUTH_SECRET is not set");
   }
   return new TextEncoder().encode(value);
 }

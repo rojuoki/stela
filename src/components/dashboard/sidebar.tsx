@@ -4,8 +4,10 @@ import { AccountCard } from "./account-card"
 import { MediaGrid } from "./media-grid"
 import { TopPosts } from "./top-posts"
 import { StatsSummary } from "./stats-summary"
+import type { MediaAttachment } from "./media-types"
 
 interface SidebarProps {
+  hideAccount?: boolean
   account: {
     avatar: string
     displayName: string
@@ -16,13 +18,7 @@ interface SidebarProps {
     posts: number
     joinedDate: string
   }
-  media: Array<{
-    id: string
-    type: "image" | "video"
-    thumbnail: string
-    postDate: string
-    postId?: string
-  }>
+  media: MediaAttachment[]
   topPosts: Array<{
     id: string
     text: string
@@ -41,10 +37,10 @@ interface SidebarProps {
   onJumpToPost?: (postId: string) => void
 }
 
-export function Sidebar({ account, media, topPosts, stats, onJumpToPost }: SidebarProps) {
+export function Sidebar({ account, media, topPosts, stats, onJumpToPost, hideAccount = false }: SidebarProps) {
   return (
     <div className="w-[300px] border-l border-border bg-card/30 overflow-y-auto shrink-0">
-      <AccountCard account={account} />
+      {!hideAccount && <AccountCard account={account} />}
       <MediaGrid media={media} onJumpToPost={onJumpToPost} />
       <TopPosts posts={topPosts} onJumpToPost={onJumpToPost} />
       <StatsSummary stats={stats} />

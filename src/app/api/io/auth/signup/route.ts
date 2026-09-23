@@ -4,6 +4,7 @@ import {
   createIoToken,
   createIoUserWithPassword,
 } from "@/lib/io/auth";
+import { IoConfigurationError, ioConfigurationMessage } from "@/lib/io/configuration-error";
 
 export const runtime = "nodejs";
 
@@ -29,6 +30,9 @@ export async function POST(request: NextRequest) {
     return createIoAuthResponse(await createIoToken(user), { user });
   } catch (error) {
     console.error("[io/auth/signup]", error);
+    if (error instanceof IoConfigurationError) {
+      return NextResponse.json({ error: ioConfigurationMessage() }, { status: 503 });
+    }
     return NextResponse.json({ error: "Could not create account" }, { status: 500 });
   }
 }

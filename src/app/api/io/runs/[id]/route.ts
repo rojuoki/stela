@@ -1,8 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getIoUserFromRequest } from "@/lib/io/auth";
-import { ioProductModeEnabled } from "@/lib/io/product-mode";
 import { cancelIoPgRunForUser, getIoPgRun, getIoPgRunForUser } from "@/lib/io/pg-runs";
-import { getIoRun } from "@/lib/io/repository";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -12,7 +10,7 @@ export async function GET(
   { params }: { params: Promise<{ id: string }> },
 ) {
   const id = (await params).id;
-  if (ioProductModeEnabled()) {
+  {
     const user = await getIoUserFromRequest(request);
     if (!user) return NextResponse.json({ error: "Not authenticated" }, { status: 401 });
     const run = await getIoPgRunForUser(id, user.id);
@@ -36,19 +34,12 @@ export async function GET(
     }
     return NextResponse.json({ error: "Run not found" }, { status: 404 });
   }
-  const run = getIoRun(id);
-  return run
-    ? NextResponse.json({ run })
-    : NextResponse.json({ error: "Run not found" }, { status: 404 });
 }
 
 export async function DELETE(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> },
 ) {
-  if (!ioProductModeEnabled()) {
-    return NextResponse.json({ error: "Cancellation requires IO product mode" }, { status: 409 });
-  }
   const user = await getIoUserFromRequest(request);
   if (!user) return NextResponse.json({ error: "Not authenticated" }, { status: 401 });
   const run = await cancelIoPgRunForUser((await params).id, user.id);

@@ -35,6 +35,8 @@ export function NavBar() {
     setUserMenuOpen(false);
   };
 
+  if (pathname === "/ux" || pathname.startsWith("/ux/")) return null;
+
   return (
     <nav className="border-b border-zinc-800 bg-black/80 backdrop-blur-sm sticky top-0 z-50">
       <div className="max-w-7xl mx-auto px-4">

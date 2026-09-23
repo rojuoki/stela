@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "next dev",
+    "dev": "node scripts/dev.mjs",
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
@@ -31,7 +31,9 @@
     "io:batch": "python3 scripts/run-twitterapi-io-batch.py",
     "test:bulk-split": "node --import tsx scripts/test-bulk-split.ts",
     "test:bulk-live": "node --env-file=.env --import tsx scripts/run-bulk-live-split-test.ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "io:worker:local": "node --import tsx scripts/io-local-worker.ts",
+    "io:test:ui-routes": "node --import tsx scripts/test-io-ui-routes.ts"
   },
   "dependencies": {
     "@radix-ui/react-avatar": "^1.1.11",
