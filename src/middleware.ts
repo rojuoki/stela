@@ -18,6 +18,12 @@ export function middleware(request: NextRequest) {
     return NextResponse.next();
   }
 
+  // The v0 preview runs in development mode. Keep Basic Auth enforced for
+  // production builds and deployed production environments.
+  if (process.env.NODE_ENV !== "production") {
+    return NextResponse.next();
+  }
+
   const expectedUser = process.env.BASIC_AUTH_USER;
   const expectedPass = process.env.BASIC_AUTH_PASS;
   const header = request.headers.get("authorization");
