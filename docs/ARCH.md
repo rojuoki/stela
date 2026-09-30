@@ -6,12 +6,14 @@
 
 ## 1. Product core
 
-STELA lets a user instantly unlock and view the earliest 100 posts of any public X account without manual scrolling.
+STELA lets a user preview up to the earliest 20 posts of any public X account,
+then intentionally excavate and unlock the earliest 1,000 without manual scrolling.
 
 This is a **viewing product**, not an analytics product.
 
 **Primary experience:**  
-input username → unlock → earliest 100 posts appear in a stable X-like layout.
+input username → shared earliest preview appears → excavate → earliest 1,000
+posts become available in a stable X-like layout.
 
 The system must be deterministic, fast, and low-cost.
 
@@ -53,10 +55,13 @@ Only what is required for rendering.
 
 ## 4. Database strategy
 
-- MVP database: **SQLite**
-- Design MUST allow future migration to PostgreSQL without schema rewrite.
-- Use normalized tables.
-- Must support: user unlock history, credit eligibility check, account cache reuse.
+- Product database: dedicated **PostgreSQL** selected by `STELA_IO_DATABASE_URL`.
+- Public preview posts and coverage are shared cache; user unlock boundaries,
+  requested acquisitions, and My Results reference a durable `users` row.
+- Local `npm run dev` manages a PostgreSQL process with data persisted under
+  `.local/io-postgres`; Ctrl+C stops the process without deleting its data.
+- Production uses the same migrations with a dedicated Neon database and a
+  separate Railway worker service. Legacy SQLite remains import/reference only.
 
 ---
 

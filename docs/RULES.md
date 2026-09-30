@@ -50,7 +50,11 @@ This section is for data model design only.
   extra credits purchasable
 - Unlock consumes 1 credit when successful.
 - Same user unlocking same account again: no additional credit.
-- No free tier.
+- There is no recurring free plan. A public account may expose up to its first
+  20 posts from shared, continuously resolved coverage as a product preview.
+- Preview reads do not create a user entitlement and do not consume a credit.
+- A preview acquisition stops after its first non-empty resolved prefix window;
+  the paid/credited excavation starts only from an explicit user action.
 - **Do NOT build billing logic in MVP.**
 
 ---
@@ -60,6 +64,7 @@ This section is for data model design only.
 - Unlock must always feel intentional.
 - Even when data already exists: show a 0.5–1.0 second artificial delay.
 - Language in UI must use: **"Unlock"**, **"View"** — NOT "Analyze".
+- English is the default product language for the global audience. STELA-generated navigation, actions, status messages, validation, errors, dates, and number formatting use English. Account names, bios, and post content remain in their original language.
 
 ---
 

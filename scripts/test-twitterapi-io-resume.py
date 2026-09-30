@@ -248,14 +248,64 @@ class GapReentryFixtureClient(FixtureClient):
 class DenseFixtureClient(FixtureClient):
     def __init__(self, runner) -> None:
         super().__init__(runner)
-        self.posts_per_window = 100
+        self.posts_per_window = 40
+
+
+class ResultCapFixtureClient(FixtureClient):
+    """A saturated parent followed by children below the result cap."""
+
+    def fetch(self, purpose, window):
+        if not self.calls:
+            self.calls.append((purpose, window))
+            posts = []
+            for index in range(100):
+                post_id = f"saturated-parent-{index}"
+                posts.append(
+                    self.runner.NormalizedPost(
+                        post_id=post_id,
+                        account_id="fixture-account",
+                        author_username="nasa",
+                        created_at=min(window.end - 1, window.start + index + 1),
+                        text="saturated parent post",
+                        url=f"https://x.com/nasa/status/{post_id}",
+                        language="en",
+                        reply_count=0,
+                        retweet_count=0,
+                        like_count=0,
+                        quote_count=0,
+                        view_count=0,
+                        conversation_id=None,
+                        in_reply_to_post_id=None,
+                        in_reply_to_user_id=None,
+                        in_reply_to_username=None,
+                        mentions=(),
+                        media=(),
+                    )
+                )
+            self.request_count += 5
+            self.search_request_count += 5
+            self.raw_posts_returned += 100
+            return self.runner.WindowResult(
+                purpose=purpose,
+                window=window,
+                status="PARTIAL",
+                termination_reason="result_cap_saturation",
+                posts=posts,
+                requests=5,
+                pages=5,
+                raw_post_count=100,
+                first_page_raw_post_count=20,
+                has_next_page=False,
+            )
+        self.posts_per_window = 40
+        return super().fetch(purpose, window)
 
 
 def make_args(checkpoint: Path) -> Namespace:
     return Namespace(
         checkpoint=checkpoint,
         target_count=297,
-        window_days=7,
+        window_days=1,
         probe_limit=10,
         fetch_limit=1000,
         page_review=10,
@@ -263,7 +313,7 @@ def make_args(checkpoint: Path) -> Namespace:
         page_ceiling=30,
         max_no_progress_pages=3,
         cursor_suffix_reuse_min_ratio=5 / 7,
-        density_safety_factor=0.6,
+        density_safety_factor=0.4,
         boundary_overlap_seconds=60,
         min_window_seconds=1,
         max_requests=500,
@@ -325,7 +375,7 @@ def main() -> int:
         saved = json.loads(checkpoint.read_text(encoding="utf-8"))
         assert saved["schema_version"] == 3
         assert saved["resume"]["phase"] == "collect"
-        assert saved["resume"]["next_collect_start"] == "2008-05-22T00:00:00Z"
+        assert saved["resume"]["next_collect_start"] == "2008-05-16T00:00:00Z"
         assert all(call_window.start >= resume_start for _, call_window in client.calls)
         progress = json.loads(
             make_args(checkpoint).progress_output.read_text(encoding="utf-8")
@@ -357,9 +407,11 @@ def main() -> int:
             sparse_client.calls,
         )
         assert len(sparse_client.calls) == 3, sparse_client.calls
-        assert sparse_client.calls[0][1].width_seconds == 7 * 24 * 60 * 60
-        assert sparse_client.calls[1][1].width_seconds == 84 * 24 * 60 * 60
-        assert sparse_client.calls[2][1].end == sparse_end
+        assert sparse_client.calls[0][1].width_seconds == 1 * 24 * 60 * 60
+        assert sparse_client.calls[1][1].width_seconds == 4 * 24 * 60 * 60
+        assert sparse_client.calls[2][1].width_seconds == 16 * 24 * 60 * 60
+        assert sparse_client.calls[1][1].start == sparse_client.calls[0][1].end
+        assert sparse_client.calls[2][1].start == sparse_client.calls[1][1].end
 
         dense_checkpoint = Path(directory) / "dense.checkpoint.json"
         dense_args = make_args(dense_checkpoint)
@@ -376,9 +428,50 @@ def main() -> int:
             sparse_end,
         )
         dense_experiment.collect_from(dense_start)
-        assert len(dense_client.calls) == 2, dense_client.calls
-        assert dense_client.calls[0][1].width_seconds == 7 * 24 * 60 * 60
-        assert dense_client.calls[1][1].width_seconds == 84 * 24 * 60 * 60
+        assert len(dense_client.calls) == 3, dense_client.calls
+        assert dense_client.calls[0][1].width_seconds == 1 * 24 * 60 * 60
+        assert dense_client.calls[1][1].width_seconds == 1 * 24 * 60 * 60
+        assert dense_client.calls[2][1].width_seconds == 1 * 24 * 60 * 60
+
+        preview_checkpoint = Path(directory) / "preview.checkpoint.json"
+        preview_args = make_args(preview_checkpoint)
+        preview_args.target_count = 1
+        preview_client = DenseFixtureClient(runner)
+        preview_experiment = runner.OldestBlockExperiment(
+            preview_args,
+            "nasa",
+            preview_client,
+            dense_start,
+            sparse_end,
+        )
+        preview_experiment.collect_from(dense_start)
+        assert len(preview_client.calls) == 1, preview_client.calls
+        assert len(preview_experiment.resolved_candidates()) == 40
+
+        cap_checkpoint = Path(directory) / "result-cap.checkpoint.json"
+        cap_args = make_args(cap_checkpoint)
+        cap_args.target_count = 101
+        cap_client = ResultCapFixtureClient(runner)
+        cap_experiment = runner.OldestBlockExperiment(
+            cap_args,
+            "nasa",
+            cap_client,
+            dense_start,
+            sparse_end,
+        )
+        cap_window = runner.Window(
+            dense_start, dense_start + runner.SECONDS_PER_DAY
+        )
+        assert cap_experiment.resolve_collect_window(cap_window, depth=0) is True
+        assert len(cap_client.calls) == 4, cap_client.calls
+        assert cap_client.calls[1][1].width_seconds == int(
+            runner.SECONDS_PER_DAY * 0.4
+        )
+        assert cap_client.calls[2][1].start == cap_client.calls[1][1].end
+        assert cap_client.calls[3][1].start == cap_client.calls[2][1].end
+        assert cap_client.calls[3][1].end == cap_window.end
+        assert cap_experiment.discarded_parent_post_count == 100
+        assert len(cap_experiment.resolved_candidates()) == 120
 
         discard_checkpoint = Path(directory) / "discard-parent.checkpoint.json"
         discard_args = make_args(discard_checkpoint)
@@ -431,8 +524,8 @@ def main() -> int:
         _, second_child = recovery_client.calls[2]
         assert first_child.start == recovery_start
         assert second_child.start == first_child.end
-        assert first_child.width_seconds == int(2 * 24 * 60 * 60 * 12 / 20)
-        assert second_child.width_seconds == 7 * 24 * 60 * 60
+        assert first_child.width_seconds == int(2 * 24 * 60 * 60 * 8 / 20)
+        assert second_child.width_seconds == first_child.width_seconds * 4
         assert recovery_experiment.last_collect_used_split is True
         resolved_children = sorted(
             [window for purpose, window in recovery_client.calls[1:]
@@ -466,7 +559,7 @@ def main() -> int:
 
     print(
         "twitterapi.io resume fixture: PASS "
-        "(296 restored; page-target adaptive; split parent discarded)"
+        "(296 restored; post-target adaptive; result cap split; parent discarded)"
     )
     return 0
 

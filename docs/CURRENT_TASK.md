@@ -115,6 +115,65 @@ production-grade worker resume.
   registry. `twscrape` requires `STELA_TWSCRAPE_PYTHON` to point at its Python
   environment and optionally uses `STELA_TWSCRAPE_DB` for its account database.
 
+### Shared public preview implementation (2026-09-24)
+
+- Search now starts a bounded `prefix_preview` acquisition only when the shared
+  covered prefix has no posts. It stops at the first non-empty resolved prefix
+  window and stores that window through the normal shared post/coverage path.
+- Anyone can view at most the first 20 posts from shared continuous coverage.
+  Preview data has no special ownership or post classification and does not
+  advance `user_unlocks`.
+- The first 1,000-post excavation starts only after the authenticated user
+  explicitly presses the excavation button. Its planner reuses every covered
+  shared-prefix post, so an eight-post preview produces a 992-post acquisition
+  target and a cached 1,000-post prefix produces an immediate grant.
+
+### Result-cap adaptive collection (2026-09-29)
+
+- TwitterAPI.io can stop a search window at exactly 100 results while reporting
+  `has_next_page=false`. A 100-result collect window is therefore saturated,
+  not resolved; its sample is discarded for coverage and the interval is split.
+- Collection now starts with a one-day window and targets 40 results per
+  resolved window. The next width is estimated from result density and limited
+  to a 0.25x–4x change. A split continues from its final child estimate instead
+  of resetting to the initial width.
+- The initial 60-result live oldest-1,000 run for `CNN` completed in 187.834 seconds with 99 total
+  requests, two result-cap splits, and an estimated provider cost of $0.19233.
+  At the new run's coverage frontier it retained all 922 candidates seen by the
+  older runner and found 119 additional posts, for 1,041 resolved candidates.
+- A live 40-result-target check for `nytimes` covered 2007-03-05 through
+  2007-03-12 with 154 posts, 17 total requests, no split or unknown window,
+  33.191 seconds elapsed, and an estimated TwitterAPI.io cost of $0.02628.
+- A short official-X comparison used `from:CNN -is:retweet` for
+  2007-02-22 UTC. X API v2 and TwitterAPI.io returned the same 22 unique IDs,
+  timestamps, and texts, with zero replies in that sample. The official API
+  emitted the same 22 rows on both cursor pages (44 raw rows), so comparison
+  must deduplicate IDs. Its two successful page requests took 0.563 seconds;
+  TwitterAPI.io used three search requests and 4.681 seconds. The official
+  test sequence reduced free X API credit by $0.11, including its initial
+  10-result probe.
+- Deeper official-X validation covered two reply-heavy `Coinbase` days and a
+  formerly saturated `nytimes` range. Below the cap, both providers returned
+  the same 95 post IDs, timestamps, and texts. Above the cap, the IO runner
+  discarded three 100-post parent samples, resolved six contiguous child
+  windows, and its final 139 posts exactly matched the official ID, timestamp,
+  and text set.
+- Reply classification exposed incomplete old X metadata rather than missing
+  posts: X omitted `referenced_tweets` for 1 of 79 and 15 of 103 replies that
+  TwitterAPI.io identified. Every omitted X row still had a conversation ID
+  different from its own post ID, consistent with the IO reply classification.
+- The official API is not a complete wide-window oracle either. For a
+  `nytimes` seven-day range it returned the same 100 rows twice and stopped,
+  while the IO one-day/adaptive route found 113. Splitting the official search
+  into adjacent 24-hour windows also found exactly the same 113. Completeness
+  checks must therefore use bounded time windows and ID deduplication on both
+  providers.
+- The deeper IO runs took 93.498 seconds combined and cost an estimated
+  $0.10659. The official comparison sequence used $1.74 of free credit,
+  including duplicate and deliberately unsafe wide-window responses; $4.55
+  remained afterward. Repeatable comparison is available through
+  `npm run io:compare:official -- ...`.
+
 ### Checkpoint resume result (2026-09-04)
 
 - Implemented checkpoint restore for the independent TwitterAPI.io runner.

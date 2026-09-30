@@ -83,6 +83,7 @@ export interface IoPgResultImport {
   accountId: string | null;
   discarded: boolean;
   terminalSuccess: boolean;
+  grantedBoundary?: number;
 }
 
 /**
@@ -109,10 +110,11 @@ export async function importIoPgAcquisitionResult(
     const runResult = await client.query<{
       id: string; account_id: string | null; provider: string; collection_mode: string;
       status: string; worker_id: string | null;
+      requested_by_user_id: string | null;
       requested_start_at: string | null; requested_end_at: string | null; target_boundary: number | null;
       range_request_id: string | null;
     }>(
-      `SELECT id, account_id, provider, collection_mode, status, worker_id, requested_start_at::text,
+      `SELECT id, account_id, provider, collection_mode, status, worker_id, requested_by_user_id, requested_start_at::text,
               requested_end_at::text, target_boundary
               , range_request_id
        FROM acquisition_runs WHERE id = $1 FOR UPDATE`,
@@ -144,6 +146,14 @@ export async function importIoPgAcquisitionResult(
         Boolean(profile.protected), number(profile.followers_count), number(profile.following_count),
         number(profile.statuses_count)],
     );
+    const attachedRun = await client.query(
+      `UPDATE acquisition_runs SET account_id = $2, username = $3
+       WHERE id = $1 AND (account_id IS NULL OR account_id = $2)`,
+      [run.id, accountId, username],
+    );
+    if (attachedRun.rowCount !== 1) {
+      throw new Error("Acquisition run account does not match the imported profile");
+    }
     if (run.range_request_id) {
       await client.query(
         "UPDATE range_unlock_requests SET account_id = $2, username = $3, status = 'running' WHERE id = $1",
@@ -161,11 +171,15 @@ export async function importIoPgAcquisitionResult(
     const existingFrontier = computeIoCoverageFrontier(createdAt, existing);
     if (!existingFrontier) throw new Error("Existing coverage frontier is invalid");
     const expectedStart = run.collection_mode === "prefix_extend"
-      ? existingFrontier.frontierAt
+      ? run.requested_start_at
+      : run.collection_mode === "prefix_preview" && run.requested_start_at
+        ? run.requested_start_at
       : run.collection_mode === "date_range"
         ? run.requested_start_at
         : existingFrontier.startsAt;
-    const declaredStart = run.collection_mode === "prefix_extend" || run.collection_mode === "date_range"
+    const declaredStart = run.collection_mode === "prefix_extend"
+      || run.collection_mode === "date_range"
+      || (run.collection_mode === "prefix_preview" && run.requested_start_at)
       ? run.requested_start_at
       : text(config.collect_start) || createdAt;
     if (!expectedStart || !declaredStart || Date.parse(declaredStart) !== Date.parse(expectedStart)) {
@@ -173,7 +187,7 @@ export async function importIoPgAcquisitionResult(
       return { accountId: null, discarded: true, terminalSuccess: false };
     }
 
-    const accepted = attachedWindows({ baseFrontier: expectedStart, incoming: records(payload.windows) });
+    const accepted = attachedWindows({ baseFrontier: existingFrontier.frontierAt, incoming: records(payload.windows) });
     const candidateRows = records(payload.candidate_posts).length
       ? records(payload.candidate_posts) : records(payload.posts);
     for (const post of candidateRows) {
@@ -212,7 +226,46 @@ export async function importIoPgAcquisitionResult(
           number(source.requests), number(source.pages), number(source.unique_post_count)],
       );
     }
+    let grantedBoundary: number | undefined;
+    if (
+      run.requested_by_user_id
+      && run.target_boundary
+      && ["prefix_initial", "prefix_extend"].includes(run.collection_mode)
+    ) {
+      const updatedWindows = await completeWindows(client, accountId, run.provider);
+      const updatedFrontier = computeIoCoverageFrontier(createdAt, updatedWindows);
+      if (updatedFrontier) {
+        const covered = await client.query<{ count: number }>(
+          `SELECT COUNT(*)::int AS count FROM posts
+           WHERE account_id = $1 AND provider = $2 AND coverage_state = 'covered'
+             AND created_at >= $3::timestamptz AND created_at < $4::timestamptz`,
+          [accountId, run.provider, updatedFrontier.startsAt, updatedFrontier.frontierAt],
+        );
+        grantedBoundary = Math.min(run.target_boundary, Number(covered.rows[0]?.count ?? 0));
+        if (grantedBoundary > 0) {
+          await client.query(
+            `INSERT INTO user_unlocks (user_id, account_id, boundary_end, source_run_id)
+             VALUES ($1,$2,$3,$4)
+             ON CONFLICT (user_id, account_id) DO UPDATE SET
+               boundary_end = GREATEST(user_unlocks.boundary_end, EXCLUDED.boundary_end),
+               source_run_id = CASE WHEN EXCLUDED.boundary_end > user_unlocks.boundary_end
+                 THEN EXCLUDED.source_run_id ELSE user_unlocks.source_run_id END,
+               unlocked_at = CASE WHEN EXCLUDED.boundary_end > user_unlocks.boundary_end
+                 THEN NOW() ELSE user_unlocks.unlocked_at END`,
+            [run.requested_by_user_id, accountId, grantedBoundary, run.id],
+          );
+          await client.query(
+            `UPDATE acquisition_runs SET granted_boundary = GREATEST(COALESCE(granted_boundary, 0), $3)
+             WHERE id = $1 AND worker_id = $2 AND status = 'running'`,
+            [run.id, workerId ?? run.worker_id, grantedBoundary],
+          );
+        }
+      }
+    }
     const runnerStatus = text(result.status);
+    if (runnerStatus === "IN_PROGRESS") {
+      return { accountId, discarded: false, terminalSuccess: false, grantedBoundary };
+    }
     const terminalSuccess = runnerStatus === "EXPERIMENTAL_SUCCESS"
       || runnerStatus === "EXPERIMENTAL_ACCOUNT_HAS_LESS_THAN_TARGET";
     await client.query(
@@ -230,6 +283,6 @@ export async function importIoPgAcquisitionResult(
         number(metrics.estimated_cost_usd), JSON.stringify({ config, result, metrics }), absolutePath,
         terminalSuccess ? null : text(result.error)],
     );
-    return { accountId, discarded: false, terminalSuccess };
+    return { accountId, discarded: false, terminalSuccess, grantedBoundary };
   });
 }

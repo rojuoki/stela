@@ -77,7 +77,7 @@ export function MediaGrid({ media, onJumpToPost }: MediaGridProps) {
 
         {!isCollapsed && (
           <div className="px-4 pb-4">
-            {media.length > 6 && <input aria-label="メディアを検索" value={query} onChange={(event) => { setQuery(event.target.value); setLightboxIndex(null) }} placeholder="日付・種類で絞り込み" className="mb-3 w-full rounded-md border border-border bg-secondary px-2.5 py-1.5 text-xs" />}
+            {media.length > 6 && <input aria-label="Search media" value={query} onChange={(event) => { setQuery(event.target.value); setLightboxIndex(null) }} placeholder="Filter by date or type" className="mb-3 w-full rounded-md border border-border bg-secondary px-2.5 py-1.5 text-xs" />}
             <div className="grid grid-cols-3 gap-1.5">
               {displayMedia.map((item, index) => (
                 <div

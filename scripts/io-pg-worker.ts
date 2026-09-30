@@ -99,6 +99,9 @@ async function runPython(run: IoPgRun, outputPath: string, progressPath: string)
     if (!run.requested_start_at) throw new Error("prefix_extend run has no requested_start_at");
     args.push("--collect-start", run.requested_start_at);
   }
+  if (run.collection_mode === "prefix_preview" && run.requested_start_at) {
+    args.push("--collect-start", run.requested_start_at);
+  }
   if (run.collection_mode === "date_range") {
     if (!run.requested_start_at || !run.requested_end_at) {
       throw new Error("date_range run is missing requested bounds");
@@ -120,6 +123,9 @@ async function runPython(run: IoPgRun, outputPath: string, progressPath: string)
             ? checkpoint : undefined,
         });
         if (!renewed) throw new Interrupted("Worker lease lost or run canceled");
+        if (fs.existsSync(progressPath)) {
+          await importIoPgAcquisitionResult(progressPath, run.id, workerId);
+        }
       }).catch((error) => {
         interrupted = true;
         child.kill("SIGTERM");
@@ -208,6 +214,13 @@ async function processRun(run: IoPgRun): Promise<void> {
       }
       removeCompletedArtifacts(outputPath, progressPath);
       await clearIoPgRunOutputPath(run.id, workerId);
+      return;
+    }
+    if (run.collection_mode === "prefix_preview") {
+      if (imported.terminalSuccess) {
+        removeCompletedArtifacts(outputPath, progressPath);
+        await clearIoPgRunOutputPath(run.id, workerId);
+      }
       return;
     }
     if (!imported.terminalSuccess) return;

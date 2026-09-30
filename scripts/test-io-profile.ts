@@ -31,7 +31,7 @@ async function main() {
   mode = "limit";
   await assert.rejects(getOrFetchIoProfile("sample"), e => e instanceof IoProfileError && e.status === 429);
   mode = "mismatch";
-  await assert.rejects(getOrFetchIoProfile("sample"), /一致しません/); assert.equal(writes, 1);
+  await assert.rejects(getOrFetchIoProfile("sample"), /did not match/); assert.equal(writes, 1);
   console.log("Profile checks passed: cache reuse, concurrent lookup deduplication, normalized persistence, protected account, rate limit, identity mismatch.");
 }
 main().finally(async () => { globalThis.fetch=originalFetch; await closeIoPgPool(); }).catch(e => { console.error(e); process.exitCode=1; });

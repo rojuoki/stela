@@ -135,12 +135,7 @@ export const Timeline = forwardRef<TimelineHandle, TimelineProps>(function Timel
   }, [posts, onVisiblePostChange])
 
   return (
-    <div ref={containerRef} className="flex-1 overflow-y-auto">
-      <div className="px-4 py-3 border-b border-border sticky top-0 bg-card/80 backdrop-blur-sm z-10">
-        <span className="text-sm font-medium text-foreground">Timeline</span>
-        <span className="text-xs text-muted-foreground ml-2">{posts.length} posts</span>
-      </div>
-
+    <div ref={containerRef} className="h-full min-h-0 overflow-y-auto overscroll-contain">
       <div className="divide-y divide-border">
         {posts.map((post) => {
           const isHighlighted = post.id === highlightedPostId || Boolean(highlightedDate && isSameDay(post.date, highlightedDate))
@@ -185,7 +180,7 @@ export const Timeline = forwardRef<TimelineHandle, TimelineProps>(function Timel
                         return videoUrl ? (
                           <video key={media.id} controls preload="metadata" poster={media.thumbnail} className="max-h-80 w-full rounded-lg bg-black object-contain" src={videoUrl} />
                         ) : (
-                          <img key={media.id} src={media.thumbnail} alt="投稿のメディア" loading="lazy" className="max-h-80 w-full rounded-lg bg-secondary object-cover" />
+                          <img key={media.id} src={media.thumbnail} alt="Post media" loading="lazy" className="max-h-80 w-full rounded-lg bg-secondary object-cover" />
                         )
                       })}
                     </div>

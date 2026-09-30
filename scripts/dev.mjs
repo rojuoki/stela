@@ -1,45 +1,61 @@
-import { spawn } from 'node:child_process';
-import { createRequire } from 'node:module';
+import { spawn } from "node:child_process";
+import { createRequire } from "node:module";
+import { migrateLocalIoPostgres, startLocalIoPostgres } from "./local-io-postgres.mjs";
+
 const require = createRequire(import.meta.url);
+require("@next/env").loadEnvConfig(process.cwd(), true);
+
 let stopping = false;
+let web;
 let worker;
+let database;
 let retry;
 let failures = 0;
-const web = spawn(process.execPath, [require.resolve('next/dist/bin/next'), 'dev', ...process.argv.slice(2)], { stdio: ['inherit', 'pipe', 'pipe'] });
-web.stdout.on('data', chunk => {
-  process.stdout.write(chunk);
-});
-web.stderr.on('data', chunk => process.stderr.write(chunk));
-function stop(code = 0) {
+
+async function stop(code = 0) {
   if (stopping) return;
   stopping = true;
   clearTimeout(retry);
   process.exitCode = code;
-  web.kill('SIGTERM');
-  worker?.kill('SIGTERM');
-  const deadline = setTimeout(() => { web.kill('SIGKILL'); worker?.kill('SIGKILL'); }, 15000);
+  web?.kill("SIGTERM");
+  worker?.kill("SIGTERM");
+  const deadline = setTimeout(() => {
+    web?.kill("SIGKILL");
+    worker?.kill("SIGKILL");
+  }, 15_000);
   deadline.unref();
+  await database?.stop();
 }
+
 function startWorker() {
   if (stopping) return;
-  console.log('[stela] Starting IO worker alongside the web server');
+  console.log("[stela] Starting IO worker alongside the web server");
   const started = Date.now();
-  worker = spawn(process.execPath, ['--import', 'tsx', 'scripts/io-local-worker.ts'], { stdio: 'inherit' });
-  worker.on('error', () => { console.error('[stela] Cannot launch IO worker'); stop(1); });
-  worker.on('exit', () => {
+  worker = spawn(process.execPath, ["--import", "tsx", "scripts/io-local-worker.ts"], { stdio: "inherit" });
+  worker.on("error", () => { console.error("[stela] Cannot launch IO worker"); void stop(1); });
+  worker.on("exit", () => {
     if (stopping) return;
-    failures = Date.now() - started > 60000 ? 1 : failures + 1;
-    const delay = Math.min(30000, 1000 * 2 ** Math.min(failures, 5));
+    failures = Date.now() - started > 60_000 ? 1 : failures + 1;
+    const delay = Math.min(30_000, 1000 * 2 ** Math.min(failures, 5));
     console.error(`[stela] IO worker exited; restarting in ${delay / 1000}s`);
     retry = setTimeout(startWorker, delay);
   });
 }
 
-// The worker can start before Next is ready: it only polls the dedicated IO
-// database, and this removes the fragile dependency on the dev server's log
-// format or which stream prints the Ready message.
-startWorker();
-web.on('error', () => stop(1));
-web.on('exit', code => stop(code ?? 1));
-process.on('SIGINT', () => stop());
-process.on('SIGTERM', () => stop());
+async function main() {
+  database = await startLocalIoPostgres();
+  migrateLocalIoPostgres();
+  web = spawn(process.execPath, [require.resolve("next/dist/bin/next"), "dev", ...process.argv.slice(2)], { stdio: ["inherit", "pipe", "pipe"] });
+  web.stdout.on("data", chunk => process.stdout.write(chunk));
+  web.stderr.on("data", chunk => process.stderr.write(chunk));
+  web.on("error", () => { void stop(1); });
+  web.on("exit", code => { void stop(code ?? 1); });
+  startWorker();
+}
+
+process.on("SIGINT", () => { void stop(); });
+process.on("SIGTERM", () => { void stop(); });
+main().catch(async error => {
+  console.error("[stela] Development stack could not start", error);
+  await stop(1);
+});

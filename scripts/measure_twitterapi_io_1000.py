@@ -8,12 +8,14 @@ The prototype uses cursor pagination as the normal collection path, but keeps
 time windows as an independent safety boundary.  Probes read one page only.
 Collection windows follow cursors until observed exhaustion or a configurable
 page/post budget; budgeted or anomalous windows are split into half-open UTC
-intervals and the older half is resolved first. Resolved normal windows adapt
- through page-density feedback targeting 12 pages. Empty, fully resolved
- windows re-enter the year/month exploration path, while capped windows are
- discarded and resolved through contiguous oldest-first children. Observed
- exhaustion is an operational coverage signal, not a claim of provider-level
- completeness.
+intervals and the older half is resolved first. A collect window that reaches
+the provider's observed 100-result cap is split even when the provider reports
+cursor exhaustion. Resolved normal windows adapt toward 40 results (the same
+0.4 safety factor also used for anomalous page-density splits). Empty, fully resolved
+windows re-enter the year/month exploration path, while capped windows are
+discarded and resolved through contiguous oldest-first children. Observed
+exhaustion below the cap is an operational coverage signal, not a claim of
+provider-level completeness.
 """
 
 from __future__ import annotations
@@ -39,7 +41,7 @@ UTC = timezone.utc
 API_BASE = "https://api.twitterapi.io"
 TWEET_RESULT_RATE_USD = 0.00015
 PROFILE_RESULT_RATE_USD = 0.00018
-COLLECT_DENSE_POST_THRESHOLD = 100
+COLLECT_RESULT_CAP = 100
 SPLIT_RECOVERY_MAX_DAYS = 7
 SECONDS_PER_DAY = 24 * 60 * 60
 
@@ -710,10 +712,15 @@ class TwitterApiIoClient:
                         basis = "one_page_below_probe_threshold"
                     break
 
+                if len(normalized) >= COLLECT_RESULT_CAP:
+                    status = "PARTIAL"
+                    reason = "result_cap_saturation"
+                    basis = None
+                    break
                 if not has_next_page:
                     status = "RESOLVED"
                     reason = "natural_cursor_exhaustion"
-                    basis = "observed_has_next_page_false"
+                    basis = "observed_has_next_page_false_below_result_cap"
                     cursor_remaining = False
                     break
                 if not next_cursor_present:
@@ -1222,8 +1229,8 @@ class OldestBlockExperiment:
                 "unique_post_count": len(resolved),
                 "coverage_frontier": iso_epoch(frontier),
                 "progress_message": (
-                    f"採掘中: 確定 {len(resolved)}件 / 候補 {len(self.candidates)}件; "
-                    f"カバレッジ {iso_epoch(frontier)}"
+                    f"Unlocking: {len(resolved)} confirmed / {len(self.candidates)} candidates; "
+                    f"coverage through {iso_epoch(frontier)}"
                 ),
             },
             "metrics": {
@@ -1373,13 +1380,28 @@ class OldestBlockExperiment:
             return self.resume_collect_start
         return self.probe_from(self.lower_bound)
 
-    def _next_page_target_span_seconds(
-        self, window: Window, pages: int
+    def _target_post_count(self) -> int:
+        return max(
+            1,
+            min(
+                COLLECT_RESULT_CAP - 1,
+                math.floor(COLLECT_RESULT_CAP * self.args.density_safety_factor),
+            ),
+        )
+
+    def _next_post_target_span_seconds(
+        self, window: Window, post_count: int
     ) -> int:
-        """Estimate the next width so its page count approaches the target."""
-        pages = max(1, pages)
-        estimated = int(window.width_seconds * self._split_target_pages() / pages)
-        return max(self.args.min_window_seconds, estimated)
+        """Estimate the next width toward the safe result-count target."""
+        if post_count <= 0:
+            estimated = window.width_seconds * 4
+        else:
+            estimated = int(
+                window.width_seconds * self._target_post_count() / post_count
+            )
+        lower = max(self.args.min_window_seconds, window.width_seconds // 4)
+        upper = max(lower, window.width_seconds * 4)
+        return max(lower, min(upper, estimated))
 
     def collect_from(self, collect_start: int) -> None:
         cursor = collect_start
@@ -1426,26 +1448,24 @@ class OldestBlockExperiment:
                 )
                 continue
             if self.last_collect_used_split:
-                # Split recovery has already sized each contiguous child from
-                # its observed page density. Resume the normal route at the
-                # configured initial width after the split range is resolved.
-                self.adaptive_reset_to_7_count += 1
-                self.collect_span_seconds = self.args.window_days * SECONDS_PER_DAY
-                action = "reset_after_split"
+                # The final resolved child already sized the next window from
+                # its result density. Keep that estimate instead of returning
+                # to an initial width that may immediately saturate again.
+                action = "continue_post_target_after_split"
                 self.last_collect_used_split = False
             else:
                 root_result = self.last_root_collect_result
                 if root_result is None:
                     raise PrototypeFailure("collect window has no root result")
-                self.collect_span_seconds = self._next_page_target_span_seconds(
-                    window, root_result.pages
+                self.collect_span_seconds = self._next_post_target_span_seconds(
+                    window, root_result.unique_posts
                 )
-                action = "page_target"
+                action = "post_target"
             self.client._log(
                 "ADAPTIVE "
                 f"span_seconds={self.collect_span_seconds} "
                 f"unique_new={unique_new} action={action} "
-                f"target_pages={self._split_target_pages()}"
+                f"target_posts={self._target_post_count()}"
             )
             cursor = window.end
             self.resume_collect_start = cursor
@@ -1465,13 +1485,19 @@ class OldestBlockExperiment:
         return result
 
     def _split_width_seconds(self, result: WindowResult) -> int:
-        """Estimate a child width that should consume at most 12 pages.
+        """Estimate a child width below the observed provider limit.
 
         A partial result is only a sample. Its posts are discarded, while the
-        observed cursor time span and page count provide a cheap local density
-        estimate.  The estimate is deliberately based on pages, not on the
-        capped parent post count.
+        observed result count sizes a result-cap split. Other partial states
+        retain the older cursor/page-density fallback.
         """
+        if result.termination_reason == "result_cap_saturation":
+            estimated = int(
+                result.window.width_seconds
+                * self._target_post_count()
+                / max(1, result.unique_posts)
+            )
+            return max(self.args.min_window_seconds, estimated)
         observed_seconds = result.cursor_progress_seconds
         pages = max(1, result.pages)
         if observed_seconds <= 0:
@@ -1492,23 +1518,35 @@ class OldestBlockExperiment:
     def _next_split_width_seconds(
         self, result: WindowResult
     ) -> int:
-        """Adapt the next contiguous split child from its page density."""
-        pages = max(1, result.pages)
-        estimated = int(result.window.width_seconds * self._split_target_pages() / pages)
-        max_width = SPLIT_RECOVERY_MAX_DAYS * 24 * 60 * 60
-        return min(
-            max_width,
-            max(self.args.min_window_seconds, estimated),
+        """Adapt the next contiguous split child from its result density."""
+        if result.unique_posts <= 0:
+            estimated = result.window.width_seconds * 4
+        else:
+            estimated = int(
+                result.window.width_seconds
+                * self._target_post_count()
+                / result.unique_posts
+            )
+        lower = max(self.args.min_window_seconds, result.window.width_seconds // 4)
+        upper = min(
+            SPLIT_RECOVERY_MAX_DAYS * SECONDS_PER_DAY,
+            max(lower, result.window.width_seconds * 4),
         )
+        return max(lower, min(upper, estimated))
 
     def _mark_split(self, result: WindowResult, split_width: int, depth: int) -> None:
         self.split_count += 1
         self.density_split_count += 1
+        method = (
+            "result_cap"
+            if result.termination_reason == "result_cap_saturation"
+            else "page_density"
+        )
         self.client._log(
-            f"SPLIT method=page_density depth={depth} "
+            f"SPLIT method={method} depth={depth} "
             f"source={result.window.label()} pages={result.pages} "
             f"progress={result.cursor_progress_seconds}s "
-            f"next_width={split_width}s target_pages={self._split_target_pages()}"
+            f"next_width={split_width}s target_posts={self._target_post_count()}"
         )
 
     def _resolve_split_range(
@@ -1719,9 +1757,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--target-count", type=int, default=1000)
     parser.add_argument(
         "--collection-mode",
-        choices=("prefix_initial", "prefix_extend", "date_range"),
+        choices=("prefix_preview", "prefix_initial", "prefix_extend", "date_range"),
         default="prefix_initial",
-        help="prefix_extend collects only from --collect-start onward",
+        help=(
+            "prefix_preview stops after the first non-empty resolved prefix window; "
+            "prefix_extend collects only from --collect-start onward"
+        ),
     )
     parser.add_argument(
         "--collect-start",
@@ -1736,8 +1777,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--window-days",
         type=int,
-        default=7,
-        help="initial collection-window width before 30/120/year-end expansion (default: 7 days)",
+        default=1,
+        help="initial collection-window width before result-density adaptation (default: 1 day)",
     )
     parser.add_argument("--probe-limit", type=int, default=10)
     parser.add_argument(
@@ -1759,8 +1800,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--density-safety-factor",
         type=float,
-        default=0.6,
-        help="size density-based child windows below the observed page capacity",
+        default=0.4,
+        help="target this share of observed result/page capacity (default: 0.4)",
     )
     parser.add_argument(
         "--boundary-overlap-seconds",
@@ -1823,7 +1864,7 @@ def parse_args() -> argparse.Namespace:
         args.collect_start is not None or args.collect_end is not None
     ):
         parser.error("collection bounds require prefix_extend or date_range")
-    if args.collection_mode == "prefix_extend" and args.collect_end is not None:
+    if args.collection_mode in {"prefix_preview", "prefix_extend"} and args.collect_end is not None:
         parser.error("--collect-end is only valid for date_range")
     if args.collect_start is not None and args.collect_end is not None and args.collect_start >= args.collect_end:
         parser.error("--collect-start must be before --collect-end")
@@ -1935,8 +1976,8 @@ def run(args: argparse.Namespace) -> int:
         f"TwitterAPI.io; @{username}; created={iso_epoch(profile_lower_bound)}; "
         f"collection={args.collection_mode}; lower_bound={iso_epoch(lower_bound)}; "
         f"probe_limit={args.probe_limit}; collect_spans="
-        f"page-target={SPLIT_RECOVERY_MAX_DAYS}d-recovery; "
-        f"dense_threshold={COLLECT_DENSE_POST_THRESHOLD}; fetch_limit={args.fetch_limit}; "
+        f"post-target={math.floor(COLLECT_RESULT_CAP * args.density_safety_factor)}; "
+        f"result_cap={COLLECT_RESULT_CAP}; fetch_limit={args.fetch_limit}; "
         f"page_review/split/ceiling="
         f"{args.page_review}/{args.page_split}/{args.page_ceiling}",
         flush=True,
@@ -1993,8 +2034,9 @@ def run(args: argparse.Namespace) -> int:
             "collect_end": iso_epoch(snapshot_end) if args.collection_mode == "date_range" else None,
             "window_days": args.window_days,
             "page_target_pages": experiment._split_target_pages(),
+            "post_target_count": experiment._target_post_count(),
             "probe_limit": args.probe_limit,
-            "collect_dense_post_threshold": COLLECT_DENSE_POST_THRESHOLD,
+            "collect_result_cap": COLLECT_RESULT_CAP,
             "fetch_limit": args.fetch_limit,
             "page_review": args.page_review,
             "page_split": args.page_split,

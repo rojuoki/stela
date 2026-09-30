@@ -10,9 +10,9 @@ export function IoSessionProvider({ children }: { children: ReactNode }) {
     try {
       const response = await fetch("/api/io/auth/me", { cache: "no-store" });
       if (response.status === 401) { setUser(null); setError(""); return; }
-      if (!response.ok) throw new Error("ログイン状態を確認できません。再読み込みしてください。");
+      if (!response.ok) throw new Error("We couldn’t verify your session. Please reload the page.");
       const data = await response.json(); setUser(data.user); setError("");
-    } catch (e) { setUser(null); setError(e instanceof Error ? e.message : "接続できません"); }
+    } catch (e) { setUser(null); setError(e instanceof Error ? e.message : "Couldn’t connect"); }
     finally { setLoading(false); }
   }, []);
   useEffect(() => { void refresh(); }, [refresh]);

@@ -4,6 +4,7 @@ import { NextRequest, NextResponse } from "next/server";
 import {
   createIoUser,
   getIoUserByEmail,
+  getIoUserById,
   type IoUser,
 } from "./pg-users";
 import { IoConfigurationError } from "./configuration-error";
@@ -42,7 +43,10 @@ export async function getIoUserFromRequest(request: NextRequest): Promise<IoUser
       || typeof value.email !== "string"
       || typeof value.name !== "string"
     ) return null;
-    return { id: value.id, email: value.email, name: value.name };
+    // A signed cookie can outlive a local database reset or an account
+    // deletion. Treat that stale session as logged out instead of passing a
+    // nonexistent user id into tables protected by foreign keys.
+    return getIoUserById(value.id);
   } catch {
     return null;
   }
@@ -77,8 +81,11 @@ export function createIoAuthResponse(token: string, body: unknown): NextResponse
   return response;
 }
 
-export function createIoLogoutResponse(body: unknown): NextResponse {
-  const response = NextResponse.json(body);
+export function createIoLogoutResponse(
+  body: unknown,
+  init?: ResponseInit,
+): NextResponse {
+  const response = NextResponse.json(body, init);
   response.cookies.set(COOKIE_NAME, "", {
     httpOnly: true,
     secure: process.env.NODE_ENV === "production",

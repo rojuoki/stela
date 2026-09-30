@@ -3,7 +3,12 @@ import { ioPgQuery, withIoPgTransaction } from "./pg-db";
 import type { PoolClient } from "pg";
 
 export type IoPgRunStatus = "queued" | "running" | "succeeded" | "failed" | "canceled";
-export type IoPgCollectionMode = "prefix_initial" | "prefix_extend" | "prefix_grant" | "date_range";
+export type IoPgCollectionMode =
+  | "prefix_preview"
+  | "prefix_initial"
+  | "prefix_extend"
+  | "prefix_grant"
+  | "date_range";
 
 export interface IoPgRun {
   id: string;
@@ -121,7 +126,7 @@ export async function getActiveIoPgRunForUserAndUsername(
 export interface CreateIoPgRunInput {
   accountId?: string | null;
   username: string;
-  requestedByUserId: string;
+  requestedByUserId?: string | null;
   provider: string;
   collectionMode: IoPgCollectionMode;
   targetCount?: number | null;
@@ -145,7 +150,7 @@ export async function createIoPgRunWithClient(
      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,'queued','Queued')
      RETURNING *, created_at::text, started_at::text, finished_at::text,
        requested_start_at::text, requested_end_at::text, lease_expires_at::text`,
-    [id, input.accountId ?? null, input.username.toLowerCase(), input.requestedByUserId,
+    [id, input.accountId ?? null, input.username.toLowerCase(), input.requestedByUserId ?? null,
       input.provider, input.collectionMode, input.targetCount ?? null,
       input.baseBoundary ?? null, input.targetBoundary ?? null,
       input.requestedStartAt ?? null, input.requestedEndAt ?? null, input.rangeRequestId ?? null],

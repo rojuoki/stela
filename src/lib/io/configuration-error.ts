@@ -9,5 +9,5 @@ export class IoConfigurationError extends Error {
 export function ioConfigurationMessage(): string {
   return process.env.NODE_ENV === "production"
     ? "The IO service is temporarily unavailable"
-    : "IO開発データベースに接続できません。STELA_IO_DATABASE_URL と STELA_IO_AUTH_SECRET を .env.local に設定して、開発サーバを再起動してください。";
+    : "Couldn’t connect to the IO development database. Set STELA_IO_DATABASE_URL and STELA_IO_AUTH_SECRET in .env.local, then restart the development server.";
 }

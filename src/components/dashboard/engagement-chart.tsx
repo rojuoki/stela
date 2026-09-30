@@ -405,8 +405,8 @@ export function EngagementChart({ data, perPostData, selectedRange, onDateClick,
         </div>
         {selectedRange ? (
           <div className="flex items-center gap-3 text-xs text-muted-foreground">
-            <span>{new Date(selectedRange.start).toLocaleDateString("ja-JP")} — {new Date(selectedRange.end).toLocaleDateString("ja-JP")}</span>
-            <button type="button" onClick={onRangeClear} className="text-foreground hover:underline">全期間に戻す</button>
+            <span>{new Date(selectedRange.start).toLocaleDateString("en-US")} — {new Date(selectedRange.end).toLocaleDateString("en-US")}</span>
+            <button type="button" onClick={onRangeClear} className="text-foreground hover:underline">Reset range</button>
           </div>
         ) : (
           <div className="text-xs text-muted-foreground">
@@ -608,9 +608,9 @@ export function EngagementChart({ data, perPostData, selectedRange, onDateClick,
       </div>
       {viewMode === "perPost" && perPostScroll.max > 0 && (
         <div className="mt-1 flex items-center gap-2 text-[11px] text-muted-foreground">
-          <button type="button" onClick={() => movePerPost(-1)} disabled={perPostScroll.left <= 1} className="rounded px-1.5 py-0.5 hover:bg-secondary hover:text-foreground disabled:opacity-30">← 前へ</button>
+          <button type="button" onClick={() => movePerPost(-1)} disabled={perPostScroll.left <= 1} className="rounded px-1.5 py-0.5 hover:bg-secondary hover:text-foreground disabled:opacity-30">← Previous</button>
           <input
-            aria-label="投稿グラフの表示位置"
+            aria-label="Position in post chart"
             type="range"
             min={0}
             max={Math.max(1, Math.round(perPostScroll.max))}
@@ -621,7 +621,7 @@ export function EngagementChart({ data, perPostData, selectedRange, onDateClick,
             }}
             className="h-4 min-w-0 flex-1 cursor-ew-resize accent-[oklch(0.7_0.15_220)]"
           />
-          <button type="button" onClick={() => movePerPost(1)} disabled={perPostScroll.left >= perPostScroll.max - 1} className="rounded px-1.5 py-0.5 hover:bg-secondary hover:text-foreground disabled:opacity-30">次へ →</button>
+          <button type="button" onClick={() => movePerPost(1)} disabled={perPostScroll.left >= perPostScroll.max - 1} className="rounded px-1.5 py-0.5 hover:bg-secondary hover:text-foreground disabled:opacity-30">Next →</button>
         </div>
       )}
     </div>

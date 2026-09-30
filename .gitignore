@@ -44,5 +44,6 @@ next-env.d.ts
 # local experiments and generated acquisition output
 /prototype/
 /results/
+/.local/
 **/__pycache__/
 /スクリーンショット*.png

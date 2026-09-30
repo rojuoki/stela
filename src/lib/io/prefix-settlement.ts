@@ -21,6 +21,14 @@ export async function recoverIoPrefixSettlements(): Promise<void> {
       [run.id],
     );
   }
+  // Preview runs create shared coverage but no user entitlement. If a worker
+  // stopped after the atomic import, only its disposable checkpoint pointers
+  // remain to be cleared.
+  await ioPgQuery(
+    `UPDATE acquisition_runs SET checkpoint_json=NULL, output_path=NULL
+     WHERE status='succeeded' AND collection_mode='prefix_preview'
+       AND (checkpoint_json IS NOT NULL OR output_path IS NOT NULL)`,
+  );
 }
 
 export type IoPrefixSettlementKind = "full" | "partial" | "no-progress";

@@ -19,4 +19,14 @@ assert.equal(acquisition.targetBoundary, 2000);
 assert.equal(acquisition.missingCount, 700);
 assert.equal(acquisition.acquisitionTargetCount, 700);
 assert.equal(acquisition.collectStartAt, "2024-01-20T00:00:00Z");
+
+const previewReuse = buildIoPrefixExtensionPlan({
+  userId: "user-2", accountId: "account-1", provider: "twitterapi_io",
+  currentBoundary: 0, availableBoundary: 8,
+  frontierAt: "2024-01-02T00:00:00Z",
+});
+assert.equal(previewReuse.targetBoundary, 1000);
+assert.equal(previewReuse.missingCount, 992);
+assert.equal(previewReuse.acquisitionTargetCount, 992);
+assert.equal(previewReuse.collectStartAt, "2024-01-02T00:00:00Z");
 console.log("io prefix extension planner checks passed");

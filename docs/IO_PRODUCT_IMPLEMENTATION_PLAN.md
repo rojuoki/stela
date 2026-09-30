@@ -25,6 +25,14 @@ continued from the newest cached timestamp. IO must instead continue from the
 oldest-side **continuous resolved coverage frontier**. Cached post count and a
 latest timestamp are not enough once arbitrary date-range collection exists.
 
+The public entry flow exposes up to 20 posts from that shared covered prefix.
+If no covered post exists, search starts a bounded `prefix_preview` run whose
+target is one resolved post; because the runner stops only at a safe window
+boundary, every covered post in that first non-empty window is stored. The UI
+still returns at most 20. This preview creates no user entitlement. An explicit
+Unlock action then plans the first 1,000 against all shared covered posts, no
+matter which user or run originally acquired them.
+
 ## 2. End-state architecture
 
 ```
@@ -64,6 +72,8 @@ For earliest-side collection, `user_unlocks.boundary_end` is the number of
 chronologically first, covered posts that the user can view. The first product
 block and each extension use `PREFIX_BLOCK_SIZE = 1000` initially. The engine
 accepts any positive target count; the UI does not expose arbitrary sizes yet.
+Users without that entitlement may still read
+`min(20, covered_prefix_count)` as the shared public preview.
 
 For a date range, integer boundaries are not meaningful. The separate
 `user_range_unlocks` entitlement grants a half-open UTC interval

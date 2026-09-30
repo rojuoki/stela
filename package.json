@@ -28,12 +28,14 @@
     "io:worker": "node --import tsx scripts/io-pg-worker.ts",
     "io:import": "node --import tsx scripts/import-twitterapi-io-result.ts",
     "io:test:resume": "python3 scripts/test-twitterapi-io-resume.py",
+    "io:compare:official": "python3 scripts/compare_x_official_to_io.py",
     "io:batch": "python3 scripts/run-twitterapi-io-batch.py",
     "test:bulk-split": "node --import tsx scripts/test-bulk-split.ts",
     "test:bulk-live": "node --env-file=.env --import tsx scripts/run-bulk-live-split-test.ts",
     "typecheck": "tsc --noEmit",
     "io:worker:local": "node --import tsx scripts/io-local-worker.ts",
-    "io:test:ui-routes": "node --import tsx scripts/test-io-ui-routes.ts"
+    "io:test:ui-routes": "node --import tsx scripts/test-io-ui-routes.ts",
+    "io:test:auth-flow": "node --import tsx scripts/test-io-auth-flow.ts"
   },
   "dependencies": {
     "@radix-ui/react-avatar": "^1.1.11",

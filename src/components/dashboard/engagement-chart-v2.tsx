@@ -24,15 +24,15 @@ type Metric = "total" | "likes" | "retweets" | "replies"
 type ScaleMode = "balanced" | "linear" | "log"
 
 const metricLabels: Record<Metric, string> = {
-  total: "総反応",
+  total: "Total engagement",
   likes: "Likes",
   retweets: "Reposts",
   replies: "Replies",
 }
 
 const scaleLabels: Record<ScaleMode, string> = {
-  balanced: "見やすく",
-  linear: "実数",
+  balanced: "Balanced",
+  linear: "Linear",
   log: "Log",
 }
 
@@ -57,11 +57,11 @@ function quantile(values: number[], q: number) {
 function formatCompact(value: number) {
   if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(value >= 10_000_000 ? 0 : 1)}M`
   if (value >= 1_000) return `${(value / 1_000).toFixed(value >= 10_000 ? 0 : 1)}K`
-  return Math.round(value).toLocaleString()
+  return Math.round(value).toLocaleString("en-US")
 }
 
 function formatDate(value: string, withYear = false) {
-  return new Date(value).toLocaleDateString("ja-JP", {
+  return new Date(value).toLocaleDateString("en-US", {
     year: withYear ? "numeric" : undefined,
     month: "short",
     day: "numeric",
@@ -240,20 +240,20 @@ export function EngagementChartV2({
             onClick={() => setViewMode("overview")}
             className={`rounded px-3 py-1.5 transition-colors ${viewMode === "overview" ? "bg-background text-foreground shadow-sm" : "text-muted-foreground hover:text-foreground"}`}
           >
-            投稿の流れ
+            Overview
           </button>
           <button
             type="button"
             onClick={() => setViewMode("perPost")}
             className={`rounded px-3 py-1.5 transition-colors ${viewMode === "perPost" ? "bg-background text-foreground shadow-sm" : "text-muted-foreground hover:text-foreground"}`}
           >
-            投稿ごと
+            Per post
           </button>
         </div>
 
         <div className="flex flex-wrap items-center gap-2 text-xs">
           <label className="flex items-center gap-2 text-muted-foreground">
-            指標
+            Metric
             <select
               value={metric}
               onChange={(event) => setMetric(event.target.value as Metric)}
@@ -278,10 +278,10 @@ export function EngagementChartV2({
       </div>
 
       <div className="mb-2 flex flex-wrap items-center justify-between gap-2 text-[11px] text-muted-foreground">
-        <span>{sortedPosts.length.toLocaleString()} posts · 中央値 {formatCompact(median)} · 最大 {formatCompact(max)}</span>
+        <span>{sortedPosts.length.toLocaleString("en-US")} posts · median {formatCompact(median)} · max {formatCompact(max)}</span>
         {scaleMode === "balanced" && clippedCount > 0
-          ? <span className="text-amber-500">△ {clippedCount}件の突出値は上端に表示</span>
-          : <span>{viewMode === "overview" ? "ドラッグで期間選択 · クリックで移動" : "横にスクロール · 点をクリックで投稿へ"}</span>}
+          ? <span className="text-amber-500">△ {clippedCount} outliers are pinned to the top</span>
+          : <span>{viewMode === "overview" ? "Drag to select a range · click to jump" : "Scroll horizontally · click a point to open the post"}</span>}
       </div>
 
       {viewMode === "overview" ? (
@@ -291,7 +291,7 @@ export function EngagementChartV2({
             height={238}
             className="block touch-none overflow-visible"
             role="img"
-            aria-label="投稿量と投稿あたりの反応の推移"
+            aria-label="Post volume and engagement per post over time"
             onPointerDown={(event) => {
               event.currentTarget.setPointerCapture(event.pointerId)
               const index = selectBin(event.clientX, event.currentTarget)
@@ -306,8 +306,8 @@ export function EngagementChartV2({
             onPointerUp={(event) => finishSelection(event.clientX, event.currentTarget)}
             onPointerCancel={() => setDrag(null)}
           >
-            <text x={0} y={18} fill="currentColor" className="fill-muted-foreground text-[10px]">投稿数</text>
-            <text x={0} y={100} fill="currentColor" className="fill-muted-foreground text-[10px]">反応/投稿</text>
+            <text x={0} y={18} fill="currentColor" className="fill-muted-foreground text-[10px]">Posts</text>
+            <text x={0} y={100} fill="currentColor" className="fill-muted-foreground text-[10px]">Engagement/post</text>
             {[0, 0.5, 1].map((ratio) => (
               <g key={ratio}>
                 <line x1={left} x2={overviewWidth - right} y1={postBaseY - postHeight * ratio} y2={postBaseY - postHeight * ratio} className="stroke-border" strokeDasharray={ratio === 0 ? undefined : "3 4"} />
@@ -375,10 +375,10 @@ export function EngagementChartV2({
               style={{ left: Math.max(85, Math.min(overviewWidth - 85, centerX(hoveredBin))) }}
             >
               <p className="mb-1 font-medium text-foreground">{formatDate(bins[hoveredBin].posts[0].date, true)}</p>
-              <p className="text-muted-foreground">投稿 {bins[hoveredBin].count}件</p>
-              <p className="text-muted-foreground">中央値 {formatCompact(bins[hoveredBin].median)}</p>
-              <p className="text-muted-foreground">範囲 {formatCompact(bins[hoveredBin].q1)}–{formatCompact(bins[hoveredBin].q3)}</p>
-              <p className="text-muted-foreground">最大 {formatCompact(bins[hoveredBin].max)}</p>
+              <p className="text-muted-foreground">Posts {bins[hoveredBin].count}</p>
+              <p className="text-muted-foreground">Median {formatCompact(bins[hoveredBin].median)}</p>
+              <p className="text-muted-foreground">Range {formatCompact(bins[hoveredBin].q1)}–{formatCompact(bins[hoveredBin].q3)}</p>
+              <p className="text-muted-foreground">Max {formatCompact(bins[hoveredBin].max)}</p>
             </div>
           )}
         </div>
@@ -391,7 +391,7 @@ export function EngagementChartV2({
                 <span className="absolute right-2 top-1/2 -translate-y-1/2">{formatCompact(scaleMode === "log" ? Math.sqrt(perPostScale.max) : perPostScale.cap / 2)}</span>
                 <span className="absolute bottom-7 right-2">0</span>
               </div>
-              <div className="min-w-0 flex-1 overflow-x-auto pb-2" aria-label="投稿ごとの反応グラフ">
+              <div className="min-w-0 flex-1 overflow-x-auto pb-2" aria-label="Engagement by post">
                 {(() => {
                   const innerWidth = Math.max(perPostWidth - 48, postsInRange.length * 14)
                   const top = 12
@@ -417,7 +417,7 @@ export function EngagementChartV2({
                               onPostClick?.(post.id)
                             }}
                           >
-                            <title>{`${formatDate(post.date, true)} · ${metricLabels[metric]} ${value.toLocaleString()}\nLikes ${post.likes.toLocaleString()} · Reposts ${post.retweets.toLocaleString()} · Replies ${post.replies.toLocaleString()}`}</title>
+                            <title>{`${formatDate(post.date, true)} · ${metricLabels[metric]} ${value.toLocaleString("en-US")}\nLikes ${post.likes.toLocaleString("en-US")} · Reposts ${post.retweets.toLocaleString("en-US")} · Replies ${post.replies.toLocaleString("en-US")}`}</title>
                             <rect x={x - 7} y={0} width={14} height={205} fill="transparent" />
                             <line x1={x} x2={x} y1={bottom} y2={pointY} className={selected ? "stroke-chart-3" : "stroke-chart-1/25"} />
                             {clipped
@@ -432,7 +432,7 @@ export function EngagementChartV2({
                 })()}
               </div>
             </div>
-          ) : <p className="py-14 text-center text-sm text-muted-foreground">選択期間に投稿がありません。</p>}
+          ) : <p className="py-14 text-center text-sm text-muted-foreground">No posts in the selected range.</p>}
 
           {selectedPost && (
             <button
@@ -440,7 +440,7 @@ export function EngagementChartV2({
               onClick={() => onPostClick?.(selectedPost.id)}
               className="mt-2 w-full rounded-md border border-border bg-secondary/40 px-3 py-2 text-left hover:bg-secondary"
             >
-              <span className="text-xs text-muted-foreground">{formatDate(selectedPost.date, true)} · 総反応 {(selectedPost.likes + selectedPost.retweets + selectedPost.replies).toLocaleString()}</span>
+              <span className="text-xs text-muted-foreground">{formatDate(selectedPost.date, true)} · total engagement {(selectedPost.likes + selectedPost.retweets + selectedPost.replies).toLocaleString("en-US")}</span>
               {selectedPost.text && <span className="mt-1 block truncate text-sm text-foreground">{selectedPost.text}</span>}
             </button>
           )}

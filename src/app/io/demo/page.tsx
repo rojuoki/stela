@@ -4,12 +4,12 @@ import { SavedTimeline } from "@/components/dashboard/saved-timeline"
 import type { TweetData } from "@/components/types"
 
 const samples = [
-  "朝の空気が少し変わった。今日は古いメモを読み返しながら、次に作るものを考えています。",
-  "小さな更新を公開しました。使ってみて気づいたことがあれば教えてください。",
-  "散歩の途中で見つけた景色。記録しておくと、あとから時間の流れがよく見える。",
-  "調べものをしていたら、思いがけず昔の投稿に戻ってきた。過去の自分との距離がおもしろい。",
-  "今日は作業の日。目立たない部分を少しずつ整えています。",
-  "イベントに来てくれた皆さん、ありがとうございました。次回も楽しみにしています。",
+  "The air felt different this morning. I’m rereading old notes and thinking about what to build next.",
+  "A small update is live. Let me know what you notice when you try it.",
+  "A view from today’s walk. Keeping a record makes the passage of time easier to see.",
+  "Research led me back to an old post. The distance from my past self is fascinating.",
+  "A day for quiet work, improving the parts no one usually notices.",
+  "Thank you to everyone who joined the event. Looking forward to the next one.",
 ]
 
 const posts: TweetData[] = Array.from({ length: 360 }, (_, index) => {
@@ -31,16 +31,16 @@ export default function DemoTimelinePage() {
   return (
     <main className="mx-auto max-w-7xl bg-background text-foreground">
       <div className="flex items-center justify-between border-b border-border bg-secondary/20 px-5 py-2 text-xs text-muted-foreground md:px-8">
-        <span>DESIGN PREVIEW · ダミーデータ</span>
-        <Link href="/io" className="hover:text-foreground">検索へ戻る</Link>
+        <span>DESIGN PREVIEW · SAMPLE DATA</span>
+        <Link href="/io" className="hover:text-foreground">Back to search</Link>
       </div>
       <ProfileBanner
         compact
         searchHref="/io"
         account={{
           username: "stela_demo",
-          display_name: "STELA タイムライン・プレビュー",
-          description: "結果画面の操作とレイアウトを確認するためのデモアカウントです。",
+          display_name: "STELA Timeline Preview",
+          description: "A demo account for reviewing the results screen and timeline controls.",
           created_at: "2011-04-18T00:00:00.000Z",
           followers_count: 12840,
           following_count: 436,
