@@ -20,7 +20,9 @@ domain, or persistent volume is required. Local SQLite development is unchanged.
    URL (not the hostname containing `-pooler`). Web may continue using the pooled
    URL for the same database. If sharing variables with Web, set
    `STELA_IO_WORKER_DATABASE_URL` to the direct URL on the worker instead.
-4. Set `TWITTERAPI_IO_API_KEY` directly in Railway Variables.
+4. Create `TWITTERAPI_IO_API_KEY` as a Railway project shared variable and add it
+   to both Web and worker. Web uses it for uncached profile lookup; worker uses it
+   for post acquisition.
 5. Set `STELA_IO_CONCURRENCY=8` and
    `STELA_IO_PROVIDER_REQUESTS_PER_SECOND=6` (also the code defaults).
 6. Use one region, preferably close to Neon. Set one replica, Serverless off,
@@ -88,6 +90,20 @@ on a Docker host or Railway. Real eight-account resource sizing, ongoing health
 monitoring/alerts, and failed-file retention remain production acceptance work.
 The worker's persistent DB connection/polling can keep Neon compute awake;
 do not budget assuming Neon sleeps while this worker is running.
+
+## Production status (2026-09-30)
+
+- Railway Web and worker are deployed from `main`; commit `a8c5853` passed both
+  builds and is active.
+- The worker pre-deploy migration/verification completed with migrations 001–004
+  current, then reached `ready slots=8; interrupted jobs resume from Postgres`.
+- Web and worker both reference the shared `TWITTERAPI_IO_API_KEY` without
+  duplicating its value.
+- A read-only production smoke test passed for the IO page, account page, and a
+  Neon-backed account API response. No paid acquisition was started.
+- The deployed services are in Railway US East and the IO Neon project is in AWS
+  US West 2. Keep this visible as a latency/cost follow-up rather than assuming the
+  services are co-located.
 
 References:
 - https://docs.railway.com/config-as-code/reference

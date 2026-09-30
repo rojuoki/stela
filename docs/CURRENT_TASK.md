@@ -291,7 +291,7 @@ production-grade worker resume.
 ### Railway worker preparation (2026-09-17)
 
 - Added worker-only Docker/Railway configuration and operator instructions in
-  `docs/IO_RAILWAY_WORKER.md`; no external deployment has been performed.
+  `docs/IO_RAILWAY_WORKER.md`.
 - Persist actual Python checkpoints in the existing DB column and restore them
   into fresh per-attempt directories. Shutdown stops children before requeuing.
 - A direct-Postgres session lock prevents overlapping Railway deployments from
@@ -300,5 +300,25 @@ production-grade worker resume.
   at startup. No additional database table or migration was needed.
 - Local fixture integration covers graceful and hard restart, expired leases,
   fresh filesystem recovery, singleton ownership, and late result rejection.
-- Docker image build / Railway deployment acceptance, real API resource sizing,
-  continuous monitoring, and failed-file retention are not yet verified/completed.
+- Real eight-account API resource sizing, continuous monitoring, and failed-file
+  retention are not yet verified/completed.
+
+### Production IO deployment (2026-09-30)
+
+- The existing Railway `stela` Web service and private `io-worker` service both
+  deploy automatically from `main`. Commit `a8c5853` is active on both services.
+- The services share the dedicated Neon `stela-io` database. Its four IO schema
+  migrations are current, and the worker starts with eight slots after verifying
+  them in the pre-deploy step.
+- `TWITTERAPI_IO_API_KEY` is a Railway project shared variable referenced by both
+  Web and worker. Web needs it for uncached profile lookup; worker needs it for
+  post acquisition. The Web service also has its IO database and auth variables.
+- A production smoke test passed through Basic authentication: `/io` and
+  `/io/account` returned HTML, and `/api/io/accounts/nasa` returned the Neon-backed
+  account JSON. The test did not create an acquisition or spend provider credit.
+- Railway currently runs both services in US East while the IO Neon project is in
+  AWS US West 2. This is functional but adds cross-region database latency; align
+  regions after measuring or when legacy East-region traffic is retired.
+- The Node PostgreSQL client emits a forward-compatibility warning for the current
+  SSL mode. Connections are verified today; make the connection URL explicitly use
+  `sslmode=verify-full` before upgrading to the next major `pg` release.
