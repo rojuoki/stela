@@ -368,7 +368,7 @@ async function serve(): Promise<void> {
   });
   await new Promise<void>((resolve, reject) => {
     server.once("error", reject);
-    server.listen(port, "0.0.0.0", resolve);
+    server.listen({ port, host: "::", ipv6Only: false }, resolve);
   });
   const address = server.address();
   const listeningPort = address && typeof address === "object" ? address.port : port;
