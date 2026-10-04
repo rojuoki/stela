@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { getIoUserFromRequest } from "@/lib/io/auth";
 import { requestIoPrefixUnlock } from "@/lib/io/prefix-service";
 import { normalizeIoUsername } from "@/lib/io/validation";
+import { wakeIoWorker } from "@/lib/io/worker-wake";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -17,6 +18,9 @@ export async function POST(request: NextRequest) {
   if (!username) return NextResponse.json({ error: "Invalid username" }, { status: 400 });
   try {
     const result = await requestIoPrefixUnlock({ userId: user.id, username });
+    if (result.kind === "queued") {
+      void wakeIoWorker("prefix_unlock");
+    }
     return NextResponse.json(result, { status: result.kind === "queued" ? 202 : 200 });
   } catch (error) {
     return NextResponse.json(

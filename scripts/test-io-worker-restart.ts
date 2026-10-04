@@ -26,6 +26,7 @@ async function main(): Promise<void> {
     const child = spawn(process.execPath, ["--import", "tsx", "scripts/io-pg-worker.ts", ...(once ? ["--once"] : [])], {
       env: {
         ...process.env, STELA_IO_CONCURRENCY: "1", STELA_IO_WORK_DIRECTORY: work,
+        STELA_IO_WORKER_WAKE_SECRET: "worker-restart-test-secret", PORT: "0",
         STELA_IO_RUNNER_SCRIPT: path.resolve("scripts/fake-io-worker-runner.py"),
         STELA_IO_FAKE_STATE_DIR: path.join(temp, "state"), ...extra,
       }, stdio: ["ignore", "pipe", "pipe"],

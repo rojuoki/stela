@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { getIoUserFromRequest } from "@/lib/io/auth";
 import { requestIoRangeUnlock } from "@/lib/io/range-service";
 import { normalizeIoUsername } from "@/lib/io/validation";
+import { wakeIoWorker } from "@/lib/io/worker-wake";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -21,6 +22,9 @@ export async function POST(request: NextRequest) {
     const result = await requestIoRangeUnlock({
       userId: user.id, username, startAt: body.startAt, endAt: body.endAt,
     });
+    if (result.kind === "queued") {
+      void wakeIoWorker("range_unlock");
+    }
     return NextResponse.json(result, { status: result.kind === "queued" ? 202 : 200 });
   } catch (error) {
     return NextResponse.json(

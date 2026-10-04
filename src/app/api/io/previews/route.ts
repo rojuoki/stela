@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { getOrFetchIoProfile, IoProfileError } from "@/lib/io/profile";
 import { requestIoPublicPreview } from "@/lib/io/public-preview";
 import { normalizeIoUsername } from "@/lib/io/validation";
+import { wakeIoWorker } from "@/lib/io/worker-wake";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -19,6 +20,9 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: "Posts from private accounts cannot be fetched." }, { status: 409 });
     }
     const result = await requestIoPublicPreview(account.username);
+    if (result.kind === "queued") {
+      void wakeIoWorker("public_preview");
+    }
     return NextResponse.json(result, { status: result.kind === "queued" ? 202 : 200 });
   } catch (error) {
     if (error instanceof IoProfileError) {

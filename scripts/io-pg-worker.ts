@@ -9,9 +9,10 @@ import { claimNextIoPgRun, clearIoPgRunOutputPath, completeIoPgCacheGrant, failI
 import { finalizeIoPrefixExtension, recoverIoPrefixSettlements } from "../src/lib/io/prefix-settlement";
 import { advanceIoRangeRequest } from "../src/lib/io/range-service";
 import { runWorkerCoordinator } from "../src/lib/io/worker-coordinator";
+import { createIoWorkerWakeServer } from "../src/lib/io/worker-wake-server";
 
 const workerId = `${process.env.STELA_IO_WORKER_ID || "io-worker"}-${randomUUID()}`;
-const once = process.argv.includes("--once");
+const runOnce = process.argv.includes("--once");
 const workDirectory = process.env.STELA_IO_WORK_DIRECTORY
   || path.join(process.cwd(), "results", "io-pg-worker");
 const shutdown = new AbortController();
@@ -251,7 +252,7 @@ async function processRun(run: IoPgRun): Promise<void> {
   }
 }
 
-async function main(): Promise<void> {
+function configureDatabase(): void {
   if (process.env.STELA_IO_WORKER_DATABASE_URL) {
     process.env.STELA_IO_DATABASE_URL = process.env.STELA_IO_WORKER_DATABASE_URL;
   }
@@ -260,6 +261,9 @@ async function main(): Promise<void> {
   if (new URL(databaseUrl).hostname.includes("-pooler.")) {
     throw new Error("Worker requires Neon's direct connection URL for its session lock");
   }
+}
+
+async function drainQueue(): Promise<void> {
   // Session lock also covers Railway's brief old/new deployment overlap.
   // Connect directly to Postgres, not through a transaction-mode pooler.
   const lock = await getIoPgPool(true).connect();
@@ -270,20 +274,27 @@ async function main(): Promise<void> {
   });
   let lockHeartbeat: ReturnType<typeof setInterval> | undefined;
   try {
+    const lockDeadline = Date.now() + (runOnce
+      ? 0
+      : Math.max(0, Number.parseInt(process.env.STELA_IO_LOCK_WAIT_MS || "45000", 10) || 45_000));
+    let ownsLock = false;
     while (!shutdown.signal.aborted) {
       const acquired = await lock.query<{ acquired: boolean }>(
         "SELECT pg_try_advisory_lock(1937007980, 8) AS acquired",
       );
-      if (acquired.rows[0].acquired) break;
-      if (once) return;
+      if (acquired.rows[0].acquired) {
+        ownsLock = true;
+        break;
+      }
+      if (Date.now() >= lockDeadline) return;
       await wait(1_000);
     }
-    if (shutdown.signal.aborted) return;
+    if (shutdown.signal.aborted || !ownsLock) return;
     lockHeartbeat = setInterval(() => {
       void lock.query("SELECT 1").catch(() => { process.exitCode = 1; stopWorker(); });
     }, 10_000);
     await recoverIoPrefixSettlements();
-    console.log(`[worker] ready slots=${maxConcurrency}; interrupted jobs resume from Postgres`);
+    console.log(`[worker] draining queue slots=${maxConcurrency}; interrupted jobs resume from Postgres`);
     await runWorkerCoordinator({
       concurrency: maxConcurrency,
       claim: async () => {
@@ -297,8 +308,11 @@ async function main(): Promise<void> {
           console.error(`[worker] Unhandled run error for ${run.id}:`, error);
         }
       },
-      idleWait: () => wait(1_000),
-      once,
+      idleWait: () => wait(Math.max(
+        250,
+        Number.parseInt(process.env.STELA_IO_IDLE_GRACE_MS || "2000", 10) || 2_000,
+      )),
+      exitWhenIdle: true,
       signal: shutdown.signal,
       onStart: (run, activeCount) => {
         console.log(
@@ -306,6 +320,7 @@ async function main(): Promise<void> {
         );
       },
     });
+    console.log("[worker] queue is stable and empty; database connection released");
   } finally {
     if (lockHeartbeat) clearInterval(lockHeartbeat);
     lock.release(true);
@@ -313,8 +328,74 @@ async function main(): Promise<void> {
   }
 }
 
+let drainPromise: Promise<void> | null = null;
+let wakeDuringDrain = false;
+
+function requestDrain(reason: string): { alreadyRunning: boolean } {
+  if (drainPromise) {
+    wakeDuringDrain = true;
+    return { alreadyRunning: true };
+  }
+  console.log(`[worker] wake source=${reason}`);
+  drainPromise = (async () => {
+    do {
+      wakeDuringDrain = false;
+      await drainQueue();
+    } while (wakeDuringDrain && !shutdown.signal.aborted);
+  })()
+    .catch((error) => {
+      console.error("[worker] queue drain failed", error);
+    })
+    .finally(() => {
+      drainPromise = null;
+    });
+  return { alreadyRunning: false };
+}
+
+async function serve(): Promise<void> {
+  const secret = process.env.STELA_IO_WORKER_WAKE_SECRET || "";
+  const parsedPort = Number.parseInt(process.env.PORT || "8080", 10);
+  const port = Number.isFinite(parsedPort) && parsedPort >= 0 ? parsedPort : 8080;
+  const server = createIoWorkerWakeServer({
+    secret,
+    isRunning: () => drainPromise !== null,
+    wake: () => requestDrain("http"),
+  });
+  server.on("error", (error) => {
+    console.error("[worker] HTTP server failed", error);
+    process.exitCode = 1;
+    stopWorker();
+  });
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(port, "0.0.0.0", resolve);
+  });
+  const address = server.address();
+  const listeningPort = address && typeof address === "object" ? address.port : port;
+  console.log(`[worker] wake server listening port=${listeningPort}`);
+
+  const stopped = new Promise<void>((resolve) => {
+    shutdown.signal.addEventListener("abort", () => {
+      server.close(() => resolve());
+    }, { once: true });
+  });
+  requestDrain("startup");
+  await stopped;
+  if (drainPromise) await drainPromise;
+}
+
+async function main(): Promise<void> {
+  configureDatabase();
+  if (runOnce) {
+    await drainQueue();
+    return;
+  }
+  await serve();
+}
+
 main().catch(async (error) => {
   console.error(error);
   process.exitCode = 1;
+  stopWorker();
   await closeIoPgPool();
 });

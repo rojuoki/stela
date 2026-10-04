@@ -8,7 +8,9 @@
     "preDeployCommand": "npm run io:pg:migrate && npm run io:pg:verify",
     "startCommand": "node --import tsx scripts/io-pg-worker.ts",
     "numReplicas": 1,
-    "sleepApplication": false,
+    "sleepApplication": true,
+    "healthcheckPath": "/health",
+    "healthcheckTimeout": 100,
     "restartPolicyType": "ALWAYS",
     "overlapSeconds": 0,
     "drainingSeconds": 45

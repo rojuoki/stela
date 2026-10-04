@@ -16,7 +16,7 @@ function waitFor(predicate: () => boolean): Promise<void> {
   });
 }
 
-async function main(): Promise<void> {
+async function testSlotRefill(): Promise<void> {
   const queued = Array.from({ length: 10 }, (_, index) => index + 1);
   const releases = new Map<number, () => void>();
   const started: number[] = [];
@@ -55,7 +55,32 @@ async function main(): Promise<void> {
   assert.equal(maximumActive, 8);
   assert.equal(active, 0);
   assert.deepEqual(started, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
-  console.log("IO worker coordinator 8-slot refill invariant passed");
+}
+
+async function testDrainUntilStableIdle(): Promise<void> {
+  const queued = [1, 2, 3, 4, 5];
+  const processed: number[] = [];
+  let idleChecks = 0;
+
+  await runWorkerCoordinator({
+    concurrency: 2,
+    claim: async () => queued.shift() ?? null,
+    process: async (job) => {
+      processed.push(job);
+      if (job === 5) queued.push(6);
+    },
+    idleWait: async () => { idleChecks += 1; },
+    exitWhenIdle: true,
+  });
+
+  assert.deepEqual(processed.sort((left, right) => left - right), [1, 2, 3, 4, 5, 6]);
+  assert.equal(idleChecks, 1, "drain should confirm one stable idle period before exiting");
+}
+
+async function main(): Promise<void> {
+  await testSlotRefill();
+  await testDrainUntilStableIdle();
+  console.log("IO worker coordinator refill and stable-idle drain invariants passed");
 }
 
 main().catch((error) => {

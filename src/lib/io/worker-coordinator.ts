@@ -4,6 +4,7 @@ export interface WorkerCoordinatorOptions<T> {
   process: (item: T) => Promise<void>;
   idleWait: () => Promise<void>;
   once?: boolean;
+  exitWhenIdle?: boolean;
   signal?: AbortSignal;
   onStart?: (item: T, activeCount: number) => void;
 }
@@ -19,16 +20,19 @@ export async function runWorkerCoordinator<T>(
   const concurrency = Math.max(1, Math.floor(options.concurrency));
   const active = new Set<Promise<void>>();
 
+  const launch = (item: T): void => {
+    const task = options.process(item).finally(() => {
+      active.delete(task);
+    });
+    active.add(task);
+    options.onStart?.(item, active.size);
+  };
+
   const launchAvailable = async (): Promise<void> => {
     while (!options.signal?.aborted && active.size < concurrency) {
       const item = await options.claim();
       if (!item) return;
-
-      const task = options.process(item).finally(() => {
-        active.delete(task);
-      });
-      active.add(task);
-      options.onStart?.(item, active.size);
+      launch(item);
     }
   };
 
@@ -43,6 +47,11 @@ export async function runWorkerCoordinator<T>(
 
       if (active.size === 0) {
         await options.idleWait();
+        if (options.exitWhenIdle && !options.signal?.aborted) {
+          const item = await options.claim();
+          if (!item) return;
+          launch(item);
+        }
       } else {
         await Promise.race(active);
       }
