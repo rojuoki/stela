@@ -23,6 +23,10 @@ function requiresSsl(value: string): boolean {
   }
 }
 
+function rejectsUnauthorizedCertificates(): boolean {
+  return process.env.STELA_IO_SSL_REJECT_UNAUTHORIZED !== "0";
+}
+
 /** Dedicated pool for the independent IO product database. */
 export function getIoPgPool(worker = false): Pool {
   if (!pool) {
@@ -34,7 +38,9 @@ export function getIoPgPool(worker = false): Pool {
         statement_timeout: 15_000,
         query_timeout: 20_000,
       } : {}),
-      ssl: requiresSsl(value) ? { rejectUnauthorized: false } : false,
+      ssl: requiresSsl(value)
+        ? { rejectUnauthorized: rejectsUnauthorizedCertificates() }
+        : false,
     });
   }
   return pool;

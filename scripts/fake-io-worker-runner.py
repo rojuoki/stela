@@ -60,7 +60,10 @@ def main() -> int:
         "candidate_posts": [],
     }
     output.parent.mkdir(parents=True, exist_ok=True)
-    progress.write_text(json.dumps(payload), encoding="utf-8")
+    progress_payload = json.loads(json.dumps(payload))
+    progress_payload["result"]["status"] = "IN_PROGRESS"
+    progress_payload["result"]["progress_message"] = "Offline fixture checkpoint saved"
+    progress.write_text(json.dumps(progress_payload), encoding="utf-8")
     checkpoint.write_text(json.dumps({
         "experiment": "twitterapi_io_oldest_block_checkpoint",
         "username": username,

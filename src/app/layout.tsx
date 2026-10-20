@@ -1,11 +1,10 @@
 import type { Metadata } from "next";
-import { Geist, Geist_Mono } from "next/font/google";
+import { GeistSans } from "geist/font/sans";
+import { GeistMono } from "geist/font/mono";
 import "./globals.css";
 import { IoSessionProvider } from "@/components/io/session";
 import { IoNavigation } from "@/components/io/navigation";
-
-const geist = Geist({ subsets: ["latin"], variable: "--font-geist" });
-const geistMono = Geist_Mono({ subsets: ["latin"], variable: "--font-geist-mono" });
+import { IoFooter } from "@/components/io/footer";
 
 export const metadata: Metadata = {
   title: "STELA — Unlock the earliest posts",
@@ -19,10 +18,11 @@ export default function RootLayout({
 }) {
   return (
     <html lang="en">
-      <body className={`bg-black text-white min-h-screen antialiased ${geist.variable} ${geistMono.variable} font-sans`}>
+      <body className={`flex min-h-screen flex-col bg-black text-white antialiased ${GeistSans.variable} ${GeistMono.variable} font-sans`}>
         <IoSessionProvider>
           <IoNavigation />
-          {children}
+          <div className="flex-1">{children}</div>
+          <IoFooter />
         </IoSessionProvider>
       </body>
     </html>

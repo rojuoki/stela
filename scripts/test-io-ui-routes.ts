@@ -10,6 +10,7 @@ import { POST as prefix } from "../src/app/api/io/unlocks/prefix/route";
 import { POST as range } from "../src/app/api/io/unlocks/range/route";
 import { POST as preview } from "../src/app/api/io/previews/route";
 import { POST as retiredRun } from "../src/app/api/io/runs/route";
+import { GET as health } from "../src/app/api/io/health/route";
 
 // All DB queries are intercepted. No real database or provider is contacted.
 process.env.STELA_IO_DATABASE_URL = "postgres://fixture:fixture@127.0.0.1:1/fixture";
@@ -20,14 +21,16 @@ const fixtureAccount = { account_id: "account", username: "sample", created_at: 
 const pool = getIoPgPool();
 Object.defineProperty(pool, "query", { value: async (sql: string, values: unknown[] = []) => {
   queries.push({ sql, values });
-  assert.match(sql.trim(), /^(SELECT|WITH)\b/);
+  assert.match(sql.trim(), /^(SELECT|WITH|INSERT INTO io_request_limits)\b/);
   let rows: unknown[];
-  if (sql.includes("FROM users WHERE id")) rows = values[0] === "viewer"
+  if (sql.includes("INSERT INTO io_request_limits")) rows = [{ request_count: 1 }];
+  else if (sql.includes("AS queued")) rows = [{ queued: 0, running: 0, stale: 0, oldest_queued_at: null }];
+  else if (sql.includes("FROM users WHERE id")) rows = values[0] === "viewer"
     ? [{ id: "viewer", name: "Viewer", email: "viewer@example.invalid" }]
     : values[0] === "other"
       ? [{ id: "other", name: "Other", email: "other@example.invalid" }]
       : [];
-  else if (sql.includes("WITH activity")) { assert.deepEqual(values, ["viewer"]); rows = [{ username: "sample", updated_at: "2020-01-01" }]; }
+  else if (sql.includes("WITH activity")) { assert.deepEqual(values, ["viewer"]); rows = [{ username: "sample", updated_at: "2020-01-01", boundary: 2, range_count: 0, active: false, latest_status: "succeeded" }]; }
   else if (sql.includes("FROM accounts")) rows = [fixtureAccount];
   else if (sql.includes("FROM user_unlocks")) rows = values[0] === "viewer" ? [{ boundary_end: 2 }] : [];
   else if (sql.includes("FROM user_range_unlocks")) rows = [];
@@ -70,6 +73,7 @@ async function main() {
   assert.equal(forbiddenRange.status, 403);
   const list = await (await results(request("/api/io/my-results", token))).json(); assert.equal(list.accounts[0].username, "sample");
   assert.equal((await retiredRun()).status, 410);
+  assert.equal((await health()).status, 200);
   assert.ok(queries.length > 0);
   console.log("IO product routes passed: public 20-post preview, authenticated boundaries, range ownership, My Results, retired SQLite entry point.");
 }

@@ -38,7 +38,7 @@
 }
 
 @theme inline {
-  --font-sans: var(--font-geist), 'Geist', 'Geist Fallback', sans-serif;
+  --font-sans: var(--font-geist-sans), 'Geist', 'Geist Fallback', sans-serif;
   --font-mono: var(--font-geist-mono), 'Geist Mono', 'Geist Mono Fallback', monospace;
   --color-background: var(--background);
   --color-foreground: var(--foreground);

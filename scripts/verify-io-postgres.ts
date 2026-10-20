@@ -10,6 +10,7 @@ const REQUIRED_TABLES = [
   "user_unlocks",
   "user_range_unlocks",
   "range_unlock_requests",
+  "io_request_limits",
 ];
 
 async function main() {

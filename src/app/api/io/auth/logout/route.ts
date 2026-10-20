@@ -1,4 +1,3 @@
-import { NextResponse } from "next/server";
 import { createIoLogoutResponse } from "@/lib/io/auth";
 
 export const runtime = "nodejs";

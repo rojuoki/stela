@@ -15,9 +15,14 @@ const select = `SELECT account_id, username, display_name, avatar_url, descripti
 const string = (value: unknown) => typeof value === "string" ? value : null;
 const count = (value: unknown) => Math.max(0, Number(value) || 0);
 
-export async function getOrFetchIoProfile(username: string): Promise<IoProfile> {
+export async function getCachedIoProfile(username: string): Promise<IoProfile | null> {
   const cached = await ioPgQuery<IoProfile>(select, [username]);
-  if (cached.rows[0]?.display_name) return cached.rows[0];
+  return cached.rows[0] || null;
+}
+
+export async function getOrFetchIoProfile(username: string): Promise<IoProfile> {
+  const cached = await getCachedIoProfile(username);
+  if (cached?.display_name) return cached;
   const key = username.toLowerCase();
   const existing = pending.get(key);
   if (existing) return existing;

@@ -11,6 +11,7 @@ import type { TweetData } from "@/components/types";
 type Run = { id: string; status: string; username: string; collection_mode?: string; progress_message?: string | null; error_message?: string | null; unique_count?: number; candidate_count?: number; target_count?: number; base_boundary?: number | null; target_boundary?: number | null; granted_boundary?: number | null; accountExhausted?: boolean };
 type Range = { startAt: string; endAt: string };
 type RangeRequest = Range & { id: string; status: string; errorMessage?: string | null; run?: Run | null };
+type PendingUnlock = { range?: Range };
 type Snapshot = {
   account: ProfileBannerData | null;
   boundary: number;
@@ -45,12 +46,23 @@ function Account({ username }: { username: string }) {
   const [start, setStart] = useState("");
   const [end, setEnd] = useState("");
   const [view, setView] = useState("prefix");
+  const [pendingUnlock, setPendingUnlock] = useState<PendingUnlock | null>(null);
   const mounted = useRef(true);
   const viewing = useRef(0);
   const shownBoundary = useRef(0);
   const submitting = useRef(false);
   const previewStarted = useRef(false);
+  const confirmButton = useRef<HTMLButtonElement>(null);
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
+  useEffect(() => {
+    if (!pendingUnlock) return;
+    confirmButton.current?.focus();
+    const close = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setPendingUnlock(null);
+    };
+    document.addEventListener("keydown", close);
+    return () => document.removeEventListener("keydown", close);
+  }, [pendingUnlock]);
   const base = `/api/io/accounts/${encodeURIComponent(username)}`;
   const loadSnapshot = useCallback(async () => {
     const data = await ioJson<Snapshot>(base);
@@ -208,10 +220,13 @@ function Account({ username }: { username: string }) {
   }, [rangeId, rangeStatus, loadSnapshot, showPosts]);
   const previewWorking = active(previewRun?.status);
   const working = busy || previewWorking || active(run?.status) || active(rangeRequest?.status);
+  function requestUnlock(range?: Range) {
+    if (working || !user) return;
+    setPendingUnlock({ range });
+  }
   async function unlock(range?: Range) {
     if (working || submitting.current || !user) return;
-    const label = range ? "the selected date range" : snapshot?.boundary ? "up to the next 1,000 posts" : "up to the earliest 1,000 posts";
-    if (!window.confirm(`Unlock ${label} from @${username}? If needed, STELA will fetch posts from an external data provider.`)) return;
+    setPendingUnlock(null);
     submitting.current = true; setBusy(true); setError(""); setNotice("");
     try {
       if (range) {
@@ -235,13 +250,23 @@ function Account({ username }: { username: string }) {
   }
   async function viewRange(range?: Range) { setBusy(true); setError(""); try { await showPosts(range); } catch (e) { setError(e instanceof Error ? e.message : "Couldn’t display posts"); } finally { setBusy(false); } }
   async function cancel() { if (!run || shared) return; setBusy(true); try { const data = await ioJson<{ run: Run }>(`/api/io/runs/${run.id}`, { method: "DELETE" }); setRun(data.run); setNotice("Unlock canceled."); } catch (e) { setError(e instanceof Error ? e.message : "Couldn’t cancel the unlock"); } finally { setBusy(false); } }
+  function setRangePreset(days: number) {
+    const now = new Date();
+    const from = new Date(now.getTime() - days * 86400000);
+    const localValue = (date: Date) => {
+      const shifted = new Date(date.getTime() - date.getTimezoneOffset() * 60000);
+      return shifted.toISOString().slice(0, 16);
+    };
+    setStart(localValue(from));
+    setEnd(localValue(now));
+  }
   const invalid = !/^[a-zA-Z0-9_]{1,15}$/.test(username);
   const accountExhausted = snapshot?.latestRun?.status === "succeeded" && snapshot.latestRun.accountExhausted;
   if (invalid) return <main className="p-8">Invalid username. <Link href="/io">Back to search</Link></main>;
   if (loading) return <main className="mx-auto max-w-7xl px-8 py-14" aria-busy="true"><p className="text-sm text-muted-foreground">Checking account</p><h1 className="mt-3 text-2xl">@{username}</h1><div className="mt-6 h-20 max-w-2xl animate-pulse rounded-lg bg-secondary" /></main>;
   const accountActions = snapshot && !snapshot.account?.protected ? <div className="flex max-w-sm flex-col items-end gap-1.5">
     <div className="flex flex-wrap justify-end gap-2">
-      {user ? !accountExhausted && <button disabled={working} onClick={() => void unlock()} className={`${button} bg-white text-black hover:bg-zinc-200`}>{working ? "Working…" : snapshot.boundary ? "Unlock 1,000 more" : "Unlock up to 1,000"}</button> : <><Link className="px-2 py-2 text-sm text-muted-foreground hover:text-foreground" href={`/io/signin?returnTo=${encodeURIComponent(`/io/${username}`)}`}>Sign in</Link><Link className={`${button} bg-white text-black hover:bg-zinc-200`} href={`/io/signin?mode=signup&returnTo=${encodeURIComponent(`/io/${username}`)}`}>Sign up to unlock</Link></>}
+      {user ? !accountExhausted && <button disabled={working} onClick={() => requestUnlock()} className={`${button} bg-white text-black hover:bg-zinc-200`}>{working ? "Working…" : snapshot.boundary ? "Unlock 1,000 more" : "Unlock up to 1,000"}</button> : <><Link className="px-2 py-2 text-sm text-muted-foreground hover:text-foreground" href={`/io/signin?returnTo=${encodeURIComponent(`/io/${username}`)}`}>Sign in</Link><Link className={`${button} bg-white text-black hover:bg-zinc-200`} href={`/io/signin?mode=signup&returnTo=${encodeURIComponent(`/io/${username}`)}`}>Sign up to unlock</Link></>}
     </div>
     <p className="text-right text-[11px] text-muted-foreground">{snapshot.boundary > 0 ? accountExhausted ? `All ${snapshot.boundary.toLocaleString("en-US")} posts unlocked` : `${snapshot.boundary.toLocaleString("en-US")} posts unlocked` : snapshot.publicBoundary > 0 ? `Free preview: ${snapshot.publicBoundary.toLocaleString("en-US")} · ${snapshot.coveredPrefixCount.toLocaleString("en-US")} available` : previewWorking ? "Preparing free preview" : "Free preview: up to 20"}</p>
   </div> : undefined;
@@ -308,11 +333,12 @@ function Account({ username }: { username: string }) {
     <ProfileBanner account={snapshot?.account || { username }} compact={posts.length > 0} searchHref="/io" actions={accountActions} />
     <section className="shrink-0 space-y-2 border-b border-border px-5 py-2 md:px-8">
       {statusMessage && <div role={statusTone === "text-red-400" ? "alert" : "status"} title={statusTitle} className="flex h-10 items-center justify-between gap-4"><p className={`min-w-0 truncate text-sm ${statusTone}`}><span className={active(run?.status) || previewWorking || active(rangeRequest?.status) ? "mr-2 inline-block animate-pulse" : "mr-2"}>{statusMark}</span>{statusMessage}</p><div className="flex shrink-0 items-center gap-4 text-xs">{previewRun?.status === "failed" && !snapshot?.previewComplete && <button className="text-red-300 underline underline-offset-4 hover:text-red-200" onClick={() => { previewStarted.current = false; setPreviewRun(null); setError(""); void startPreview(); }}>Retry</button>}{runView && <button disabled={busy} className="text-muted-foreground underline underline-offset-4 hover:text-foreground disabled:opacity-40" onClick={() => void viewRange()}>View all unlocked</button>}{active(run?.status) && !shared && <button disabled={busy} onClick={() => void cancel()} className="text-muted-foreground underline underline-offset-4 hover:text-foreground disabled:opacity-40">Cancel</button>}</div></div>}
-      {user && snapshot && !snapshot.account?.protected && <details className="text-sm"><summary className="cursor-pointer text-muted-foreground">Unlock a date range</summary><form className="mt-4 flex flex-wrap items-end gap-3" onSubmit={e => { e.preventDefault(); const a = Date.parse(start), b = Date.parse(end); if (!Number.isFinite(a) || !Number.isFinite(b) || a >= b || b-a > 31*86400000) { setError("Choose an end time after the start, within a 31-day range."); return; } void unlock({ startAt: new Date(a).toISOString(), endAt: new Date(b).toISOString() }); }}><label>Start<input required type="datetime-local" value={start} onChange={e => setStart(e.target.value)} className="mt-1 block rounded border border-border bg-secondary p-2" /></label><label>End<input required type="datetime-local" value={end} onChange={e => setEnd(e.target.value)} className="mt-1 block rounded border border-border bg-secondary p-2" /></label><button disabled={working} className={button}>Unlock range</button></form><p className="mt-2 text-xs text-muted-foreground">Up to 31 days. Times use your device time zone.</p></details>}
+      {user && snapshot && !snapshot.account?.protected && <details className="text-sm"><summary className="cursor-pointer text-muted-foreground">Unlock a date range</summary><div className="mt-4 flex flex-wrap gap-2"><span className="py-1.5 text-xs text-muted-foreground">Quick range</span>{[7, 14, 30].map(days => <button key={days} type="button" className="rounded-md border border-border px-2.5 py-1 text-xs text-muted-foreground hover:text-foreground" onClick={() => setRangePreset(days)}>Last {days} days</button>)}</div><form className="mt-3 flex flex-wrap items-end gap-3" onSubmit={e => { e.preventDefault(); const a = Date.parse(start), b = Date.parse(end); if (!Number.isFinite(a) || !Number.isFinite(b) || a >= b || b-a > 31*86400000) { setError("Choose an end time after the start, within a 31-day range."); return; } requestUnlock({ startAt: new Date(a).toISOString(), endAt: new Date(b).toISOString() }); }}><label>Start<input required type="datetime-local" value={start} onChange={e => setStart(e.target.value)} className="mt-1 block rounded border border-border bg-secondary p-2" /></label><label>End<input required type="datetime-local" value={end} onChange={e => setEnd(e.target.value)} className="mt-1 block rounded border border-border bg-secondary p-2" /></label><button disabled={working} className={button}>Review range</button></form><p className="mt-2 text-xs text-muted-foreground">Up to 31 days. Times use your device time zone.</p></details>}
       {!!snapshot?.ranges.length && <div className="flex flex-wrap gap-2"><span className="py-2 text-xs text-muted-foreground">Saved ranges</span>{snapshot.ranges.map(r => <button key={r.startAt+r.endAt} disabled={busy} className={button} onClick={() => void viewRange(r)}>{new Date(r.startAt).toLocaleDateString("en-US")} — {new Date(r.endAt).toLocaleDateString("en-US")}</button>)}</div>}
     </section>
     <div>
       {posts.length ? <SavedTimeline key={view} tweets={posts} username={username} totalPostCount={snapshot?.account?.statuses_count} /> : runView ? <section className="flex min-h-[480px] flex-col items-center justify-center border-t border-border px-6 text-center"><p className="text-sm text-sky-300">{active(run?.status) ? `Unlocking posts from #${(runBase + 1).toLocaleString("en-US")}` : "No posts were added in this unlock"}</p><p className="mt-2 text-xs text-muted-foreground">{active(run?.status) ? "Confirmed posts will appear here." : "Return to all unlocked posts to review them."}</p></section> : snapshot?.previewComplete || (user && (snapshot?.boundary || view !== "prefix")) ? <p className="p-8 text-sm text-muted-foreground">No posts are available.</p> : <LockedTimeline unavailable={snapshot?.account?.protected} />}
     </div>
+    {pendingUnlock && <><button aria-label="Close unlock confirmation" className="fixed inset-0 z-40 cursor-default bg-black/75 backdrop-blur-sm" onClick={() => setPendingUnlock(null)} /><section role="dialog" aria-modal="true" aria-labelledby="unlock-title" className="fixed inset-x-4 bottom-4 z-50 mx-auto max-w-lg rounded-2xl border border-border bg-background p-6 shadow-2xl md:bottom-auto md:top-1/2 md:-translate-y-1/2"><p className="text-[10px] font-medium tracking-[.18em] text-chart-1">CONFIRM UNLOCK</p><h2 id="unlock-title" className="mt-3 text-xl font-medium">Unlock posts from @{username}?</h2><p className="mt-3 text-sm leading-6 text-muted-foreground">{pendingUnlock.range ? `${new Date(pendingUnlock.range.startAt).toLocaleString("en-US")} — ${new Date(pendingUnlock.range.endAt).toLocaleString("en-US")}` : snapshot?.boundary ? `Continue after post #${snapshot.boundary.toLocaleString("en-US")}, up to the next 1,000 posts.` : "Unlock up to the earliest 1,000 posts."}</p><p className="mt-3 rounded-lg border border-border bg-secondary/40 p-3 text-xs leading-5 text-muted-foreground">STELA may contact its external data provider. The request can take several minutes; confirmed posts appear while it runs.</p><div className="mt-6 flex justify-end gap-3"><button type="button" className={button} onClick={() => setPendingUnlock(null)}>Not now</button><button ref={confirmButton} type="button" className={`${button} bg-white text-black hover:bg-zinc-200`} onClick={() => void unlock(pendingUnlock.range)}>Start unlock</button></div></section></>}
   </main>;
 }

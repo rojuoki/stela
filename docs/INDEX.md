@@ -5,6 +5,7 @@
 - **What to do now:** [CURRENT_TASK.md](CURRENT_TASK.md)  
 - **IO product architecture plan:** [IO_PRODUCT_IMPLEMENTATION_PLAN.md](IO_PRODUCT_IMPLEMENTATION_PLAN.md)
 - **IO Railway worker setup:** [IO_RAILWAY_WORKER.md](IO_RAILWAY_WORKER.md)
+- **IO operations, monitoring, backup and restore:** [IO_OPERATIONS.md](IO_OPERATIONS.md)
 - **Rules & constraints:** [RULES.md](RULES.md)  
 - **Product, UI, data, DB:** [ARCH.md](ARCH.md)  
 - **Phases & execution:** [PHASES.md](PHASES.md)  

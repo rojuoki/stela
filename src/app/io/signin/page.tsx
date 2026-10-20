@@ -16,6 +16,7 @@ export default function IoSignInPage() {
   const [password, setPassword] = useState("");
   const [passwordConfirmation, setPasswordConfirmation] = useState("");
   const [name, setName] = useState("");
+  const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
 
@@ -72,12 +73,13 @@ export default function IoSignInPage() {
           <input required type="email" autoComplete="email" autoCapitalize="none" spellCheck={false} value={email} onChange={(event) => setEmail(event.target.value)} className="mt-1 w-full rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2" />
         </label>
         <label className="block text-sm">Password
-          <input required minLength={8} type="password" autoComplete={mode === "login" ? "current-password" : "new-password"} value={password} onChange={(event) => setPassword(event.target.value)} className="mt-1 w-full rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2" />
+          <input required minLength={8} type={showPassword ? "text" : "password"} autoComplete={mode === "login" ? "current-password" : "new-password"} value={password} onChange={(event) => setPassword(event.target.value)} className="mt-1 w-full rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2" />
         </label>
         {mode === "signup" && <label className="block text-sm">Confirm password
-          <input required minLength={8} type="password" autoComplete="new-password" value={passwordConfirmation} onChange={(event) => setPasswordConfirmation(event.target.value)} className="mt-1 w-full rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2" />
+          <input required minLength={8} type={showPassword ? "text" : "password"} autoComplete="new-password" value={passwordConfirmation} onChange={(event) => setPasswordConfirmation(event.target.value)} className="mt-1 w-full rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2" />
         </label>}
-        {mode === "signup" && <p className="text-xs leading-relaxed text-zinc-500">Use at least 8 characters. Email verification and password reset will be available before launch.</p>}
+        <label className="flex items-center gap-2 text-xs text-zinc-400"><input type="checkbox" checked={showPassword} onChange={event => setShowPassword(event.target.checked)} />Show password</label>
+        {mode === "signup" && <p className="text-xs leading-relaxed text-zinc-500">Use at least 8 characters. Choose a unique password you do not use elsewhere.</p>}
         {error && <p role="alert" className="text-sm text-red-400">{error}</p>}
         <button disabled={busy} className="w-full rounded-lg bg-white px-4 py-2.5 text-sm font-semibold text-black disabled:opacity-50">
           {busy ? IO_COPY.working : mode === "login" ? IO_COPY.signIn : "Create account"}

@@ -10,6 +10,7 @@ import { finalizeIoPrefixExtension, recoverIoPrefixSettlements } from "../src/li
 import { advanceIoRangeRequest } from "../src/lib/io/range-service";
 import { runWorkerCoordinator } from "../src/lib/io/worker-coordinator";
 import { createIoWorkerWakeServer } from "../src/lib/io/worker-wake-server";
+import { ioLog } from "../src/lib/io/log";
 
 const workerId = `${process.env.STELA_IO_WORKER_ID || "io-worker"}-${randomUUID()}`;
 const runOnce = process.argv.includes("--once");
@@ -268,7 +269,7 @@ async function drainQueue(): Promise<void> {
   // Connect directly to Postgres, not through a transaction-mode pooler.
   const lock = await getIoPgPool(true).connect();
   lock.on("error", (error) => {
-    console.error("[worker] Coordinator connection lost", error);
+    ioLog("error", "worker_coordinator_connection_lost", { workerId, error });
     process.exitCode = 1;
     stopWorker();
   });
@@ -294,7 +295,7 @@ async function drainQueue(): Promise<void> {
       void lock.query("SELECT 1").catch(() => { process.exitCode = 1; stopWorker(); });
     }, 10_000);
     await recoverIoPrefixSettlements();
-    console.log(`[worker] draining queue slots=${maxConcurrency}; interrupted jobs resume from Postgres`);
+    ioLog("info", "worker_queue_draining", { workerId, slots: maxConcurrency, resumeSource: "postgres" });
     await runWorkerCoordinator({
       concurrency: maxConcurrency,
       claim: async () => {
@@ -305,7 +306,7 @@ async function drainQueue(): Promise<void> {
         try {
           await processRun(run);
         } catch (error) {
-          console.error(`[worker] Unhandled run error for ${run.id}:`, error);
+          ioLog("error", "worker_run_unhandled_error", { workerId, runId: run.id, error });
         }
       },
       idleWait: () => wait(Math.max(
@@ -315,9 +316,7 @@ async function drainQueue(): Promise<void> {
       exitWhenIdle: true,
       signal: shutdown.signal,
       onStart: (run, activeCount) => {
-        console.log(
-          `[worker] started run=${run.id} slots=${activeCount}/${maxConcurrency}`,
-        );
+        ioLog("info", "worker_run_started", { workerId, runId: run.id, activeSlots: activeCount, maxSlots: maxConcurrency });
       },
     });
     console.log("[worker] queue is stable and empty; database connection released");
@@ -394,7 +393,7 @@ async function main(): Promise<void> {
 }
 
 main().catch(async (error) => {
-  console.error(error);
+  ioLog("error", "worker_fatal_error", { workerId, error });
   process.exitCode = 1;
   stopWorker();
   await closeIoPgPool();

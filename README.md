@@ -1,22 +1,44 @@
 # STELA
 
-Unlock the earliest 100 posts of any public X account.
+Unlock and explore the earliest posts of a public X account.
 
-## Independent TwitterAPI.io prototype
+The current product is the `/io` application. It uses a dedicated PostgreSQL
+database, authenticated user boundaries, a persistent acquisition worker, and
+TwitterAPI.io-backed collection. Legacy routes redirect into the IO product and
+are retained only as migration reference.
 
-The current experiment lives alongside the legacy STELA paths. It uses a
-separate local SQLite database and does not write to the existing Postgres/Neon
-tables.
+## Local development
 
 ```bash
-npm run io:db:init
-npm run io:import -- results/twitterapi-io-1000/jack-oldest1000-cursor-v2.json
-npm run dev
+npm install
+cp -n .env.example .env.local
+npm run dev:web
 ```
 
-Open `http://localhost:3000/io`. The saved `jack` measurement can be viewed at
-`/io/jack`. A missing account page offers a **最古1000件を取得** button; it asks
-for confirmation before starting a paid TwitterAPI.io run.
+Open `http://localhost:3000/io`. `dev:web` starts the local PostgreSQL database
+and the web application without an acquisition worker, so browsing the UI
+cannot start provider work. When acquisition is intentionally required, use
+`npm run dev` instead; it starts the same web stack plus the local worker.
+
+Run the complete offline quality gate before pushing:
+
+```bash
+npm run verify
+```
+
+Operational health is available at `/api/io/health`. Monitoring, retention,
+backup, and restore procedures are documented in `docs/IO_OPERATIONS.md`.
+
+It checks TypeScript, the active IO product lint scope, coverage/prefix/range
+fixtures, route authorization, and a production build. Tests that need real
+provider credentials or intentionally spend API credit remain separate.
+
+Run the isolated PostgreSQL/worker integration suite with
+`npm run io:test:integration`. It creates a temporary database, uses fixture
+runners only, exercises restart and eight-worker behavior, then removes the
+database. It never shares the development queue.
+
+## TwitterAPI.io measurement tools
 
 Relevant environment values:
 
@@ -102,7 +124,7 @@ to 30 days and then 120 days when a resolved normal window yields fewer than
 normal window keeps its width. A 20-page-capped parent is discarded and split;
 only resolved child windows contribute posts or coverage.
 
-## Setup
+## Legacy setup notes
 
 ```bash
 cd ~/stela
@@ -119,16 +141,15 @@ npm run db:init
 ## Run Dev Server
 
 ```bash
-npm run dev
+npm run dev:web
 # Open http://localhost:3000
 ```
 
 ## Verify
 
-1. `npm run dev` — homepage renders with username input, Unlock button, status badge, and empty results area
-2. `npm run db:init` — creates `stela.sqlite` with tables: `accounts`, `jobs`, `tweets`, `unlocks`
-3. `npm run typecheck` — no errors
-4. `curl http://localhost:3000/api/health` — returns `{"status":"ok","db":true}`
+`npm run verify` is the canonical offline check. PostgreSQL worker integration,
+restart/resource tests, and paid provider checks are intentionally run
+separately because they require additional services or credentials.
 
 ## Unlock + Jobs API (Phase 3)
 

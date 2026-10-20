@@ -1,7 +1,7 @@
 "use client"
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
-import { Search, SlidersHorizontal, X } from "lucide-react"
+import { Download, PanelRight, Search, SlidersHorizontal, X } from "lucide-react"
 import type { TweetData } from "@/components/types"
 import { EngagementChart as LegacyEngagementChart } from "./engagement-chart"
 import { EngagementChartV2 } from "./engagement-chart-v2"
@@ -19,6 +19,7 @@ export function SavedTimeline({ tweets, username, totalPostCount }: { tweets: Tw
   const [highlightedPost, setHighlightedPost] = useState<string | null>(null)
   const [displayCount, setDisplayCount] = useState("all")
   const [chartOpen, setChartOpen] = useState(false)
+  const [insightsOpen, setInsightsOpen] = useState(false)
   const [position, setPosition] = useState(0)
   const mediaForPost = (post: TweetData): MediaAttachment[] => {
     try {
@@ -67,13 +68,16 @@ export function SavedTimeline({ tweets, username, totalPostCount }: { tweets: Tw
     if (index >= 0) setPosition(index)
   }, [posts])
   useEffect(() => {
-    if (!chartOpen) return
+    if (!chartOpen && !insightsOpen) return
     const close = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setChartOpen(false)
+      if (event.key === "Escape") {
+        setChartOpen(false)
+        setInsightsOpen(false)
+      }
     }
     document.addEventListener("keydown", close)
     return () => document.removeEventListener("keydown", close)
-  }, [chartOpen])
+  }, [chartOpen, insightsOpen])
   const legacyChart = useMemo(() => {
     const groups = new Map<string, { date: string; posts: number; likes: number; retweets: number; replies: number; engagement: number }>()
     for (const post of tweets) {
@@ -97,6 +101,27 @@ export function SavedTimeline({ tweets, username, totalPostCount }: { tweets: Tw
   posts.forEach(p => { hours[new Date(p.date).getUTCHours()]++ })
   const jump = (id: string) => { setKeyword(""); setSelected(null); setDisplayCount("all"); setHighlight(null); setHighlightedPost(id); requestAnimationFrame(() => timeline.current?.scrollToPost(id)) }
   const jumpWithinSelection = (id: string) => { setKeyword(""); setDisplayCount("all"); setHighlight(null); setHighlightedPost(id); requestAnimationFrame(() => timeline.current?.scrollToPost(id)) }
+  const exportPosts = (format: "json" | "csv") => {
+    const selectedPosts = tweets.filter(tweet => visiblePosts.some(post => post.id === tweet.post_id))
+    const escapeCsv = (value: unknown) => {
+      let text = String(value ?? "")
+      if (/^[=+\-@]/.test(text)) text = `'${text}`
+      return `"${text.replaceAll('"', '""')}"`
+    }
+    const body = format === "json"
+      ? JSON.stringify(selectedPosts, null, 2)
+      : [
+          ["post_id", "created_at", "text", "likes", "retweets", "replies", "url"],
+          ...selectedPosts.map(post => [post.post_id, post.created_at, post.full_text, post.like_count, post.retweet_count, post.reply_count, `https://x.com/${username}/status/${post.post_id}`]),
+        ].map(row => row.map(escapeCsv).join(",")).join("\n")
+    const url = URL.createObjectURL(new Blob([body], { type: format === "json" ? "application/json" : "text/csv;charset=utf-8" }))
+    const link = document.createElement("a")
+    link.href = url
+    link.download = `stela-${username}-${new Date().toISOString().slice(0, 10)}.${format}`
+    link.click()
+    URL.revokeObjectURL(url)
+  }
+  const sidebar = <Sidebar hideAccount account={{ username, displayName: username, avatar: "", bio: "", followers: 0, following: 0, posts: posts.length, joinedDate: "" }} media={media} topPosts={[...posts].sort((a, b) => b.likes + b.retweets + b.replies - a.likes - a.retweets - a.replies).slice(0, 5)} stats={{ totalPosts: posts.length, totalLikes, totalRetweets, avgEngagement: posts.length ? (totalLikes + totalRetweets + totalReplies) / posts.length : 0, postsPerDay: posts.length / days, peakHour: `${hours.indexOf(Math.max(...hours))}:00 UTC` }} onJumpToPost={(id) => { jump(id); setInsightsOpen(false) }} />
   const chart = useNewChart
     ? <EngagementChartV2 posts={engagementPosts} selectedRange={selected} onDateClick={date => { setSelected(null); setHighlightedPost(null); setHighlight(date); requestAnimationFrame(() => timeline.current?.scrollToDate(date)) }} onRangeSelect={(a, b) => { setSelected({ start: a < b ? a : b, end: a < b ? b : a }); setHighlight(null); setHighlightedPost(null) }} onPostClick={jump} />
     : <LegacyEngagementChart data={legacyChart} perPostData={engagementPosts} selectedRange={selected} onDateClick={date => { setSelected(null); setHighlightedPost(null); setHighlight(date); requestAnimationFrame(() => timeline.current?.scrollToDate(date)) }} onPostClick={jumpWithinSelection} onRangeSelect={(a, b) => { setSelected({ start: a < b ? a : b, end: a < b ? b : a }); setHighlight(null); setHighlightedPost(null) }} onRangeClear={() => { setSelected(null); setHighlight(null); setHighlightedPost(null) }} />
@@ -108,6 +133,14 @@ export function SavedTimeline({ tweets, username, totalPostCount }: { tweets: Tw
           <label className="relative"><Search className="absolute left-3 top-2.5 h-3.5 w-3.5 text-muted-foreground" /><input aria-label="Search posts" placeholder="Search posts" value={keyword} onChange={e => setKeyword(e.target.value)} className="w-48 rounded-md border border-border bg-secondary/50 py-2 pl-9 pr-3 text-sm outline-none focus:border-chart-1" /></label>
           <label className="flex items-center gap-2 rounded-md border border-border bg-secondary/50 px-3 py-2 text-xs text-muted-foreground">Show <select aria-label="Number of posts shown" value={displayCount} onChange={e => setDisplayCount(e.target.value)} className="bg-transparent text-foreground outline-none"><option value="all">All</option><option value="100">100</option><option value="250">250</option><option value="500">500</option></select></label>
           <button onClick={() => setChartOpen(true)} className="flex items-center gap-2 rounded-md border border-border bg-secondary/50 px-3 py-2 text-xs text-muted-foreground hover:text-foreground"><SlidersHorizontal className="h-3.5 w-3.5 text-chart-1" />Analytics</button>
+          <button onClick={() => setInsightsOpen(true)} className="flex items-center gap-2 rounded-md border border-border bg-secondary/50 px-3 py-2 text-xs text-muted-foreground hover:text-foreground lg:hidden"><PanelRight className="h-3.5 w-3.5 text-chart-1" />Media & stats</button>
+          <details className="relative">
+            <summary className="flex cursor-pointer list-none items-center gap-2 rounded-md border border-border bg-secondary/50 px-3 py-2 text-xs text-muted-foreground hover:text-foreground"><Download className="h-3.5 w-3.5 text-chart-1" />Export</summary>
+            <div className="absolute right-0 top-full z-20 mt-2 min-w-40 rounded-md border border-border bg-background p-1 shadow-xl">
+              <button type="button" aria-label="Export visible posts as CSV" onClick={() => exportPosts("csv")} className="block w-full rounded px-3 py-2 text-left text-xs hover:bg-secondary">Visible posts as CSV</button>
+              <button type="button" aria-label="Export visible posts as JSON" onClick={() => exportPosts("json")} className="block w-full rounded px-3 py-2 text-left text-xs hover:bg-secondary">Visible posts as JSON</button>
+            </div>
+          </details>
         </div>
       </div>
       <div className="mt-4 flex flex-wrap items-baseline justify-between gap-x-5 gap-y-1"><p className="text-sm font-medium text-foreground">{visiblePeriod}</p><p className="text-xs tabular-nums text-muted-foreground">{visiblePosts.length.toLocaleString("en-US")} / {typeof totalPostCount === "number" ? totalPostCount.toLocaleString("en-US") : "—"} posts</p></div>
@@ -118,8 +151,9 @@ export function SavedTimeline({ tweets, username, totalPostCount }: { tweets: Tw
       <div className="flex min-h-0 min-w-0 flex-col border-r border-border">
         <div className="min-h-0 flex-1 overflow-hidden">{visiblePosts.length ? <Timeline ref={timeline} posts={visiblePosts} highlightedDate={highlight} highlightedPostId={highlightedPost} onVisiblePostChange={trackVisiblePost} /> : <p className="p-8 text-sm text-muted-foreground">No posts match these filters.</p>}</div>
       </div>
-      <aside className="hidden min-h-0 overflow-hidden lg:block [&>div]:h-full" aria-label="Supporting information"><Sidebar hideAccount account={{ username, displayName: username, avatar: "", bio: "", followers: 0, following: 0, posts: posts.length, joinedDate: "" }} media={media} topPosts={[...posts].sort((a, b) => b.likes + b.retweets + b.replies - a.likes - a.retweets - a.replies).slice(0, 5)} stats={{ totalPosts: posts.length, totalLikes, totalRetweets, avgEngagement: posts.length ? (totalLikes + totalRetweets + totalReplies) / posts.length : 0, postsPerDay: posts.length / days, peakHour: `${hours.indexOf(Math.max(...hours))}:00 UTC` }} onJumpToPost={jump} /></aside>
+      <aside className="hidden min-h-0 overflow-hidden lg:block [&>div]:h-full" aria-label="Supporting information">{sidebar}</aside>
     </div>
+    {insightsOpen && <><button aria-label="Close media and stats" className="fixed inset-0 z-40 cursor-default bg-black/80 backdrop-blur-sm lg:hidden" onClick={() => setInsightsOpen(false)} /><div role="dialog" aria-modal="true" aria-label="Media and statistics" className="fixed inset-x-3 bottom-3 top-20 z-50 overflow-hidden rounded-xl border border-border bg-background shadow-2xl lg:hidden"><div className="flex items-center justify-between border-b border-border px-4 py-3"><span className="flex items-center gap-2 text-sm"><PanelRight className="h-4 w-4 text-chart-1" />Media & stats</span><button onClick={() => setInsightsOpen(false)} className="rounded-md border border-border p-2 text-muted-foreground hover:text-foreground" aria-label="Close media and stats"><X className="h-4 w-4" /></button></div><div className="h-[calc(100%_-_57px)] overflow-hidden [&>div]:h-full [&>div]:w-full [&>div]:border-l-0">{sidebar}</div></div></>}
     {chartOpen && <><button aria-label="Close analytics" className="fixed inset-0 z-40 cursor-default bg-black/80 backdrop-blur-sm" onClick={() => setChartOpen(false)} /><div role="dialog" aria-modal="true" aria-label="Analytics" className="fixed inset-4 z-50 overflow-auto rounded-xl border border-border bg-background shadow-2xl"><div className="sticky top-0 z-10 flex items-center justify-between border-b border-border bg-background px-5 py-4"><span className="flex items-center gap-2 text-sm"><SlidersHorizontal className="h-4 w-4 text-chart-1" />Analytics <span className="text-xs text-muted-foreground">Overview / Per Post</span></span><button onClick={() => setChartOpen(false)} className="rounded-md border border-border p-2 text-muted-foreground hover:text-foreground" aria-label="Close analytics"><X className="h-4 w-4" /></button></div><div className="p-3 md:p-6">{chart}</div></div></>}
   </section>
 }

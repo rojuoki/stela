@@ -4,6 +4,8 @@ import { migrateLocalIoPostgres, startLocalIoPostgres } from "./local-io-postgre
 
 const require = createRequire(import.meta.url);
 require("@next/env").loadEnvConfig(process.cwd(), true);
+const webOnly = process.argv.includes("--web-only");
+const nextArguments = process.argv.slice(2).filter(argument => argument !== "--web-only");
 
 let stopping = false;
 let web;
@@ -45,12 +47,13 @@ function startWorker() {
 async function main() {
   database = await startLocalIoPostgres();
   migrateLocalIoPostgres();
-  web = spawn(process.execPath, [require.resolve("next/dist/bin/next"), "dev", ...process.argv.slice(2)], { stdio: ["inherit", "pipe", "pipe"] });
+  web = spawn(process.execPath, [require.resolve("next/dist/bin/next"), "dev", ...nextArguments], { stdio: ["inherit", "pipe", "pipe"] });
   web.stdout.on("data", chunk => process.stdout.write(chunk));
   web.stderr.on("data", chunk => process.stderr.write(chunk));
   web.on("error", () => { void stop(1); });
   web.on("exit", code => { void stop(code ?? 1); });
-  startWorker();
+  if (webOnly) console.log("[stela] Web-only mode; acquisition worker is not running");
+  else startWorker();
 }
 
 process.on("SIGINT", () => { void stop(); });

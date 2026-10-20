@@ -5,6 +5,7 @@ import {
   createIoUserWithPassword,
 } from "@/lib/io/auth";
 import { IoConfigurationError, ioConfigurationMessage } from "@/lib/io/configuration-error";
+import { enforceIoSignupRateLimit } from "@/lib/io/rate-limit";
 
 export const runtime = "nodejs";
 
@@ -14,6 +15,8 @@ function value(body: Record<string, unknown>, key: string): string {
 
 export async function POST(request: NextRequest) {
   try {
+    const limited = await enforceIoSignupRateLimit(request);
+    if (limited) return limited;
     const body = await request.json() as Record<string, unknown>;
     const email = value(body, "email");
     const password = value(body, "password");
