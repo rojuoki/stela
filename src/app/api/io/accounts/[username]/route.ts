@@ -4,8 +4,9 @@ import { ioPgQuery } from "@/lib/io/pg-db";
 import { normalizeIoUsername } from "@/lib/io/validation";
 import { ioConfigurationMessage } from "@/lib/io/configuration-error";
 
-import { getOrFetchIoProfile, IoProfileError } from "@/lib/io/profile";
+import { getCachedIoProfile, getOrFetchIoProfile, IoProfileError } from "@/lib/io/profile";
 import { getIoPublicPreviewState } from "@/lib/io/public-preview";
+import { ioLiveAcquisitionEnabled } from "@/lib/io/runtime-mode";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -14,8 +15,14 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
   const username = normalizeIoUsername((await params).username);
   if (!username) return NextResponse.json({ error: "Invalid username" }, { status: 400 });
   try {
+    const liveUnlockEnabled = ioLiveAcquisitionEnabled();
     const user = await getIoUserFromRequest(request);
-    const account = await getOrFetchIoProfile(username);
+    const account = liveUnlockEnabled
+      ? await getOrFetchIoProfile(username)
+      : await getCachedIoProfile(username);
+    if (!account) {
+      throw new IoProfileError("This account is not in the local preview cache. Start the live worker to fetch new accounts.", 404);
+    }
     const preview = await getIoPublicPreviewState(account.username);
     let boundary = 0;
     let ranges: unknown[] = [];
@@ -45,6 +52,7 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
       coveredPrefixCount: preview.coveredPrefixCount,
       previewComplete: preview.complete,
       previewRun: preview.run,
+      liveUnlockEnabled,
     });
   } catch (error) {
     if (error instanceof IoProfileError) return NextResponse.json({ error: error.message }, { status: error.status });

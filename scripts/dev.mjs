@@ -51,7 +51,11 @@ function startWorker() {
 async function main() {
   database = await startLocalIoPostgres();
   migrateLocalIoPostgres();
-  web = spawn(process.execPath, [require.resolve("next/dist/bin/next"), "dev", ...webArguments], { stdio: ["inherit", "pipe", "pipe"] });
+  const webEnvironment = { ...process.env, STELA_IO_WEB_ONLY: webOnly ? "1" : "0" };
+  web = spawn(process.execPath, [require.resolve("next/dist/bin/next"), "dev", ...webArguments], {
+    env: webEnvironment,
+    stdio: ["inherit", "pipe", "pipe"],
+  });
   web.stdout.on("data", chunk => process.stdout.write(chunk));
   web.stderr.on("data", chunk => process.stderr.write(chunk));
   web.on("error", () => { void stop(1); });

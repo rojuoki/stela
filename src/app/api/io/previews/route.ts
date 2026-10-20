@@ -5,6 +5,7 @@ import { enforceIoPreviewRateLimit } from "@/lib/io/rate-limit";
 import { ioLog } from "@/lib/io/log";
 import { normalizeIoUsername } from "@/lib/io/validation";
 import { wakeIoWorker } from "@/lib/io/worker-wake";
+import { ioLiveAcquisitionEnabled } from "@/lib/io/runtime-mode";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -27,6 +28,9 @@ export async function POST(request: NextRequest) {
       if (state.run && ["queued", "running"].includes(state.run.status)) {
         return NextResponse.json({ kind: "queued", run: state.run, reused: true }, { status: 202 });
       }
+    }
+    if (!ioLiveAcquisitionEnabled()) {
+      return NextResponse.json({ error: "New previews are disabled in safe preview mode." }, { status: 503 });
     }
     const limited = await enforceIoPreviewRateLimit(request);
     if (limited) return limited;

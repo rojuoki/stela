@@ -3,11 +3,15 @@ import { getIoUserFromRequest } from "@/lib/io/auth";
 import { requestIoPrefixUnlock } from "@/lib/io/prefix-service";
 import { normalizeIoUsername } from "@/lib/io/validation";
 import { wakeIoWorker } from "@/lib/io/worker-wake";
+import { ioLiveAcquisitionEnabled } from "@/lib/io/runtime-mode";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 export async function POST(request: NextRequest) {
+  if (!ioLiveAcquisitionEnabled()) {
+    return NextResponse.json({ error: "Live unlock is disabled in safe preview mode." }, { status: 503 });
+  }
   const user = await getIoUserFromRequest(request);
   if (!user) return NextResponse.json({ error: "Not authenticated" }, { status: 401 });
   let body: Record<string, unknown>;
