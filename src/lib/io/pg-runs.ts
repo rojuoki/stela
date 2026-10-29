@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { ioPgQuery, withIoPgTransaction } from "./pg-db";
 import type { PoolClient } from "pg";
+import { sanitizeIoPostgresText, stringifyIoPostgresJson } from "./postgres-sanitize";
 
 export type IoPgRunStatus = "queued" | "running" | "succeeded" | "failed" | "canceled";
 export type IoPgCollectionMode =
@@ -217,9 +218,9 @@ export async function updateIoPgRunProgress(input: {
        duplicate_count = COALESCE($8, duplicate_count), checkpoint_json = COALESCE($9::jsonb, checkpoint_json),
        lease_expires_at = NOW() + INTERVAL '90 seconds'
      WHERE id = $1 AND worker_id = $2 AND status = 'running'`,
-    [input.id, input.workerId, input.message ?? null, input.requestCount ?? null,
+    [input.id, input.workerId, input.message == null ? null : sanitizeIoPostgresText(input.message), input.requestCount ?? null,
       input.pageCount ?? null, input.uniqueCount ?? null, input.candidateCount ?? null,
-      input.duplicateCount ?? null, input.checkpoint == null ? null : JSON.stringify(input.checkpoint)],
+      input.duplicateCount ?? null, input.checkpoint == null ? null : stringifyIoPostgresJson(input.checkpoint)],
   );
   return result.rowCount === 1;
 }
@@ -257,7 +258,7 @@ export async function failIoPgRun(input: {
      SET status = 'failed', progress_message = $3, error_code = $4, error_message = $3,
          output_path = COALESCE($5, output_path), finished_at = NOW(), lease_expires_at = NULL
      WHERE id = $1 AND worker_id = $2 AND status = 'running'`,
-    [input.id, input.workerId, input.message, input.errorCode, input.outputPath ?? null],
+    [input.id, input.workerId, sanitizeIoPostgresText(input.message), input.errorCode, input.outputPath ?? null],
   );
 }
 

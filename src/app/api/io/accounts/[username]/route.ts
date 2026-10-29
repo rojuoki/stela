@@ -35,7 +35,7 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
         ranges = (await ioPgQuery('SELECT start_at AS "startAt", end_at AS "endAt" FROM user_range_unlocks WHERE user_id=$1 AND account_id=$2 ORDER BY unlocked_at DESC', [user.id, account.account_id])).rows;
       }
       latestRun = (await ioPgQuery(`SELECT id, username, status, collection_mode, progress_message,
-        unique_count, target_count, base_boundary, target_boundary, granted_boundary, error_message,
+        unique_count, target_count, base_boundary, target_boundary, granted_boundary, error_code, error_message,
         (result_json #>> '{result,status}' = 'EXPERIMENTAL_ACCOUNT_HAS_LESS_THAN_TARGET') AS "accountExhausted"
         FROM acquisition_runs WHERE requested_by_user_id=$1 AND LOWER(username)=LOWER($2)
         AND collection_mode IN ('prefix_initial','prefix_extend','prefix_grant') ORDER BY created_at DESC LIMIT 1`, [user.id, username])).rows[0] || null;

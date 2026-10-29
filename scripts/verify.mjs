@@ -13,6 +13,8 @@ const steps = [
   ["range planning", process.execPath, ["--import", "tsx", "scripts/test-io-range-planning.ts"]],
   ["IO route authorization", process.execPath, ["--import", "tsx", "scripts/test-io-ui-routes.ts"]],
   ["IO request rate limits", process.execPath, ["--import", "tsx", "scripts/test-io-rate-limit.ts"]],
+  ["PostgreSQL text sanitization", process.execPath, ["--import", "tsx", "scripts/test-io-postgres-sanitize.ts"]],
+  ["provider error classification", process.execPath, ["--import", "tsx", "scripts/test-io-provider-error.ts"]],
   ["worker coordinator", process.execPath, ["--import", "tsx", "scripts/test-io-worker-coordinator.ts"]],
   ["production build", npm, ["run", "build"]],
 ];

@@ -42,6 +42,8 @@
     "io:test:ui-routes": "node --import tsx scripts/test-io-ui-routes.ts",
     "io:test:auth-flow": "node --import tsx scripts/test-io-auth-flow.ts",
     "io:test:rate-limit": "node --import tsx scripts/test-io-rate-limit.ts",
+    "io:test:postgres-sanitize": "node --import tsx scripts/test-io-postgres-sanitize.ts",
+    "io:test:provider-error": "node --import tsx scripts/test-io-provider-error.ts",
     "io:test:integration": "node --import tsx scripts/test-io-integration-suite.ts"
   },
   "dependencies": {

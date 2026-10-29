@@ -3,6 +3,8 @@ import path from "node:path";
 import type { PoolClient } from "pg";
 import { computeIoCoverageFrontier, type IoCoverageInterval } from "./coverage-frontier";
 import { withIoPgTransaction } from "./pg-db";
+import { sanitizeIoPostgresText, stringifyIoPostgresJson } from "./postgres-sanitize";
+import { classifyIoProviderFailure } from "./provider-error";
 
 type RecordValue = Record<string, unknown>;
 
@@ -13,7 +15,7 @@ function records(value: unknown): RecordValue[] {
   return Array.isArray(value) ? value.map(record) : [];
 }
 function text(value: unknown): string | null {
-  return typeof value === "string" ? value : null;
+  return typeof value === "string" ? sanitizeIoPostgresText(value) : null;
 }
 function number(value: unknown): number {
   const parsed = Number(value ?? 0);
@@ -21,7 +23,7 @@ function number(value: unknown): number {
 }
 function jsonArray(value: unknown): string | null {
   // node-postgres encodes JS arrays as PostgreSQL arrays, not JSON.
-  return Array.isArray(value) && value.length ? JSON.stringify(value) : null;
+  return Array.isArray(value) && value.length ? stringifyIoPostgresJson(value) : null;
 }
 
 interface CompleteWindow extends IoCoverageInterval {
@@ -268,20 +270,21 @@ export async function importIoPgAcquisitionResult(
     }
     const terminalSuccess = runnerStatus === "EXPERIMENTAL_SUCCESS"
       || runnerStatus === "EXPERIMENTAL_ACCOUNT_HAS_LESS_THAN_TARGET";
+    const failure = terminalSuccess ? null : classifyIoProviderFailure(result.error);
     await client.query(
       `UPDATE acquisition_runs SET account_id = $2, username = $3,
          status = $4, progress_message = $5, request_count = $6, page_count = $7,
          unique_count = $8, candidate_count = $9, duplicate_count = $10,
          estimated_cost_usd = $11, result_json = $12::jsonb, output_path = $13,
-         error_message = $14, error_code = CASE WHEN $4 = 'failed' THEN 'runner_incomplete' ELSE NULL END,
+         error_message = $14, error_code = $15,
          finished_at = NOW(), lease_expires_at = NULL
        WHERE id = $1`,
       [run.id, accountId, username, terminalSuccess ? "succeeded" : "failed",
         terminalSuccess ? "Acquisition complete" : "Acquisition did not reach a terminal resolved result",
         number(metrics.total_requests ?? metrics.total_request_calls), number(metrics.total_pages),
         number(result.unique_post_count), candidateRows.length, number(metrics.duplicate_sightings),
-        number(metrics.estimated_cost_usd), JSON.stringify({ config, result, metrics }), absolutePath,
-        terminalSuccess ? null : text(result.error)],
+        number(metrics.estimated_cost_usd), stringifyIoPostgresJson({ config, result, metrics }), absolutePath,
+        failure?.message ?? null, failure?.code ?? null],
     );
     return { accountId, discarded: false, terminalSuccess, grantedBoundary };
   });

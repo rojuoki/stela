@@ -8,7 +8,7 @@ import { useIoSession } from "@/components/io/session";
 import { ioJson, ioPost } from "@/components/io/client";
 import type { TweetData } from "@/components/types";
 
-type Run = { id: string; status: string; username: string; collection_mode?: string; progress_message?: string | null; error_message?: string | null; unique_count?: number; candidate_count?: number; target_count?: number; base_boundary?: number | null; target_boundary?: number | null; granted_boundary?: number | null; accountExhausted?: boolean };
+type Run = { id: string; status: string; username: string; collection_mode?: string; progress_message?: string | null; error_code?: string | null; error_message?: string | null; unique_count?: number; candidate_count?: number; target_count?: number; base_boundary?: number | null; target_boundary?: number | null; granted_boundary?: number | null; accountExhausted?: boolean };
 type Range = { startAt: string; endAt: string };
 type RangeRequest = Range & { id: string; status: string; errorMessage?: string | null; run?: Run | null };
 type PendingUnlock = { range?: Range };
@@ -318,9 +318,12 @@ function Account({ username }: { username: string }) {
     statusMark = "●";
     statusTitle = run.progress_message ?? undefined;
   } else if (run?.status === "failed") {
-    statusMessage = `Unlock failed${confirmedCount ? ` · ${confirmedCount.toLocaleString("en-US")} posts saved` : ""}`;
-    statusTone = "text-red-400";
-    statusMark = "!";
+    const providerCreditUnavailable = run.error_code === "provider_credit_exhausted";
+    statusMessage = providerCreditUnavailable
+      ? `Unlock stopped · provider credit unavailable${confirmedCount ? ` · ${confirmedCount.toLocaleString("en-US")} posts saved` : ""}`
+      : `Unlock failed${confirmedCount ? ` · ${confirmedCount.toLocaleString("en-US")} posts saved` : ""}`;
+    statusTone = providerCreditUnavailable ? "text-amber-300" : "text-red-400";
+    statusMark = providerCreditUnavailable ? "■" : "!";
     statusTitle = run.error_message ?? undefined;
   } else if (run?.status === "canceled") {
     statusMessage = `Unlock canceled${confirmedCount ? ` · ${confirmedCount.toLocaleString("en-US")} posts saved` : ""}`;
