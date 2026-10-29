@@ -10,6 +10,10 @@ const hasBundlerArgument = nextArguments.some(argument =>
   argument === "--webpack" || argument === "--turbo" || argument === "--turbopack"
 );
 const webArguments = hasBundlerArgument ? nextArguments : ["--webpack", ...nextArguments];
+const localWorkerWakePort = process.env.STELA_IO_LOCAL_WORKER_WAKE_PORT || "55441";
+const localWorkerWakeSecret = process.env.STELA_IO_LOCAL_WORKER_WAKE_SECRET
+  || "stela-local-worker-wake-secret";
+const localWorkerWakeUrl = `http://127.0.0.1:${localWorkerWakePort}/wake`;
 
 let stopping = false;
 let web;
@@ -37,7 +41,14 @@ function startWorker() {
   if (stopping) return;
   console.log("[stela] Starting IO worker alongside the web server");
   const started = Date.now();
-  worker = spawn(process.execPath, ["--import", "tsx", "scripts/io-local-worker.ts"], { stdio: "inherit" });
+  worker = spawn(process.execPath, ["--import", "tsx", "scripts/io-local-worker.ts"], {
+    env: {
+      ...process.env,
+      PORT: localWorkerWakePort,
+      STELA_IO_WORKER_WAKE_SECRET: localWorkerWakeSecret,
+    },
+    stdio: "inherit",
+  });
   worker.on("error", () => { console.error("[stela] Cannot launch IO worker"); void stop(1); });
   worker.on("exit", () => {
     if (stopping) return;
@@ -51,7 +62,14 @@ function startWorker() {
 async function main() {
   database = await startLocalIoPostgres();
   migrateLocalIoPostgres();
-  const webEnvironment = { ...process.env, STELA_IO_WEB_ONLY: webOnly ? "1" : "0" };
+  const webEnvironment = {
+    ...process.env,
+    STELA_IO_WEB_ONLY: webOnly ? "1" : "0",
+    ...(!webOnly ? {
+      STELA_IO_WORKER_WAKE_URL: localWorkerWakeUrl,
+      STELA_IO_WORKER_WAKE_SECRET: localWorkerWakeSecret,
+    } : {}),
+  };
   web = spawn(process.execPath, [require.resolve("next/dist/bin/next"), "dev", ...webArguments], {
     env: webEnvironment,
     stdio: ["inherit", "pipe", "pipe"],
